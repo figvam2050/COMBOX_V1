@@ -1,0 +1,13 @@
+.pio
+.cache
+.vscode/.browse.c_cpp.db*
+.vscode/ipch
+
+# Machine-generated PlatformIO and VS Code metadata.
+# These files contain local toolchain/package paths and are regenerated locally.
+compile_commands.json
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+
+# Local factory backup used for recovery and reverse engineering.
+combobox_bkp_40000.bin

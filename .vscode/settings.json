@@ -1,0 +1,8 @@
+{
+    "clangd.arguments": [
+        "--query-driver=${userHome}/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-*"
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "&": true
+    }
+}
