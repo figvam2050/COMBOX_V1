@@ -1,6 +1,9 @@
 /**
  * BMS 485 to CAN Converter for Deye Inverter (Li Mode 00 - Vision/Megarevo)
  * Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
+ *
+ * CAN bus speed: 500 kbit/s, measured manually on real hardware (BTR = 0x030A0000).
+ * The 250 kbit/s value was never confirmed and is not a valid option.
  */
 
 #include "gd32f30x.h"
@@ -166,7 +169,21 @@ static void rs485_send_byte(uint8_t data) {
     ;
 }
 
+static void rs485_clear_errors(void) {
+  usart_flag_clear(USART0, USART_FLAG_ORERR);
+  usart_flag_clear(USART0, USART_FLAG_NERR);
+  usart_flag_clear(USART0, USART_FLAG_FERR);
+  usart_flag_clear(USART0, USART_FLAG_PERR);
+}
+
+static void rs485_flush_rx(void) {
+  while (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET)
+    (void)usart_data_receive(USART0); // залишкові байти обірваного кадру
+  rs485_clear_errors();
+}
+
 static void bms_send_query(uint8_t addr_index) {
+  rs485_flush_rx();
   uart_rx_index = 0;
   for (uint8_t i = 0; i < 8; i++)
     rs485_send_byte(BMS_QUERY_TABLE[addr_index][i]);
@@ -199,10 +216,7 @@ static uint16_t bms_receive_response(void) {
       wait_start = millis();
     }
   }
-  usart_flag_clear(USART0, USART_FLAG_ORERR);
-  usart_flag_clear(USART0, USART_FLAG_NERR);
-  usart_flag_clear(USART0, USART_FLAG_FERR);
-  usart_flag_clear(USART0, USART_FLAG_PERR);
+  rs485_clear_errors();
   return uart_rx_index;
 }
 
@@ -267,6 +281,16 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
                     (CELL_CHARGE_STOP_MV - CELL_TAPER_START_MV));
 }
 
+static void agg_reset(void) {
+  agg_voltage_sum = 0.0f;
+  agg_current_sum = 0.0f;
+  agg_soc_sum = 0;
+  agg_soh_sum = 0;
+  agg_temp_max = 0.0f;
+  agg_count = 0;
+  agg_max_cell_mv = 0;
+}
+
 static void bms_aggregate_data(void) {
   if (agg_count == 0)
     return;
@@ -282,13 +306,7 @@ static void bms_aggregate_data(void) {
   discharge_current_limit =
       DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * agg_count;
 
-  agg_voltage_sum = 0.0f;
-  agg_current_sum = 0.0f;
-  agg_soc_sum = 0;
-  agg_soh_sum = 0;
-  agg_temp_max = 0.0f;
-  agg_count = 0;
-  agg_max_cell_mv = 0;
+  agg_reset();
 }
 
 static void can_init_500k(void) {
@@ -382,13 +400,32 @@ static void send_all_frames(void) {
   send_can_std(CAN_ID_SOC, data, 4);
   memset(data, 0, 8);
   put_u16le(&data[0], (uint16_t)(bms_voltage * 100));
-  put_u16le(&data[2], (uint16_t)(bms_current * 10));
+  put_u16le(&data[2], (uint16_t)(int16_t)(bms_current * 10.0f));
   put_u16le(&data[4], (uint16_t)(bms_temp * 10));
   send_can_std(CAN_ID_STATUS, data, 6);
   memset(data, 0, 8);
   data[0] = 0xC0;
   send_can_std(CAN_ID_FLAGS, data, 2);
 }
+
+/* FWDGT — незалежний watchdog (LSI). SPL-джерела gd32f30x_fwdgt.c у проєкті нема,
+ * тому регістри пишуться напряму. FWDGT_PSC_DIV256 + RLD 400 →
+ * ≈3.13 с при LSI 32.768 кГц або ≈2.56 с при 40 кГц — запас над найгіршим
+ * проходом циклу (прийом ≤500 мс + CAN ≤40 мс). Після старту не вимикається. */
+static void watchdog_init(void) {
+  uint32_t spin;
+  FWDGT_CTL = FWDGT_WRITEACCESS_ENABLE;
+  FWDGT_PSC = FWDGT_PSC_DIV256;
+  for (spin = FWDGT_PSC_TIMEOUT; spin && (FWDGT_STAT & FWDGT_STAT_PUD); spin--)
+    ;
+  FWDGT_RLD = 400U;
+  for (spin = FWDGT_RLD_TIMEOUT; spin && (FWDGT_STAT & FWDGT_STAT_RUD); spin--)
+    ;
+  FWDGT_CTL = FWDGT_KEY_RELOAD;
+  FWDGT_CTL = FWDGT_KEY_ENABLE;
+}
+
+static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
 int main(void) {
   SystemInit();
@@ -398,12 +435,14 @@ int main(void) {
   leds_init();
   rs485_init();
   can_init_500k();
+  watchdog_init();
 
   uint32_t last_bms = 0, last_can = 0, led5_timer = 0, led4_timer = 0,
            led3_timer = 0;
   uint8_t current_addr_index = 0, led5_state = 0, led4_state = 0;
 
   while (1) {
+    watchdog_feed();
     uint32_t now = millis();
     if (now - last_bms >= BMS_POLL_PERIOD_MS) {
       last_bms = now;
@@ -421,6 +460,7 @@ int main(void) {
     }
 
     if (millis() - last_bms_response_ms > BMS_DEFAULT_TIMEOUT_MS) {
+      agg_reset(); // не змішувати старі накопичення з новими після відновлення
       bms_voltage = BATTERY_VOLTAGE_DEFAULT;
       bms_current = BATTERY_CURRENT_DEFAULT;
       bms_soc = BATTERY_SOC_DEFAULT;
