@@ -1,6 +1,12 @@
 /**
- * BMS 485 to CAN Converter for Deye Inverter (Li Mode 00 - Vision/Megarevo)
- * Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
+ * BMS 485 to CAN Converter for Deye Inverter (Lithium Mode 00 - Deye generic
+ * CAN / Pylontech). Hardware: GD32F305 + ISO1050 (CAN) + CA-IS3080WX (RS485)
+ *
+ * Frame set and layout follow "PCS CAN-Bus-protocol-DY-low-voltage V3.3" and
+ * "PYLON low voltage Protocol CAN Bus v2.0.6": standard frames, 500 kbit/s,
+ * cycle 1 s, BMS transmits 0x351/0x355/0x356/0x359/0x35C/0x35E.
+ * IDs 0x300..0x30F are reserved for the PCS downlink (0x305 is the inverter
+ * heartbeat) and must never be transmitted by the battery side.
  *
  * CAN bus speed: 500 kbit/s, measured manually on real hardware (BTR = 0x030A0000).
  * The 250 kbit/s value was never confirmed and is not a valid option.
@@ -68,11 +74,19 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_CHARGE_STOP_MV 3550
 #define CELL_CHARGE_REENABLE_MV 3500
 
-#define CAN_ID_HEARTBEAT 0x305
+// RS485 register units -> physical units. Confirm against the battery model.
+// reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
+//               0 = BMS reports discharge as positive (passed through).
+#define BMS_CURRENT_CHARGE_IS_POSITIVE 1
+// reg19 temperature raw divisor: 1 = reg 0x13 holds whole C (dump 08.10.2026).
+#define BMS_TEMP_RAW_DIV 1.0f
+
 #define CAN_ID_LIMITS 0x351
 #define CAN_ID_SOC 0x355
 #define CAN_ID_STATUS 0x356
+#define CAN_ID_PROTECT 0x359
 #define CAN_ID_FLAGS 0x35C
+#define CAN_ID_BRAND 0x35E
 
 #define UART_BMS USART0
 #define UART_BMS_RCU RCU_USART0
@@ -108,6 +122,9 @@ static float bms_current = BATTERY_CURRENT_DEFAULT;
 static uint8_t bms_soc = BATTERY_SOC_DEFAULT;
 static float bms_temp = BATTERY_TEMP_DEFAULT;
 static uint8_t bms_soh = BATTERY_SOH_DEFAULT;
+// Packs seen in the last full cycle; kept (not cleared) on comm loss so
+// 0x359 byte 4 stays the fixed system size the inverter expects.
+static uint8_t bms_pack_count = 0;
 
 static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
@@ -296,15 +313,18 @@ static void bms_aggregate_data(void) {
     return;
 
   bms_voltage = agg_voltage_sum / (float)agg_count;
-  bms_current = agg_current_sum;
+  // Deye PCS CAN V3.3: 0x356 current is discharge positive, charge negative.
+  bms_current = BMS_CURRENT_CHARGE_IS_POSITIVE ? -agg_current_sum
+                                               : agg_current_sum;
   bms_soc = (uint8_t)(agg_soc_sum / agg_count);
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
-  bms_temp = agg_temp_max;
+  bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
 
   charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
   charge_current_limit = calculate_charge_limit(agg_count);
   discharge_current_limit =
       DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * agg_count;
+  bms_pack_count = (uint8_t)agg_count;
 
   agg_reset();
 }
@@ -388,24 +408,37 @@ static void put_u16le(uint8_t *data, uint16_t value) {
 
 static void send_all_frames(void) {
   uint8_t data[8] = {0};
-  send_can_std(CAN_ID_HEARTBEAT, data, 8);
   put_u16le(&data[0], charge_voltage_limit);
   put_u16le(&data[2], charge_current_limit);
   put_u16le(&data[4], discharge_current_limit);
   put_u16le(&data[6], DISCHARGE_VOLTAGE_LIMIT_X10);
   send_can_std(CAN_ID_LIMITS, data, 8);
+
   memset(data, 0, 8);
   put_u16le(&data[0], bms_soc);
   put_u16le(&data[2], bms_soh);
   send_can_std(CAN_ID_SOC, data, 4);
+
   memset(data, 0, 8);
   put_u16le(&data[0], (uint16_t)(bms_voltage * 100));
   put_u16le(&data[2], (uint16_t)(int16_t)(bms_current * 10.0f));
-  put_u16le(&data[4], (uint16_t)(bms_temp * 10));
+  put_u16le(&data[4], (uint16_t)(int16_t)(bms_temp * 10));
   send_can_std(CAN_ID_STATUS, data, 6);
+
+  // No protection/alarm flags: bytes 0..3 clear, byte 7 is "not enabled".
+  // Byte 4 = number of packs in the system, bytes 5..6 = "PN" (brand check).
   memset(data, 0, 8);
-  data[0] = 0xC0;
+  data[4] = bms_pack_count;
+  data[5] = 'P';
+  data[6] = 'N';
+  send_can_std(CAN_ID_PROTECT, data, 8);
+
+  memset(data, 0, 8);
+  data[0] = 0xC0; // bit7 charge enable, bit6 discharge enable
   send_can_std(CAN_ID_FLAGS, data, 2);
+
+  static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
+  send_can_std(CAN_ID_BRAND, brand, 8);
 }
 
 /* FWDGT — незалежний watchdog (LSI). SPL-джерела gd32f30x_fwdgt.c у проєкті нема,
