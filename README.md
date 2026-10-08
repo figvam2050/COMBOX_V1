@@ -1,10 +1,18 @@
-# COM-Box — конвертер BMS RS485 → CAN (Deye / Vision Li Mode 00)
+# COM-Box — конвертер BMS RS485 → CAN (Deye, Lithium Mode 00 = Pylontech CAN)
 
 Проект PlatformIO для **GD32F305RCT6**: опитує BMS через RS485 (Modbus RTU, 9600)
 і віддає дані інвертору по CAN (11-бітні кадри). Єдине джерело коду — **`src/main.cpp`**
-(варіант від 08.10.2026: виправлено передачу **від'ємного струму** в кадрі 0x356
-(раніше перетворення float→uint давало 0 А під час розряду); раніше — блокери
+(варіант від 08.10.2026: **кадровий набір звірено з `PYLON low voltage Protocol
+CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибрано TX `0x305`
+(heartbeat інвертора), додано `0x359` (байт 4 = кількість пакетів, байти 5–6 = `'P''N'`)
+і `0x35E` = `"PYLON"`, знак струму «розряд + / заряд −» винесено в константу;
+раніше — виправлення передачі **від'ємного струму** в кадрі 0x356, блокери
 компіляції, max-cell taper, fail-closed ліміти; деталі нижче).
+
+> **📚 База знань по шинах Deye → [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md)**
+> (незмінний орієнтир, `chmod 444`): специфікації CAN-кадрів 0x351…0x35E, downlink
+> 0x300–0x30F/0x305, таблиця Lithium Mode (Inverter Setup 00–17), Modbus-реєстр 223,
+> RS485-розклад коробки і дані Vision V-LFP48100. Правила утримання — розділ 0 файлу.
 
 ---
 
@@ -13,6 +21,7 @@
 | Файл | Призначення |
 |---|---|
 | `src/main.cpp` | **увесь код прошивки** (env вимагає саме цієї назви) |
+| `DEYE_CAN_RS485_BASE.md` | **незмінна база знань** по CAN/RS485 Deye (`chmod 444`): кадри, Lithium Mode, Modbus, RS485-розклад, дані акумулятора |
 | `platformio.ini` | env `genericGD32F305`, `board = genericSTM32F103RC`, `framework = arduino`, `build_src_filter = +<main.cpp>` |
 | `GD32F305RC_COMBOX.ld` | лінкер: FLASH 256K @ 0x08000000, RAM 96K @ 0x20000000, SP = 0x20018000 |
 | `generate_hex.py` | `after_build` → копіює `firmware.bin/.hex` у `compiled_firmware/` |
@@ -30,7 +39,7 @@
 pio run          # збірка + generate_hex.py копіює результат у compiled_firmware/
 ```
 
-- **Останній результат (08.10.2026)**: `Flash 9304 Б (3.5%), RAM 1140 Б (2.3%)` — SUCCESS
+- **Останній результат (08.10.2026)**: `Flash 9360 Б (3.6%), RAM 1144 Б (2.3%)` — SUCCESS
   (попередження лише стандартне `ld: LOAD segment with RWX permissions`).
 - **⚠️ `pio run` перезаписує `compiled_firmware/firmware.bin/.hex`** — перед збіркою
   зробіть бекап, якщо поточний бінарник потрібен.
@@ -145,7 +154,7 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
    визначених у коді дефолтів. Додатково скидаються агрегати `agg_*` (`agg_reset()`,
    `main.cpp:463`) — після відновлення зв'язку перший цикл не змішує старі дані
    з моменту збою з новими.
-7. **CAN — раз на 1000 мс**, 5 кадрів послідовно.
+7. **CAN — раз на 1000 мс**, 6 кадрів послідовно.
 8. **Watchdog (FWDGT)**: `watchdog_init()` перед циклом (`main.cpp:415`) вмикає
    незалежний вартового з годинником LSI, prescaler DIV256 + reload 400 → таймаут
    ≈2.6–3.1 с (залежно від реальної частоти LSI 32.768/40 кГц). `watchdog_feed()`
@@ -160,11 +169,17 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 
 | ID | DLC | Payload |
 |---|---|---|
-| `0x305` | 8 | усі нулі (heartbeat) |
 | `0x351` | 8 | charge voltage limit (LE) / charge current limit / discharge current limit / discharge voltage limit = 450 (45.0 V) |
 | `0x355` | 4 | SOC (LE), SOH (LE) |
-| `0x356` | 6 | voltage ×100 (LE), current ×10 (LE), temp ×10 (LE) |
-| `0x35C` | 2 | `{0xC0, 0x00}` |
+| `0x356` | 6 | voltage ×100 (LE), current ×10 (LE, **розряд + / заряд −**), temp ×10 (LE) |
+| `0x359` | 8 | байти 0–3 = захист/аларми (0 = нема), **байт 4 = кількість пакетів**, байти 5–6 = `'P' 'N'`, байт 7 = 0 |
+| `0x35C` | 2 | `{0xC0, 0x00}` (біт 7 charge enable, біт 6 discharge enable) |
+| `0x35E` | 8 | `'P' 'Y' 'L' 'O' 'N' 0 0 0` (ASCII `PYLON`) |
+
+`0x305` **не передається** — це heartbeat самого PCS (інвертора); діапазон
+0x300–0x30F зарезервовано за downlink PCS→BMS (підтверджено ревізіями V1.2
+і V2.5 специфікації Deye: «0x300 conflicts with 0x305 sent by PCS»), а
+збіг ID дав би битову помилку CAN.
 
 `send_can_std()` (`main.cpp:354`):
 1. чекає **вільну скриньку** через `can_flag_get(CAN_FLAG_TME0/TME1/TME2)` максимум 5 мс,
@@ -209,8 +224,10 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 від'ємних значень повертає 0 (перевірено дизасемблюванням зібраного ELF) — під час
 розряду інвертор бачив 0.0 A. Замінено на `(uint16_t)(int16_t)(bms_current * 10.0f)`:
 конверсія іде через знаковий `__aeabi_f2iz` і зберігає знак у two's complement
-(підтверджено дизасемблюванням нової збірки: виклик `__aeabi_f2iz` — для струму,
-`__aeabi_f2uiz` лишається — для напруги/температури, вони завжди додатні).
+(підтверджено дизасемблюванням нової збірки: виклик `__aeabi_f2iz` — для струму
+**і температури** (у `0x356` обидва signed i16, 0.1 °C і 0.1 A, від'ємні значення
+закодовані two's complement), `__aeabi_f2uiz` лишається — для напруги, вона завжди
+додатня).
 
 **Виправлення 08.10.2026 — дренаж RX, скид агрегатів, watchdog:**
 
@@ -264,9 +281,21 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 
 ## 9. Що перевірено / що ні
 
-- ✅ Збірка `pio run` → SUCCESS (08.10.2026: 9304 Б Flash / 1140 Б RAM).
+- ✅ Збірка `pio run` → SUCCESS (08.10.2026: 9360 Б Flash / 1144 Б RAM).
+- ✅ Кадровий набір CAN звірено з двома специфікаціями (08.10.2026):
+  `PYLON low voltage Protocol CAN Bus v2.0.6` (§2.1.1–2.1.6) і
+  `PCS CAN-Bus-protocol-DY-low-voltage V3.3` (стор. 4–8) — однакові одиниці
+  0x351/0x355/0x356; **0x356 = «розряд + / заряд −»** (ревізія V2.5 Deye:
+  «The current direction in 0x356 … discharge is positive, charge is negative»);
+  **0x359**: байт 4 = кількість модулів у системі, байти 5–6 = `'P' 0x50 / 'N' 0x4E`
+  (те саме в заводській прошивці, `ORIGINAL_FIRMWARE.md` §8.4 `type = 4`);
+  **0x35E** = `'P''Y''L''O''N'` (§8.4 `type = 6`); **0x305 = heartbeat PCS**
+  (Deye rev 1.2: «0x300 conflicts with 0x305 sent by PCS») → TX прибрано.
+- ✅ Знак сирого струму BMS (специфікація Vision V-LFP48100 BMS: «positive when
+  charging, negative when discharging») → у CAN інвертується через
+  `BMS_CURRENT_CHARGE_IS_POSITIVE` (1 = інвертувати).
 - ✅ Від'ємний струм у кадрі 0x356: **виправлено** і перевірено дизасемблюванням
-  (струм іде через `__aeabi_f2iz`, напруга/температура — через `__aeabi_f2uiz`).
+  (струм і температура ідуть через `__aeabi_f2iz`, напруга — через `__aeabi_f2uiz`).
 - ✅ Дренаж RX перед запитом, скид `agg_*` при fail-closed, watchdog FWDGT:
   **введено** і перевірено дизасемблюванням (drain-цикл перед TX, `0x5555`/`0xCCCC`/
   `0xAAAA` у регістри FWDGT, `agg_reset()`).
@@ -319,8 +348,10 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 
 ### Пріоритет 3 — уточнення протоколу
 
-- [ ] **Q10.** Семантика `0x35C = {0xC0, 0x00}` у специфікації Li Mode 00;
-      чи коректні нулі в heartbeat `0x305`?
+- [x] **Q10.** Семантика `0x35C = {0xC0, 0x00}` у специфікації Li Mode 00 —
+      **закрито**: Pylontech v2.0.6 §2.1.5, біт 7 = charge enable, біт 6 = discharge
+      enable ✓. Heartbeat `0x305` — **прибрано з TX**: це кадр самого PCS
+      (діапазон 0x300–0x30F = downlink, Deye rev 1.2/V2.5).
 - [ ] **Q11.** Читати чи ні CAN-кадри від інвертора (фільтр accept-all, але RX
       не опитується)? Потрібні відповіді на запити інвертора?
 - [ ] **Q12.** RS485-трансивер CA-IS3080WX: автоматичне перемикання напрямку?
