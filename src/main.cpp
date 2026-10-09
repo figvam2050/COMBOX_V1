@@ -64,11 +64,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 533
-#define CHARGE_CURRENT_LIMIT_PER_PACK_X10 900
+#define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: 90 A/pack to 0 A between 3.400 V and 3.550 V.
+// Max-cell charge taper: 50 A/pack to 0 A between 3.400 V and 3.550 V.
 // Re-enabling below 3.500 V prevents charge-limit oscillation at the cutoff.
 #define CELL_TAPER_START_MV 3400
 #define CELL_CHARGE_STOP_MV 3550
