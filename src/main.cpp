@@ -102,21 +102,29 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DEYE_CAN_RX_PIN GPIO_PIN_8
 #define DEYE_CAN_TX_PIN GPIO_PIN_9
 
-// RS485 transceiver direction (DE and /RE of CA-IS3080WX tied together).
-// The factory firmware drives PC5 HIGH only while transmitting
-// (ORIGINAL_FIRMWARE.md sections 2.3 and 4.1), so PC5 must not be used as LED.
-#define RS485_DE_PORT GPIOC
-#define RS485_DE_PIN GPIO_PIN_5
+// RS485 transceivers have no DE/RE pin (auto-direction, ORIGINAL_FIRMWARE.md
+// §14.3): PC5 is NOT a direction pin — stock uses it as the PCS-CAN activity
+// LED (§14.7), so PC5 must not be driven during RS485 TX.
+// LED mapping follows the factory panel (ORIGINAL_FIRMWARE.md §14.7):
+//   PC4 = Running (static HIGH), PB1 = BMS-485 activity,
+//   PC5 = PCS-CAN activity, PC13+PB0 = PCS-485 pair (dual-gpio drive).
+#define LED_RUNNING_PORT GPIOC
+#define LED_RUNNING_PIN GPIO_PIN_4
+#define LED_BMS485_PORT GPIOB
+#define LED_BMS485_PIN GPIO_PIN_1
+#define LED_PCSCAN_PORT GPIOC
+#define LED_PCSCAN_PIN GPIO_PIN_5
+#define LED_PCS485_A_PORT GPIOC
+#define LED_PCS485_A_PIN GPIO_PIN_13
+#define LED_PCS485_B_PORT GPIOB
+#define LED_PCS485_B_PIN GPIO_PIN_0
 
-#define LED3_PORT GPIOC
-#define LED3_PIN GPIO_PIN_4
-// CAN ACK indicator (was PC5, which is the RS485 direction pin).
-#define LED4_PORT GPIOC
-#define LED4_PIN GPIO_PIN_13
-#define LED5_PORT GPIOB
-#define LED5_PIN GPIO_PIN_0
-#define LED6_PORT GPIOB
-#define LED6_PIN GPIO_PIN_1
+// Stock boot state for PB10 (PP HIGH) and PB11 (OD HIGH) — likely transceiver
+// enables (ORIGINAL_FIRMWARE.md §14.4); released HIGH like the factory firmware.
+#define TRANSCEIVER_ENA_PORT GPIOB
+#define TRANSCEIVER_ENA_PIN GPIO_PIN_10
+#define TRANSCEIVER_ENB_PORT GPIOB
+#define TRANSCEIVER_ENB_PIN GPIO_PIN_11
 
 static volatile uint32_t g_systick_ms = 0;
 static volatile uint8_t uart_rx_buffer[256];
@@ -145,9 +153,7 @@ static uint16_t charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
 static uint16_t discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
 
 static volatile uint32_t last_bms_response_ms = 0;
-static volatile uint32_t last_can_ack_ms = 0;
-static volatile uint32_t led6_timer = 0;
-static volatile uint8_t led6_state = 0;
+static uint32_t can_led_off_ms = 0;
 
 extern "C" void osSystickHandler(void) { g_systick_ms++; }
 static uint32_t millis(void) { return g_systick_ms; }
@@ -155,14 +161,32 @@ static uint32_t millis(void) { return g_systick_ms; }
 static void leds_init(void) {
   rcu_periph_clock_enable(RCU_GPIOB);
   rcu_periph_clock_enable(RCU_GPIOC);
-  gpio_init(LED3_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED3_PIN);
-  gpio_init(LED4_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED4_PIN);
-  gpio_init(LED5_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED5_PIN);
-  gpio_init(LED6_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED6_PIN);
-  gpio_bit_reset(LED3_PORT, LED3_PIN);
-  gpio_bit_reset(LED6_PORT, LED6_PIN);
-  gpio_bit_set(LED4_PORT, LED4_PIN);
-  gpio_bit_set(LED5_PORT, LED5_PIN);
+  // Running LED: steady ON (factory semantics).
+  gpio_init(LED_RUNNING_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_RUNNING_PIN);
+  gpio_bit_set(LED_RUNNING_PORT, LED_RUNNING_PIN);
+  // BMS-485 LED: ON while a poll is in flight.
+  gpio_init(LED_BMS485_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_BMS485_PIN);
+  gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+  // PCS-CAN LED: ON around each CAN burst, cleared ~100 ms after TX.
+  gpio_init(LED_PCSCAN_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_PCSCAN_PIN);
+  gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
+  // PCS-485 LED pair: dual-gpio drive, complementary; OFF = A LOW / B HIGH.
+  gpio_init(LED_PCS485_A_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_PCS485_A_PIN);
+  gpio_init(LED_PCS485_B_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_PCS485_B_PIN);
+  gpio_bit_reset(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
+  gpio_bit_set(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
+  // Transceiver enables: match factory boot state.
+  gpio_init(TRANSCEIVER_ENA_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            TRANSCEIVER_ENA_PIN);
+  gpio_bit_set(TRANSCEIVER_ENA_PORT, TRANSCEIVER_ENA_PIN);
+  gpio_init(TRANSCEIVER_ENB_PORT, GPIO_MODE_OUT_OD, GPIO_OSPEED_2MHZ,
+            TRANSCEIVER_ENB_PIN);
+  gpio_bit_set(TRANSCEIVER_ENB_PORT, TRANSCEIVER_ENB_PIN);
 }
 
 static void rs485_init(void) {
@@ -181,10 +205,6 @@ static void rs485_init(void) {
   usart_transmit_config(UART_BMS, USART_TRANSMIT_ENABLE);
   usart_receive_config(UART_BMS, USART_RECEIVE_ENABLE);
   usart_enable(UART_BMS);
-
-  rcu_periph_clock_enable(RCU_GPIOC);
-  gpio_init(RS485_DE_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, RS485_DE_PIN);
-  gpio_bit_reset(RS485_DE_PORT, RS485_DE_PIN); // receive by default
 }
 
 static void rs485_send_byte(uint8_t data) {
@@ -209,25 +229,11 @@ static void rs485_flush_rx(void) {
 static void bms_send_query(uint8_t addr_index) {
   rs485_flush_rx();
   uart_rx_index = 0;
-  gpio_bit_set(RS485_DE_PORT, RS485_DE_PIN); // driver on, receiver off
+  gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN); // poll in flight
+  // No DE pin on the transceiver (auto-direction, ORIGINAL_FIRMWARE.md §14.3):
+  // just shift the frame out; direction switches in hardware.
   for (uint8_t i = 0; i < 8; i++)
     rs485_send_byte(BMS_QUERY_TABLE[addr_index][i]);
-  // TBE only means the last byte moved to the shift register; wait for TC so
-  // the driver is not released in the middle of the final byte (9600 baud).
-  uint32_t tc_start = millis();
-  while (usart_flag_get(USART0, USART_FLAG_TC) == RESET &&
-         millis() - tc_start < 20)
-    ;
-  gpio_bit_reset(RS485_DE_PORT, RS485_DE_PIN); // back to receive
-  rs485_flush_rx();
-  if (millis() - led6_timer >= 500) {
-    led6_timer = millis();
-    led6_state = !led6_state;
-    if (led6_state)
-      gpio_bit_set(LED6_PORT, LED6_PIN);
-    else
-      gpio_bit_reset(LED6_PORT, LED6_PIN);
-  }
 }
 
 static uint16_t bms_receive_response(void) {
@@ -250,6 +256,7 @@ static uint16_t bms_receive_response(void) {
     }
   }
   rs485_clear_errors();
+  gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN); // poll finished
   return uart_rx_index;
 }
 
@@ -412,9 +419,6 @@ static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
     if (millis() - tx_start >= 3)
       return;
   }
-  if (can_transmit_states(DEYE_CAN, mbox) == CAN_TRANSMIT_OK) {
-    last_can_ack_ms = millis();
-  }
 }
 
 static int16_t round_to_i16(float v) {
@@ -427,6 +431,7 @@ static void put_u16le(uint8_t *data, uint16_t value) {
 }
 
 static void send_all_frames(void) {
+  gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // PCS-CAN activity
   uint8_t data[8] = {0};
   put_u16le(&data[0], charge_voltage_limit);
   put_u16le(&data[2], charge_current_limit);
@@ -459,6 +464,8 @@ static void send_all_frames(void) {
 
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
   send_can_std(CAN_ID_BRAND, brand, 8);
+
+  can_led_off_ms = millis() + 100; // keep the LED on briefly after TX
 }
 
 /* FWDGT — незалежний watchdog (LSI). SPL-джерела gd32f30x_fwdgt.c у проєкті нема,
@@ -490,9 +497,8 @@ int main(void) {
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms = 0, last_can = 0, led5_timer = 0, led4_timer = 0,
-           led3_timer = 0;
-  uint8_t current_addr_index = 0, led5_state = 0, led4_state = 0;
+  uint32_t last_bms = 0, last_can = 0, led_pcs485_timer = 0;
+  uint8_t current_addr_index = 0, led_pcs485_state = 0;
 
   while (1) {
     watchdog_feed();
@@ -501,11 +507,8 @@ int main(void) {
       last_bms = now;
       bms_send_query(current_addr_index);
       bms_receive_response();
-      if (bms_parse_response(current_addr_index + 1)) {
+      if (bms_parse_response(current_addr_index + 1))
         last_bms_response_ms = millis();
-        gpio_bit_set(LED3_PORT, LED3_PIN);
-        led3_timer = millis();
-      }
       if (++current_addr_index >= 16) {
         current_addr_index = 0;
         bms_aggregate_data();
@@ -528,33 +531,24 @@ int main(void) {
       last_can = now;
       send_all_frames();
     }
-    if (led3_timer && (millis() - led3_timer >= 50)) {
-      gpio_bit_reset(LED3_PORT, LED3_PIN);
-      led3_timer = 0;
+
+    // PCS-485 LED pair: free-run blink until the UART4 slave exists.
+    if (now - led_pcs485_timer >= 500) {
+      led_pcs485_timer = now;
+      led_pcs485_state = !led_pcs485_state;
+      if (led_pcs485_state) {
+        gpio_bit_set(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
+        gpio_bit_reset(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
+      } else {
+        gpio_bit_reset(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
+        gpio_bit_set(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
+      }
     }
 
-    if ((millis() - last_can_ack_ms) < 2000) {
-      if (millis() - led4_timer >= 250) {
-        led4_timer = millis();
-        led4_state = !led4_state;
-        if (led4_state)
-          gpio_bit_set(LED4_PORT, LED4_PIN);
-        else
-          gpio_bit_reset(LED4_PORT, LED4_PIN);
-      }
-    } else
-      gpio_bit_set(LED4_PORT, LED4_PIN);
-
-    if ((millis() - last_bms_response_ms) < 2000) {
-      if (millis() - led5_timer >= 500) {
-        led5_timer = millis();
-        led5_state = !led5_state;
-        if (led5_state)
-          gpio_bit_set(LED5_PORT, LED5_PIN);
-        else
-          gpio_bit_reset(LED5_PORT, LED5_PIN);
-      }
-    } else
-      gpio_bit_set(LED5_PORT, LED5_PIN);
+    // PCS-CAN LED: release ~100 ms after the last CAN burst.
+    if (can_led_off_ms && (int32_t)(millis() - can_led_off_ms) >= 0) {
+      gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
+      can_led_off_ms = 0;
+    }
   }
 }
