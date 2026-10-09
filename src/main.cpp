@@ -102,12 +102,17 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DEYE_CAN_RX_PIN GPIO_PIN_8
 #define DEYE_CAN_TX_PIN GPIO_PIN_9
 
-#define LED1_PORT GPIOC
-#define LED1_PIN GPIO_PIN_13
+// RS485 transceiver direction (DE and /RE of CA-IS3080WX tied together).
+// The factory firmware drives PC5 HIGH only while transmitting
+// (ORIGINAL_FIRMWARE.md sections 2.3 and 4.1), so PC5 must not be used as LED.
+#define RS485_DE_PORT GPIOC
+#define RS485_DE_PIN GPIO_PIN_5
+
 #define LED3_PORT GPIOC
 #define LED3_PIN GPIO_PIN_4
+// CAN ACK indicator (was PC5, which is the RS485 direction pin).
 #define LED4_PORT GPIOC
-#define LED4_PIN GPIO_PIN_5
+#define LED4_PIN GPIO_PIN_13
 #define LED5_PORT GPIOB
 #define LED5_PIN GPIO_PIN_0
 #define LED6_PORT GPIOB
@@ -130,7 +135,7 @@ static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
 static uint32_t agg_soc_sum = 0;
 static uint32_t agg_soh_sum = 0;
-static float agg_temp_max = 0.0f;
+static float agg_temp_max = -1000.0f;
 static uint8_t agg_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static bool charge_inhibit = false;
@@ -150,12 +155,10 @@ static uint32_t millis(void) { return g_systick_ms; }
 static void leds_init(void) {
   rcu_periph_clock_enable(RCU_GPIOB);
   rcu_periph_clock_enable(RCU_GPIOC);
-  gpio_init(LED1_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED1_PIN);
   gpio_init(LED3_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED3_PIN);
   gpio_init(LED4_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED4_PIN);
   gpio_init(LED5_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED5_PIN);
   gpio_init(LED6_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, LED6_PIN);
-  gpio_bit_reset(LED1_PORT, LED1_PIN);
   gpio_bit_reset(LED3_PORT, LED3_PIN);
   gpio_bit_reset(LED6_PORT, LED6_PIN);
   gpio_bit_set(LED4_PORT, LED4_PIN);
@@ -178,6 +181,10 @@ static void rs485_init(void) {
   usart_transmit_config(UART_BMS, USART_TRANSMIT_ENABLE);
   usart_receive_config(UART_BMS, USART_RECEIVE_ENABLE);
   usart_enable(UART_BMS);
+
+  rcu_periph_clock_enable(RCU_GPIOC);
+  gpio_init(RS485_DE_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, RS485_DE_PIN);
+  gpio_bit_reset(RS485_DE_PORT, RS485_DE_PIN); // receive by default
 }
 
 static void rs485_send_byte(uint8_t data) {
@@ -202,8 +209,17 @@ static void rs485_flush_rx(void) {
 static void bms_send_query(uint8_t addr_index) {
   rs485_flush_rx();
   uart_rx_index = 0;
+  gpio_bit_set(RS485_DE_PORT, RS485_DE_PIN); // driver on, receiver off
   for (uint8_t i = 0; i < 8; i++)
     rs485_send_byte(BMS_QUERY_TABLE[addr_index][i]);
+  // TBE only means the last byte moved to the shift register; wait for TC so
+  // the driver is not released in the middle of the final byte (9600 baud).
+  uint32_t tc_start = millis();
+  while (usart_flag_get(USART0, USART_FLAG_TC) == RESET &&
+         millis() - tc_start < 20)
+    ;
+  gpio_bit_reset(RS485_DE_PORT, RS485_DE_PIN); // back to receive
+  rs485_flush_rx();
   if (millis() - led6_timer >= 500) {
     led6_timer = millis();
     led6_state = !led6_state;
@@ -253,7 +269,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   uint16_t raw_voltage = (uart_rx_buffer[3] << 8) | uart_rx_buffer[4];
   int16_t raw_current = (int16_t)((uart_rx_buffer[5] << 8) | uart_rx_buffer[6]);
-  uint16_t raw_temp = (uart_rx_buffer[41] << 8) | uart_rx_buffer[42];
+  int16_t raw_temp = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
   uint16_t raw_soc = (uart_rx_buffer[45] << 8) | uart_rx_buffer[46];
   uint16_t raw_soh = (uart_rx_buffer[47] << 8) | uart_rx_buffer[48];
 
@@ -303,7 +319,7 @@ static void agg_reset(void) {
   agg_current_sum = 0.0f;
   agg_soc_sum = 0;
   agg_soh_sum = 0;
-  agg_temp_max = 0.0f;
+  agg_temp_max = -1000.0f;
   agg_count = 0;
   agg_max_cell_mv = 0;
 }
@@ -401,6 +417,10 @@ static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
   }
 }
 
+static int16_t round_to_i16(float v) {
+  return (int16_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+}
+
 static void put_u16le(uint8_t *data, uint16_t value) {
   data[0] = (uint8_t)(value & 0xFF);
   data[1] = (uint8_t)((value >> 8) & 0xFF);
@@ -420,9 +440,9 @@ static void send_all_frames(void) {
   send_can_std(CAN_ID_SOC, data, 4);
 
   memset(data, 0, 8);
-  put_u16le(&data[0], (uint16_t)(bms_voltage * 100));
-  put_u16le(&data[2], (uint16_t)(int16_t)(bms_current * 10.0f));
-  put_u16le(&data[4], (uint16_t)(int16_t)(bms_temp * 10));
+  put_u16le(&data[0], (uint16_t)round_to_i16(bms_voltage * 100.0f));
+  put_u16le(&data[2], (uint16_t)round_to_i16(bms_current * 10.0f));
+  put_u16le(&data[4], (uint16_t)round_to_i16(bms_temp * 10.0f));
   send_can_std(CAN_ID_STATUS, data, 6);
 
   // No protection/alarm flags: bytes 0..3 clear, byte 7 is "not enabled".
