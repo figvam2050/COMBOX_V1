@@ -59,20 +59,20 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define BATTERY_VOLTAGE_DEFAULT 52.2f
 #define BATTERY_CURRENT_DEFAULT 0.0f
 #define BATTERY_TEMP_DEFAULT 45.0f
-#define CHARGE_VOLTAGE_LIMIT_DEFAULT 533
+#define CHARGE_VOLTAGE_LIMIT_DEFAULT 540
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
-#define CHARGE_VOLTAGE_LIMIT_STATIC 533
+#define CHARGE_VOLTAGE_LIMIT_STATIC 540
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: 50 A/pack to 0 A between 3.400 V and 3.550 V.
-// Re-enabling below 3.500 V prevents charge-limit oscillation at the cutoff.
-#define CELL_TAPER_START_MV 3400
-#define CELL_CHARGE_STOP_MV 3550
-#define CELL_CHARGE_REENABLE_MV 3500
+// Max-cell charge taper: 50 A/pack to 0 A between 3.450 V and 3.600 V.
+// Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
+#define CELL_TAPER_START_MV 3450
+#define CELL_CHARGE_STOP_MV 3600
+#define CELL_CHARGE_REENABLE_MV 3550
 
 // RS485 register units -> physical units. Confirm against the battery model.
 // reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
