@@ -59,11 +59,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define BATTERY_VOLTAGE_DEFAULT 52.2f
 #define BATTERY_CURRENT_DEFAULT 0.0f
 #define BATTERY_TEMP_DEFAULT 45.0f
-#define CHARGE_VOLTAGE_LIMIT_DEFAULT 540
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 540
+#define CHARGE_VOLTAGE_LIMIT_DIP90 518
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
@@ -73,6 +73,12 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_TAPER_START_MV 3450
 #define CELL_CHARGE_STOP_MV 3600
 #define CELL_CHARGE_REENABLE_MV 3550
+#define CELL_TAPER_START_MV_DIP90 3400
+#define CELL_CHARGE_STOP_MV_DIP90 3455
+#define CELL_CHARGE_REENABLE_MV_DIP90 3405
+// 90% profile = LAST DIP switch ON (SW4, weight 8 => code 0b1000); stock SW1
+// (PYLON, code 1) stays on the default 100% profile.
+#define DIP_PROFILE_CODE_90 8
 
 // RS485 register units -> physical units. Confirm against the battery model.
 // reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
@@ -126,6 +132,10 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define TRANSCEIVER_ENB_PORT GPIOB
 #define TRANSCEIVER_ENB_PIN GPIO_PIN_11
 
+#define DIP_GPIO_PORT GPIOB
+#define DIP_GPIO_RCU RCU_GPIOB
+#define DIP_GPIO_PINS (GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15)
+
 static volatile uint32_t g_systick_ms = 0;
 static volatile uint8_t uart_rx_buffer[256];
 static volatile uint16_t uart_rx_index = 0;
@@ -148,9 +158,14 @@ static uint8_t agg_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static bool charge_inhibit = false;
 
-static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DEFAULT;
+static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
 static uint16_t charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
 static uint16_t discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
+
+static uint16_t profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
+static uint16_t profile_taper_start_mv = CELL_TAPER_START_MV;
+static uint16_t profile_charge_stop_mv = CELL_CHARGE_STOP_MV;
+static uint16_t profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 
 static volatile uint32_t last_bms_response_ms = 0;
 static uint32_t can_led_off_ms = 0;
@@ -303,22 +318,22 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
       (uint32_t)CHARGE_CURRENT_LIMIT_PER_PACK_X10 * pack_count;
 
   if (charge_inhibit) {
-    if (agg_max_cell_mv >= CELL_CHARGE_REENABLE_MV)
+    if (agg_max_cell_mv >= profile_charge_reenable_mv)
       return 0;
     charge_inhibit = false;
   }
 
-  if (agg_max_cell_mv >= CELL_CHARGE_STOP_MV) {
+  if (agg_max_cell_mv >= profile_charge_stop_mv) {
     charge_inhibit = true;
     return 0;
   }
 
-  if (agg_max_cell_mv <= CELL_TAPER_START_MV)
+  if (agg_max_cell_mv <= profile_taper_start_mv)
     return (uint16_t)max_current_x10;
 
   return (uint16_t)(max_current_x10 *
-                    (CELL_CHARGE_STOP_MV - agg_max_cell_mv) /
-                    (CELL_CHARGE_STOP_MV - CELL_TAPER_START_MV));
+                    (profile_charge_stop_mv - agg_max_cell_mv) /
+                    (profile_charge_stop_mv - profile_taper_start_mv));
 }
 
 static void agg_reset(void) {
@@ -343,7 +358,7 @@ static void bms_aggregate_data(void) {
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
 
-  charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
+  charge_voltage_limit = profile_charge_voltage_limit;
   charge_current_limit = calculate_charge_limit(agg_count);
   discharge_current_limit =
       DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * agg_count;
@@ -487,22 +502,72 @@ static void watchdog_init(void) {
 
 static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
+static uint8_t dip_applied_code = 0xFF;
+static uint8_t dip_last_code = 0;
+static uint8_t dip_stable_reads = 0;
+
+static uint8_t dip_read_code(void) {
+  return (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
+}
+
+static void dip_charge_profile_apply(uint8_t code) {
+  if (code == DIP_PROFILE_CODE_90) {
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DIP90;
+    profile_taper_start_mv = CELL_TAPER_START_MV_DIP90;
+    profile_charge_stop_mv = CELL_CHARGE_STOP_MV_DIP90;
+    profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV_DIP90;
+  } else {
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
+    profile_taper_start_mv = CELL_TAPER_START_MV;
+    profile_charge_stop_mv = CELL_CHARGE_STOP_MV;
+    profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+  }
+  charge_voltage_limit = profile_charge_voltage_limit;
+  dip_applied_code = code;
+}
+
+static void dip_charge_profile_init(void) {
+  rcu_periph_clock_enable(DIP_GPIO_RCU);
+  gpio_init(DIP_GPIO_PORT, GPIO_MODE_IPU, GPIO_OSPEED_2MHZ, DIP_GPIO_PINS);
+  dip_last_code = dip_read_code();
+  dip_stable_reads = 2;
+  dip_charge_profile_apply(dip_last_code);
+}
+
+static void dip_charge_profile_poll(void) {
+  uint8_t code = dip_read_code();
+  if (code != dip_last_code) {
+    dip_last_code = code;
+    dip_stable_reads = 0;
+    return;
+  }
+  if (dip_stable_reads < 2)
+    dip_stable_reads++;
+  if (dip_stable_reads >= 2 && code != dip_applied_code)
+    dip_charge_profile_apply(code);
+}
+
 int main(void) {
   SystemInit();
   if (SysTick_Config(SystemCoreClock / 1000U))
     while (1)
       ;
+  dip_charge_profile_init();
   leds_init();
   rs485_init();
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms = 0, last_can = 0, led_pcs485_timer = 0;
+  uint32_t last_bms = 0, last_can = 0, led_pcs485_timer = 0, last_dip_poll = 0;
   uint8_t current_addr_index = 0, led_pcs485_state = 0;
 
   while (1) {
     watchdog_feed();
     uint32_t now = millis();
+    if (now - last_dip_poll >= 250) {
+      last_dip_poll = now;
+      dip_charge_profile_poll();
+    }
     if (now - last_bms >= BMS_POLL_PERIOD_MS) {
       last_bms = now;
       bms_send_query(current_addr_index);
@@ -522,7 +587,7 @@ int main(void) {
       bms_soc = BATTERY_SOC_DEFAULT;
       bms_soh = BATTERY_SOH_DEFAULT;
       bms_temp = BATTERY_TEMP_DEFAULT;
-      charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DEFAULT;
+      charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
     }
