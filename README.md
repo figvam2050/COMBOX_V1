@@ -27,9 +27,10 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 |---|---|
 | `src/main.cpp` | **увесь код прошивки** (env вимагає саме цієї назви) |
 | `DEYE_CAN_RS485_BASE.md` | **незмінна база знань** по CAN/RS485 Deye (`chmod 444`): кадри, Lithium Mode, Modbus, RS485-розклад, дані акумулятора |
-| `platformio.ini` | env `genericGD32F305`, `board = genericSTM32F103RC`, `framework = arduino`, `build_src_filter = +<main.cpp>` |
+| `platformio.ini` | env `genericGD32F305` (автономна @0x08000000) + env `genericGD32F305_app` (під стоковим bootloader'ом @0x08004000); `board = genericSTM32F103RC`, `framework = arduino`, `build_src_filter = +<main.cpp>` |
 | `GD32F305RC_COMBOX.ld` | лінкер: FLASH 256K @ 0x08000000, RAM 96K @ 0x20000000, SP = 0x20018000 |
-| `generate_hex.py` | `after_build` → копіює `firmware.bin/.hex` у `compiled_firmware/` |
+| `GD32F305RC_COMBOX_APP.ld` | той самий, але FLASH 192K @ **0x08004000** — регіон застосунку стокового bootloader'а (`0x08000000..0x08003FFF` не чіпається) |
+| `generate_hex.py` | `after_build` → копіює `firmware.bin/.hex` у `compiled_firmware/` (для `_app` — у `compiled_firmware_app/` і додатково прописує магію `G5RC` на зсуві 0x150) |
 | `lib/GD32F30x/` | SPL-бібліотека (CAN/USART/GPIO/RCU) |
 | `compiled_firmware/` | архів збірок; містить поточну збірку `firmware.bin/.hex` (09.10.2026), старі версії видалено |
 
@@ -41,8 +42,20 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 ## 2. Збірка
 
 ```bash
-pio run          # збірка + generate_hex.py копіює результат у compiled_firmware/
+pio run          # обидва env: збірка + generate_hex.py копіює результат у compiled_firmware*/
+pio run -e genericGD32F305      # лише автономна збірка (перезаписує compiled_firmware/)
+pio run -e genericGD32F305_app  # лише образ під стоковим bootloader'ом (compiled_firmware_app/)
 ```
+
+- **Два режими прошивки** *(додано 10.10.2026)*:
+  - `genericGD32F305` — автономний образ на 0x08000000, **стирає стоковий bootloader**
+    (повне відновлення: `combobox_bkp_40000.bin` → 0x08000000 через ST-Link);
+  - `genericGD32F305_app` — образ на **0x08004000**: ST-Link пише лише регіон застосунку,
+    bootloader `0x08000000..0x08003FFF` зберігається. `generate_hex.py` перед копіюванням
+    прописує dword `G5RC` на зсуві **0x150** (bootloader перевіряє `0x08004150` і
+    `(SP & 0x2FFE0000)==0x20000000`; `VECT_TAB_OFFSET=0x4000` вибирається через
+    `board_build.flash_offset`) — збірка валідована скриптом (SP pass, магія в .bin і .hex,
+    слоти векторів > 84 нульові). Деталі каналу оновлення — `original_firmware/ORIGINAL_FIRMWARE.md` §13.9.
 
 - **Останній результат (09.10.2026, LED-ітерація)**: `Flash 9332 Б (3.6%), RAM 1140 Б (2.3%)` — SUCCESS
   (попередження лише стандартне `ld: LOAD segment with RWX permissions`).
