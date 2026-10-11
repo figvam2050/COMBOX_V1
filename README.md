@@ -4,7 +4,7 @@
 і віддає дані інвертору по CAN (11-бітні кадри). Єдине джерело коду — **`src/main.cpp`**
 (варіант від 09.10.2026 (другий): **LED за заводською панеллю** — PC4 = Running
 (HIGH), PB1 = BMS-485, PC5 = PCS-CAN (прибрано DE/RE — трансівери авто-напрямку,
-`ORIGINAL_FIRMWARE.md` §14.3/§14.7), PC13+PB0 = пара PCS-485, PB10/PB11 =
+`original_firmware/ORIGINAL_FIRMWARE.md` §14.3/§14.7), PC13+PB0 = пара PCS-485, PB10/PB11 =
 enable-входи як у стоку; CVL 54.0 В за даташитом Vision; температура парситься
 як `int16_t` (`agg_temp_max = -1000`), значення `0x356` округлюються;
 варіант від 08.10.2026: **кадровий набір звірено з `PYLON low voltage Protocol
@@ -18,6 +18,18 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 > (незмінний орієнтир, `chmod 444`): специфікації CAN-кадрів 0x351…0x35E, downlink
 > 0x300–0x30F/0x305, таблиця Lithium Mode (Inverter Setup 00–17), Modbus-реєстр 223,
 > RS485-розклад коробки і дані Vision V-LFP48100. Правила утримання — розділ 0 файлу.
+
+**Документація проєкту:**
+
+| Документ | Зміст |
+|---|---|
+| [`README.md`](README.md) | цей файл: прошивка COM-Box, збірка, піни, CAN-кадри, чек-ліст Q1–Q25 |
+| [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | база знань CAN/RS485 Deye (див. вище) |
+| [`original_firmware/ORIGINAL_FIRMWARE.md`](original_firmware/ORIGINAL_FIRMWARE.md) | повний розбір стокової прошивки Felicity Solar G5RC |
+| [`can_sniffer/README.md`](can_sniffer/README.md) | пасивний CAN-сніффер для ESP32/Nano (TWAI/MCP2515, 500 kbit/s) |
+| [`tools/rs485_sniff.py`](tools/rs485_sniff.py) | пасивний RS485-снифер батарейної шини (див. §2) |
+| [`tools/verify_dump.py`](tools/verify_dump.py) | регресія парсера BMS (див. §2) |
+| [`аналіз.md`](аналіз.md) | історичний глибокий read-only аналіз проєкту (09.10.2026) |
 
 ---
 
@@ -33,6 +45,8 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 | `generate_hex.py` | `after_build` → копіює `firmware.bin/.hex` у `compiled_firmware/` (для `_app` — у `compiled_firmware_app/` і додатково прописує магію `G5RC` на зсуві 0x150) |
 | `lib/GD32F30x/` | SPL-бібліотека (CAN/USART/GPIO/RCU) |
 | `compiled_firmware/` | архів збірок; містить поточну збірку `firmware.bin/.hex` (09.10.2026), старі версії видалено |
+| `tools/rs485_sniff.py` | пасивний RS485-снифер шини батарей (Modbus RTU + декод Vision) — див. §2 |
+| `can_sniffer/` | пасивний CAN-сніффер для ESP32 (TWAI listen-only) і Arduino Nano — див. `can_sniffer/README.md` |
 
 Старі джерела (`main_dpsk7`, `main_dpsk7.1`, `main_dpsk8`, `main_dpsk9`) та всі
 збережені раніше бінарники видалено — історія лишилась тільки в цьому документі.
@@ -94,6 +108,27 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
   `FE CA`/`89 BD`). **`--selftest` перевіряє їх автоматично** —
   після правки парсера запускати саме `--selftest`.
 
+### RS485-снифер батарейної шини (`tools/rs485_sniff.py`)
+
+Пасивний (read-only) снифер Modbus RTU на шині батарей: декодує опит інвертора
+(`FC03 0x00 qty=28`, `FC03 0x50 qty=2`) і нашого box (`qty=0x27`), мапу Vision
+(V/I/комірки/t/SOC/SOH/r17..r26), модельний ASCII; пише у
+`deye/rs485_sniff_<timestamp>.log` (формат рядків — як у логу 09.10.2026).
+
+```bash
+python3 tools/rs485_sniff.py --list                       # порти
+python3 tools/rs485_sniff.py --port /dev/cu.usbserial-XXX # 9600 8N1, Ctrl-C → підсумок
+python3 tools/rs485_sniff.py --selftest                   # синтетичні кадри
+```
+
+- Framing по паузі 8 мс, CRC-валідація, ресинк; **валідований реплеєм логу
+  09.10.2026: 1291/1291 рядків декодуються ідентично**.
+- Сценарій нового пака: DIP унікальна адреса (0x03) → підключити одного →
+  заряд із запущеним снифером (закриває Q17/Q18) → ΔU < 0.5 В → паралельнити.
+- CAN-сніффер для шини інвертора (ESP32 + SN65HVD230, listen-only) — окремий
+  проєкт `can_sniffer/` (11.10.2026 прошито плату; план MQTT → Home Assistant —
+  див. `can_sniffer/README.md`).
+
 ---
 
 ## 3. Годинник і шини (перевірено дизасемблюванням / даташитом)
@@ -116,14 +151,14 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 |---|---|---|---|
 | RS485 TX | PA9 | AF PP | `UART_BMS` = USART0, 9600 |
 | RS485 RX | PA10 | Input floating | polling, без IRQ/DMA |
-| RS485 DE/RE | — | **відсутній** | трансівери авто-напрямку (без DE/RE, `ORIGINAL_FIRMWARE.md` §14.3); PC5 — це LED CAN, не DE (**з 09.10.2026, LED-ітерація**; раніше DE ганявся на PC5 — помилка) |
+| RS485 DE/RE | — | **відсутній** | трансівери авто-напрямку (без DE/RE, `original_firmware/ORIGINAL_FIRMWARE.md` §14.3); PC5 — це LED CAN, не DE (**з 09.10.2026, LED-ітерація**; раніше DE ганявся на PC5 — помилка) |
 | CAN RX | PB8 | Input pull-up | `GPIO_CAN_PARTIAL_REMAP` |
 | CAN TX | PB9 | AF PP | CAN0 |
-| Running LED | PC4 | OUT PP | **постійно HIGH** зі старту (семантика заводської панелі, `ORIGINAL_FIRMWARE.md` §14.7) |
+| Running LED | PC4 | OUT PP | **постійно HIGH** зі старту (семантика заводської панелі, `original_firmware/ORIGINAL_FIRMWARE.md` §14.7) |
 | BMS-485 LED | PB1 | OUT PP | HIGH поки полінг BMS у польоті (запит → прийом), LOW між циклами |
 | PCS-CAN LED | PC5 | OUT PP | HIGH на час CAN-бласти `send_all_frames()` + ~100 мс після (`can_led_off_ms`) |
 | PCS-485 LED | PC13+PB0 | OUT PP | **пара** (подвійний привід одного LED: A=HIGH/B=LOW = ON); вільний блінк 1 с до появи UART4-слейва |
-| Transceiver EN | PB10 / PB11 | OUT PP / OUT OD | стартовий стан як у стоку (HIGH/HIGH-OD) — можливі enable-входи трансісерів (`ORIGINAL_FIRMWARE.md` §14.4) |
+| Transceiver EN | PB10 / PB11 | OUT PP / OUT OD | стартовий стан як у стоку (HIGH/HIGH-OD) — можливі enable-входи трансісерів (`original_firmware/ORIGINAL_FIRMWARE.md` §14.4) |
 | PC3 | — | **не налаштовується** | не читається/не пишеться в коді |
 | DIP (PB12…PB15) | IN pull-up | профіль заряду: код 8 (останній SW4) → 90%, решта → 100% (§5, §7) |
 
@@ -142,7 +177,7 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
    `10 03 00 00 00 27 06 91`. **Перед кожним запитом `rs485_flush_rx()`** викидає
    залишкові байти обірваного кадру з RX-буфера і знімає помилки приймача —
    інакше старі байти ламають CRC наступного циклу цієї адреси. **DE/RE немає**:
-   трансівер авто-напрямку (`ORIGINAL_FIRMWARE.md` §14.3), код просто відправляє
+   трансівер авто-напрямку (`original_firmware/ORIGINAL_FIRMWARE.md` §14.3), код просто відправляє
    8 байт (PB1 LED HIGH на час польоту запиту). Після 16-ї адреси —
    `bms_aggregate_data()`.
 3. **Прийом** `bms_receive_response()`:
@@ -220,7 +255,7 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 3. чекає виходу з `CAN_TRANSMIT_PENDING` максимум 3 мс;
 4. **PCS-CAN LED (PC5)**: `send_all_frames()` піднімає PC5 перед бластом і планує
    зняття через ~100 мс (`can_led_off_ms`) — семантика «ON = відправляємо»
-   (`ORIGINAL_FIRMWARE.md` §14.7). Старий `last_can_ack_ms` (LED4 «фактичний ACK»)
+   (`original_firmware/ORIGINAL_FIRMWARE.md` §14.7). Старий `last_can_ack_ms` (LED4 «фактичний ACK»)
    прибрано в LED-ітерації 09.10.2026 разом із DE/RE на PC5.
 
 `can_init_500k()` (`main.cpp:348`): `auto_bus_off_recovery = ENABLE`,
@@ -232,7 +267,7 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 
 Версія від 10.10.2026 — **DIP-профіль напруги заряду**: банк DIP (PB15…PB12,
 pull-up, активний низький, ваги 8-4-2-1 — той самий, що сток читає на
-адресу/протокол, `ORIGINAL_FIRMWARE.md` §14.4; у нашій прошивці раніше не
+адресу/протокол, `original_firmware/ORIGINAL_FIRMWARE.md` §14.4; у нашій прошивці раніше не
 задіявся) читається один раз при старті (`dip_charge_profile_init()`). Коди:
 **`0` (усі OFF) → 54.0 В = 100%, `8` (останній перемикач SW4, вага 8) → 51.8 В ≈ 90%**
 (3.45 В/комірку; 51.75 не вміщується у крок 0.1 В кадра 0x351 — округлено до 518),
@@ -263,11 +298,11 @@ ST-Link пише тільки регіон застосунку, bootloader `0x0
 (підтверджено дизасемблюванням `SystemInit`), `generate_hex.py` прописує `G5RC`
 у `.bin`/`.hex` перед копіюванням (слоти векторів 84…119 у стартапі нульові —
 патч безпечний; перевірено: SP pass, bin≡hex, 9832 Б ≤ 192K, самотест OK).
-Автономний env `genericGD32F305` лишається дефолтним. Деталі — `ORIGINAL_FIRMWARE.md`
+Автономний env `genericGD32F305` лишається дефолтним. Деталі — `original_firmware/ORIGINAL_FIRMWARE.md`
 §13.9; попередження для шини (BMS-485 приймає `G5RC`-кадри оновлення) — у КБ.
 
 Версія від 09.10.2026 (друга — LED-ітерація): RE заводської прошивки + інструкція
-коробки (`ORIGINAL_FIRMWARE.md` §14) показали, що **PC5 — це LED «PCS-CAN Connect»,
+коробки (`original_firmware/ORIGINAL_FIRMWARE.md` §14) показали, що **PC5 — це LED «PCS-CAN Connect»,
 а не RS485 DE/RE** — трансівери авто-напрямку (DE/RE у коді заводу відсутні взагалі).
 Тому: прибрано керування DE на PC5 (раніше того ж дня введене — **помилкове**), PC5
 поставлено як LED CAN (HIGH на час бласти + 100 мс). LED перенесено під заводську
@@ -341,7 +376,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
 
 - ~~**PC5 — керування напрямком RS485**~~ — **скасовано того ж дня LED-ітерацією**:
   RE + інструкція показали, що PC5 = LED «PCS-CAN», DE/RE у трансіверів нема
-  (авто-напрямок, `ORIGINAL_FIRMWARE.md` §14.3/§14.7). Див. абзац «LED-ітерація»
+  (авто-напрямок, `original_firmware/ORIGINAL_FIRMWARE.md` §14.3/§14.7). Див. абзац «LED-ітерація»
   у §7 вище.
 - **`raw_temp` → `int16_t`**, `agg_temp_max` стартує з `-1000.0f` (і в макросі
   агрегатів, і в `agg_reset`): раніше `uint16_t` з 0xFFxx (від'ємна температура)
@@ -372,7 +407,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
 5. **PC3** не читається; **PC4 = Running LED** (статичний HIGH,
    не вхід); DIP у нашій прошивці = профіль заряду (90% — тільки останній SW4,
    код 8; перший SW1 значення не має), у стоку — вибір протоколу FLS/PYLON
-   + Modbus-адреса (`ORIGINAL_FIRMWARE.md` §14.7, §4.6).
+   + Modbus-адреса (`original_firmware/ORIGINAL_FIRMWARE.md` §14.7, §4.6).
 6. Ліміти оновлюються раз на повний цикл (≈3.2 с): між вибірками max-cell taper
    використовує останній повний CRC-валідний цикл.
 7. ~~**Дані комірок**: 15 vs 16 комірок~~ — **вирішено дампом (08.10.2026)**:
@@ -384,7 +419,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
 8. `.vscode/c_cpp_properties.json` у `.gitignore` — фіксація порожніх `""` локальна
    і в git не потрапить (див. §2).
 9. ~~**PC5 як DE/RE**~~ — **закрито (09.10.2026, LED-ітерація)**: PC5 = LED «PCS-CAN»,
-   DE/RE у трансісерів нема (`ORIGINAL_FIRMWARE.md` §14.3/§14.7); керування DE
+   DE/RE у трансісерів нема (`original_firmware/ORIGINAL_FIRMWARE.md` §14.3/§14.7); керування DE
    прибрано з коду. Залишилось перевірити на живій платі лише PB10/PB11
    (можливі enable-входи; зараз виставлені як у стоку).
 
@@ -395,7 +430,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
 - ✅ Збірка `pio run` → SUCCESS (09.10.2026, LED-ітерація: 9332 Б Flash / 1140 Б RAM).
 - ✅ LED-ітерація 09.10.2026: PC5 = LED CAN (DE/RE прибрано — авто-напрямок),
   PC4/PB1/PC13+PB0/PC5 під заводську панель, PB10/PB11 як у стоку; збірка без
-  помилок, `--selftest` OK (`ORIGINAL_FIRMWARE.md` §14.3/§14.7).
+  помилок, `--selftest` OK (`original_firmware/ORIGINAL_FIRMWARE.md` §14.3/§14.7).
 - ✅ ~~Керування DE/RE RS485 на PC5~~ (09.10.2026, раніше того ж дня) — скасовано
   LED-ітерацією вище; історично: збірка без помилок, `--selftest` OK.
 - ✅ `int16_t` температура + `agg_temp_max = -1000` + округлення `0x356`
@@ -410,7 +445,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
   0x351/0x355/0x356; **0x356 = «розряд + / заряд −»** (ревізія V2.5 Deye:
   «The current direction in 0x356 … discharge is positive, charge is negative»);
   **0x359**: байт 4 = кількість модулів у системі, байти 5–6 = `'P' 0x50 / 'N' 0x4E`
-  (те саме в заводській прошивці, `ORIGINAL_FIRMWARE.md` §8.4 `type = 4`);
+  (те саме в заводській прошивці, `original_firmware/ORIGINAL_FIRMWARE.md` §8.4 `type = 4`);
   **0x35E** = `'P''Y''L''O''N'` (§8.4 `type = 6`); **0x305 = heartbeat PCS**
   (Deye rev 1.2: «0x300 conflicts with 0x305 sent by PCS») → TX прибрано.
 - ✅ Знак сирого струму BMS (специфікація Vision V-LFP48100 BMS: «positive when
@@ -478,7 +513,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
       не опитується)? Потрібні відповіді на запити інвертора?
 - [x] **Q12.** RS485-трансивер: автоматичне перемикання напрямку? —
       **пере-відкрито (09.10.2026, LED-ітерація): так**, авто-напрямок: у заводській
-      прошивці керування DE/RE **відсутнє взагалі** (29 GPIO-викликів, `ORIGINAL_FIRMWARE.md`
+      прошивці керування DE/RE **відсутнє взагалі** (29 GPIO-викликів, `original_firmware/ORIGINAL_FIRMWARE.md`
       §14.3); PC5 = LED «PCS-CAN». Керування напрямком із коду прибрано; LED4-логіка
       замінена на PC5-LED. Залишилось звірити на платі PB10/PB11 (можливі enable).
 - [ ] **Q17.** Аварійні/статус-регістри BMS (`0x17`–`0x26` дампів: 100, 49, 0×5, 1,
