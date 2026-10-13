@@ -2,7 +2,8 @@
 
 Див. також: [`../README.md`](../README.md) (основний опис проєкту COM-Box),
 [`../DEYE_CAN_RS485_BASE.md`](../DEYE_CAN_RS485_BASE.md) (база знань CAN/RS485),
-[`../can_sniffer/README.md`](../can_sniffer/README.md) (пасивний CAN-сніффер).
+[`../PORT_MAPPING.md`](../PORT_MAPPING.md) (еталон фізичних пінів; **при складанні
+цього файлу не використовувався**), [`../can_sniffer/README.md`](../can_sniffer/README.md) (пасивний CAN-сніффер).
 
 Джерело істини: **лише** `combobox_bkp_40000.bin` (дамп 256 КБ з flash).
 Жодні сторонні документи проєкту (`ANALYSIS.md`, `PORT_MAPPING.md`, `FACTORY_PIN_ANALYSIS.md`)
