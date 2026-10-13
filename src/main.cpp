@@ -54,11 +54,16 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
   return crc;
 }
 
-#define BATTERY_SOC_DEFAULT 77
-#define BATTERY_SOH_DEFAULT 88
+// No-data presentation (Q5, рішення 13.10.2026): «порожня інертна батарея».
+// SOC=0 — не запрошує інвертор до розряду; T=25 — нейтральна (45 °C могла
+// тригерити derating/тривоги); SOH=100 — без фейкового «старіння»; V=52.2
+// залишається номіналом (V=0 лякає інвертори; при лімітах 0 А не впливає).
+// Разом із CCL/DCL=0 і 0x35C=0x00 (без прапорців) — чесний стан «нема даних».
+#define BATTERY_SOC_DEFAULT 0
+#define BATTERY_SOH_DEFAULT 100
 #define BATTERY_VOLTAGE_DEFAULT 52.2f
 #define BATTERY_CURRENT_DEFAULT 0.0f
-#define BATTERY_TEMP_DEFAULT 45.0f
+#define BATTERY_TEMP_DEFAULT 25.0f
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
@@ -175,6 +180,9 @@ static uint16_t profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 static uint16_t profile_charge_current_per_pack_x10 = CHARGE_CURRENT_LIMIT_PER_PACK_X10;
 
 static volatile uint32_t last_bms_response_ms = 0;
+// True while BMS answers are fresh (< BMS_DEFAULT_TIMEOUT_MS): drives the
+// 0x35C request flags (Q5). False at boot and on comm loss.
+static bool bms_data_valid = false;
 static uint32_t can_led_off_ms = 0;
 
 extern "C" void osSystickHandler(void) { g_systick_ms++; }
@@ -481,7 +489,9 @@ static void send_all_frames(void) {
   send_can_std(CAN_ID_PROTECT, data, 8);
 
   memset(data, 0, 8);
-  data[0] = 0xC0; // bit7 charge enable, bit6 discharge enable
+  // Q5: request flags follow data validity — honest "no data" state asks
+  // for neither charge nor discharge (0x00); valid data → 0xC0 (both).
+  data[0] = bms_data_valid ? 0xC0 : 0x00;
   send_can_std(CAN_ID_FLAGS, data, 2);
 
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
@@ -582,8 +592,10 @@ int main(void) {
       last_bms = now;
       bms_send_query(current_addr_index);
       bms_receive_response();
-      if (bms_parse_response(current_addr_index + 1))
+      if (bms_parse_response(current_addr_index + 1)) {
         last_bms_response_ms = millis();
+        bms_data_valid = true;
+      }
       if (++current_addr_index >= 16) {
         current_addr_index = 0;
         bms_aggregate_data();
@@ -592,6 +604,7 @@ int main(void) {
 
     if (millis() - last_bms_response_ms > BMS_DEFAULT_TIMEOUT_MS) {
       agg_reset(); // не змішувати старі накопичення з новими після відновлення
+      bms_data_valid = false;
       bms_voltage = BATTERY_VOLTAGE_DEFAULT;
       bms_current = BATTERY_CURRENT_DEFAULT;
       bms_soc = BATTERY_SOC_DEFAULT;
