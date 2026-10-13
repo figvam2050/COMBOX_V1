@@ -31,7 +31,7 @@ static void can_begin(void) {
   twai_general_config_t g_config =
       TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_GPIO,
                                    (gpio_num_t)CAN_RX_GPIO,
-                                   TWAI_MODE_LISTEN_ONLY);
+                                   TWAI_MODE_NORMAL);
   g_config.rx_queue_len = 64;
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -256,7 +256,7 @@ void setup() {
     ;
 
 #if defined(ESP32)
-  Serial.println(F("ESP32 TWAI CAN sniffer: 500 kbps, listen-only"));
+  Serial.println(F("ESP32 TWAI CAN sniffer: 500 kbps, ACK (normal mode)"));
 #else
   Serial.println(F("MCP2515 CAN sniffer: 500 kbps, listen-only"));
 #endif
