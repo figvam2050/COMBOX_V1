@@ -2,9 +2,10 @@
 .pio
 .cache
 compile_commands.json
+compiled_firmware_app/
 
-# Firmware hex/bin archives (compiled_firmware/, compiled_firmware_app/)
-# are tracked on purpose so releases can be flashed without building.
+# Firmware hex/bin archive compiled_firmware/ is tracked on purpose so
+# releases can be flashed without building.
 
 # --- VS Code / PlatformIO IDE: machine-specific, regenerated locally ---
 .vscode/.browse.c_cpp.db*
