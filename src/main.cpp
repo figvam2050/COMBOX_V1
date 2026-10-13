@@ -64,6 +64,9 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 540
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
+// Per-pack charge current limit, selected by DIP1 (see DIP_CHARGE_CURRENT_50A):
+// OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
+#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP1_OFF_X10 400
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
@@ -77,8 +80,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_CHARGE_STOP_MV_DIP90 3455
 #define CELL_CHARGE_REENABLE_MV_DIP90 3405
 // 90% profile = LAST DIP switch ON (SW4, weight 8 => code 0b1000); stock SW1
-// (PYLON, code 1) stays on the default 100% profile.
+// (PYLON, code 1) stays on the default 100% voltage profile.
 #define DIP_PROFILE_CODE_90 8
+// DIP1 (SW1, weight 1) selects the per-pack charge current limit:
+// OFF = 40 A, ON = 50 A. Orthogonal to the SW4 voltage profile.
+#define DIP_CHARGE_CURRENT_50A 0x01
 
 // RS485 register units -> physical units. Confirm against the battery model.
 // reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
@@ -166,6 +172,7 @@ static uint16_t profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
 static uint16_t profile_taper_start_mv = CELL_TAPER_START_MV;
 static uint16_t profile_charge_stop_mv = CELL_CHARGE_STOP_MV;
 static uint16_t profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+static uint16_t profile_charge_current_per_pack_x10 = CHARGE_CURRENT_LIMIT_PER_PACK_X10;
 
 static volatile uint32_t last_bms_response_ms = 0;
 static uint32_t can_led_off_ms = 0;
@@ -315,7 +322,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
   uint32_t max_current_x10 =
-      (uint32_t)CHARGE_CURRENT_LIMIT_PER_PACK_X10 * pack_count;
+      (uint32_t)profile_charge_current_per_pack_x10 * pack_count;
 
   if (charge_inhibit) {
     if (agg_max_cell_mv >= profile_charge_reenable_mv)
@@ -522,6 +529,9 @@ static void dip_charge_profile_apply(uint8_t code) {
     profile_charge_stop_mv = CELL_CHARGE_STOP_MV;
     profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
   }
+  profile_charge_current_per_pack_x10 =
+      (code & DIP_CHARGE_CURRENT_50A) ? CHARGE_CURRENT_LIMIT_PER_PACK_X10
+                                      : CHARGE_CURRENT_LIMIT_PER_PACK_DIP1_OFF_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
 }
