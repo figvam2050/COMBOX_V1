@@ -358,14 +358,6 @@ static bool bms_parse_response(uint8_t expected_addr) {
     if (cell_mv > 0 && cell_mv < agg_min_cell_mv)
       agg_min_cell_mv = cell_mv;
   }
-  // Optional 16th cell check (reg 17, bytes 37..38) for 16S compatibility
-  uint16_t cell16_mv = ((uint16_t)uart_rx_buffer[37] << 8) | uart_rx_buffer[38];
-  if (cell16_mv > 2000) {
-    if (cell16_mv > agg_max_cell_mv)
-      agg_max_cell_mv = cell16_mv;
-    if (cell16_mv < agg_min_cell_mv)
-      agg_min_cell_mv = cell16_mv;
-  }
 
   // Multi-sensor temperature tracking: regs 18, 19, 20 (bytes 39..44)
   int16_t t_a = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
