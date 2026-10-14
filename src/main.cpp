@@ -91,6 +91,29 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW4 voltage profile.
 #define DIP_CHARGE_CURRENT_50A 0x01
 
+// Vision V-LFP48100 cell protection thresholds (HMI ground truth: Warn 2800 mV, Protect 2500 mV, Release 3000 mV):
+#define CELL_UV_WARN_MV 2800
+#define CELL_DISCHARGE_STOP_MV 2650
+#define CELL_DISCHARGE_REENABLE_MV 3000
+#define CELL_MAX_DELTA_MV 400
+
+// Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C
+#define TEMP_CHARGE_MIN_C 2.0f
+#define TEMP_CHARGE_MAX_C 55.0f
+#define TEMP_DISCHARGE_MIN_C -20.0f
+#define TEMP_DISCHARGE_MAX_C 60.0f
+
+// 0x359 Pylontech v2.0.6 Protection & Alarm bit definitions
+#define CAN_PROT_CELL_OV       0x01
+#define CAN_PROT_PACK_OV       0x02
+#define CAN_PROT_CELL_UV       0x04
+#define CAN_PROT_OT            0x08
+#define CAN_PROT_UT            0x10
+#define CAN_PROT_DISCHARGE_OC  0x80
+
+#define CAN_PROT_CHARGE_OC     0x01
+#define CAN_PROT_SYSTEM_ERROR  0x08
+
 // RS485 register units -> physical units. Confirm against the battery model.
 // reg1 current: 1 = BMS reports charge as positive (negated for Deye CAN),
 //               0 = BMS reports discharge as positive (passed through).
@@ -165,9 +188,27 @@ static float agg_current_sum = 0.0f;
 static uint32_t agg_soc_sum = 0;
 static uint32_t agg_soh_sum = 0;
 static float agg_temp_max = -1000.0f;
+static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
 static uint16_t agg_max_cell_mv = 0;
+static uint16_t agg_min_cell_mv = 0xFFFF;
 static bool charge_inhibit = false;
+static bool discharge_inhibit = false;
+
+// 0x359 CAN protection and alarm flags (active state and sweep accumulators)
+static uint8_t can_protect_b0 = 0;
+static uint8_t can_protect_b1 = 0;
+static uint8_t can_alarm_b2 = 0;
+static uint8_t can_alarm_b3 = 0;
+static uint8_t sweep_protect_b0 = 0;
+static uint8_t sweep_protect_b1 = 0;
+static uint8_t sweep_alarm_b2 = 0;
+static uint8_t sweep_alarm_b3 = 0;
+
+// Multi-pack debounce (Q21): tolerate 10-20% RS485 packet loss without flapping limits
+static uint8_t pack_miss_count[16] = {0};
+static uint16_t pack_ever_seen_mask = 0;
+static uint16_t sweep_seen_mask = 0;
 
 static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
 static uint16_t charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
@@ -306,7 +347,6 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   uint16_t raw_voltage = (uart_rx_buffer[3] << 8) | uart_rx_buffer[4];
   int16_t raw_current = (int16_t)((uart_rx_buffer[5] << 8) | uart_rx_buffer[6]);
-  int16_t raw_temp = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
   uint16_t raw_soc = (uart_rx_buffer[45] << 8) | uart_rx_buffer[46];
   uint16_t raw_soh = (uart_rx_buffer[47] << 8) | uart_rx_buffer[48];
 
@@ -315,14 +355,90 @@ static bool bms_parse_response(uint8_t expected_addr) {
                        uart_rx_buffer[8 + cell * 2];
     if (cell_mv > agg_max_cell_mv)
       agg_max_cell_mv = cell_mv;
+    if (cell_mv > 0 && cell_mv < agg_min_cell_mv)
+      agg_min_cell_mv = cell_mv;
   }
+  // Optional 16th cell check (reg 17, bytes 37..38) for 16S compatibility
+  uint16_t cell16_mv = ((uint16_t)uart_rx_buffer[37] << 8) | uart_rx_buffer[38];
+  if (cell16_mv > 2000) {
+    if (cell16_mv > agg_max_cell_mv)
+      agg_max_cell_mv = cell16_mv;
+    if (cell16_mv < agg_min_cell_mv)
+      agg_min_cell_mv = cell16_mv;
+  }
+
+  // Multi-sensor temperature tracking: regs 18, 19, 20 (bytes 39..44)
+  int16_t t_a = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
+  int16_t t_main = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
+  int16_t t_b = (int16_t)((uart_rx_buffer[43] << 8) | uart_rx_buffer[44]);
+
+  float pack_t_max = (float)t_main;
+  float pack_t_min = (float)t_main;
+  if (t_a >= -40 && t_a <= 120) {
+    if ((float)t_a > pack_t_max) pack_t_max = (float)t_a;
+    if ((float)t_a < pack_t_min) pack_t_min = (float)t_a;
+  }
+  if (t_b >= -40 && t_b <= 120) {
+    if ((float)t_b > pack_t_max) pack_t_max = (float)t_b;
+    if ((float)t_b < pack_t_min) pack_t_min = (float)t_b;
+  }
+  if (pack_t_max > agg_temp_max)
+    agg_temp_max = pack_t_max;
+  if (pack_t_min < agg_temp_min)
+    agg_temp_min = pack_t_min;
+
+  // Status, Warning, Protection, Error registers (regs 25..28, bytes 53..60)
+  uint16_t reg_status  = ((uint16_t)uart_rx_buffer[53] << 8) | uart_rx_buffer[54];
+  uint16_t reg_warning = ((uint16_t)uart_rx_buffer[55] << 8) | uart_rx_buffer[56];
+  uint16_t reg_protect = ((uint16_t)uart_rx_buffer[57] << 8) | uart_rx_buffer[58];
+  uint16_t reg_error   = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
+
+  // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
+  if ((reg_protect & 0x0002) && agg_max_cell_mv >= profile_charge_stop_mv)
+    sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+  if ((reg_protect & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 5))
+    sweep_protect_b0 |= CAN_PROT_CELL_UV;
+  if ((reg_protect & 0x0001) && raw_voltage >= 5450)
+    sweep_protect_b0 |= CAN_PROT_PACK_OV;
+  if ((reg_protect & 0x0004) && raw_voltage <= 4320)
+    sweep_protect_b0 |= CAN_PROT_CELL_UV;
+  if ((reg_protect & 0x0300) || pack_t_max >= TEMP_CHARGE_MAX_C)
+    sweep_protect_b0 |= CAN_PROT_OT;
+  if ((reg_protect & 0x0C00) || pack_t_min <= TEMP_CHARGE_MIN_C)
+    sweep_protect_b0 |= CAN_PROT_UT;
+  if (reg_protect & 0x0020)
+    sweep_protect_b0 |= CAN_PROT_DISCHARGE_OC;
+
+  if (reg_protect & 0x0010)
+    sweep_protect_b1 |= CAN_PROT_CHARGE_OC;
+  if ((reg_protect & 0x2000) || (reg_status & 0x0004) || reg_error != 0)
+    sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
+
+  // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
+  if ((reg_warning & 0x0002) && agg_max_cell_mv >= (profile_charge_stop_mv - 50))
+    sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+  if ((reg_warning & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 10))
+    sweep_alarm_b2 |= CAN_PROT_CELL_UV;
+  if ((reg_warning & 0x0001) && raw_voltage >= 5400)
+    sweep_alarm_b2 |= CAN_PROT_PACK_OV;
+  if ((reg_warning & 0x0004) && raw_voltage <= 4400)
+    sweep_alarm_b2 |= CAN_PROT_CELL_UV;
+  if ((reg_warning & 0x0300) || pack_t_max >= 50.0f)
+    sweep_alarm_b2 |= CAN_PROT_OT;
+  if ((reg_warning & 0x0C00) || pack_t_min <= 5.0f)
+    sweep_alarm_b2 |= CAN_PROT_UT;
+  if (reg_warning & 0x0020)
+    sweep_alarm_b2 |= CAN_PROT_DISCHARGE_OC;
+  if (reg_warning & 0x0010)
+    sweep_alarm_b3 |= CAN_PROT_CHARGE_OC;
+
+  if (expected_addr >= 1 && expected_addr <= 16)
+    sweep_seen_mask |= (1 << (expected_addr - 1));
 
   agg_voltage_sum += raw_voltage / 100.0f;
   agg_current_sum += raw_current / 100.0f;
   agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
   agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
-  if ((float)raw_temp > agg_temp_max)
-    agg_temp_max = (float)raw_temp;
   agg_count++;
 
   return true;
@@ -331,6 +447,18 @@ static bool bms_parse_response(uint8_t expected_addr) {
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
   uint32_t max_current_x10 =
       (uint32_t)profile_charge_current_per_pack_x10 * pack_count;
+
+  // Temperature cut-offs: LiFePO4 plating occurs below +2°C; over-temp at 55°C
+  if (agg_temp_min < TEMP_CHARGE_MIN_C || agg_temp_max > TEMP_CHARGE_MAX_C) {
+    charge_inhibit = true;
+    return 0;
+  }
+
+  // System error or over-current protection from 0x359
+  if (can_protect_b1 & (CAN_PROT_CHARGE_OC | CAN_PROT_SYSTEM_ERROR)) {
+    charge_inhibit = true;
+    return 0;
+  }
 
   if (charge_inhibit) {
     if (agg_max_cell_mv >= profile_charge_reenable_mv)
@@ -351,17 +479,81 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
                     (profile_charge_stop_mv - profile_taper_start_mv));
 }
 
+static uint16_t calculate_discharge_limit(uint8_t pack_count) {
+  uint32_t max_current_x10 =
+      (uint32_t)DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * pack_count;
+
+  if (agg_min_cell_mv == 0xFFFF)
+    return 0;
+
+  // Temperature cut-offs for discharge (-20°C .. +60°C)
+  if (agg_temp_min < TEMP_DISCHARGE_MIN_C || agg_temp_max > TEMP_DISCHARGE_MAX_C) {
+    discharge_inhibit = true;
+    return 0;
+  }
+
+  // System error protection
+  if (can_protect_b1 & CAN_PROT_SYSTEM_ERROR) {
+    discharge_inhibit = true;
+    return 0;
+  }
+
+  // Hysteresis release: re-enable only when min cell recovers >= 3000 mV (Vision HMI Release)
+  if (discharge_inhibit) {
+    if (agg_min_cell_mv < CELL_DISCHARGE_REENABLE_MV)
+      return 0;
+    discharge_inhibit = false;
+  }
+
+  // Hard cut: cell voltage critically low (<= 2650 mV, 150 mV above BMS hardware Protect 2500 mV)
+  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
+    discharge_inhibit = true;
+    return 0;
+  }
+
+  // Soft cut / Cell UV warning (<= 2800 mV): derate discharge current to 50%
+  if (agg_min_cell_mv <= CELL_UV_WARN_MV) {
+    max_current_x10 /= 2;
+  }
+
+  // Severe cell imbalance check (> 400 mV delta): derate to 50%
+  if (agg_max_cell_mv > agg_min_cell_mv && (agg_max_cell_mv - agg_min_cell_mv) > CELL_MAX_DELTA_MV) {
+    max_current_x10 /= 2;
+  }
+
+  return (uint16_t)max_current_x10;
+}
+
 static void agg_reset(void) {
   agg_voltage_sum = 0.0f;
   agg_current_sum = 0.0f;
   agg_soc_sum = 0;
   agg_soh_sum = 0;
   agg_temp_max = -1000.0f;
+  agg_temp_min = 1000.0f;
   agg_count = 0;
   agg_max_cell_mv = 0;
+  agg_min_cell_mv = 0xFFFF;
 }
 
 static void bms_aggregate_data(void) {
+  // Update pack presence with 3-miss debounce (Q21)
+  uint8_t active_pack_count = 0;
+  for (uint8_t i = 0; i < 16; i++) {
+    if (sweep_seen_mask & (1 << i)) {
+      pack_ever_seen_mask |= (1 << i);
+      pack_miss_count[i] = 0;
+      active_pack_count++;
+    } else if (pack_ever_seen_mask & (1 << i)) {
+      if (pack_miss_count[i] < 255)
+        pack_miss_count[i]++;
+      if (pack_miss_count[i] <= 2) {
+        active_pack_count++;
+      }
+    }
+  }
+  sweep_seen_mask = 0;
+
   if (agg_count == 0)
     return;
 
@@ -373,11 +565,25 @@ static void bms_aggregate_data(void) {
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
 
+  // Latch sweep alarms and protection into active CAN frame registers
+  can_protect_b0 = sweep_protect_b0;
+  can_protect_b1 = sweep_protect_b1;
+  can_alarm_b2 = sweep_alarm_b2;
+  can_alarm_b3 = sweep_alarm_b3;
+  sweep_protect_b0 = 0;
+  sweep_protect_b1 = 0;
+  sweep_alarm_b2 = 0;
+  sweep_alarm_b3 = 0;
+
+  uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
+  bms_pack_count = effective_packs;
+
   charge_voltage_limit = profile_charge_voltage_limit;
-  charge_current_limit = calculate_charge_limit(agg_count);
-  discharge_current_limit =
-      DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 * agg_count;
-  bms_pack_count = (uint8_t)agg_count;
+  charge_current_limit = calculate_charge_limit(effective_packs);
+  discharge_current_limit = calculate_discharge_limit(effective_packs);
+
+  // Set data valid now that fresh aggregated values are computed
+  bms_data_valid = true;
 
   agg_reset();
 }
@@ -480,18 +686,30 @@ static void send_all_frames(void) {
   put_u16le(&data[4], (uint16_t)round_to_i16(bms_temp * 10.0f));
   send_can_std(CAN_ID_STATUS, data, 6);
 
-  // No protection/alarm flags: bytes 0..3 clear, byte 7 is "not enabled".
-  // Byte 4 = number of packs in the system, bytes 5..6 = "PN" (brand check).
+  // 0x359: Bytes 0..1 Protection, Bytes 2..3 Alarm, Byte 4 Module count, Bytes 5..6 'P' 'N', Byte 7 0
   memset(data, 0, 8);
+  data[0] = can_protect_b0;
+  data[1] = can_protect_b1;
+  data[2] = can_alarm_b2;
+  data[3] = can_alarm_b3;
   data[4] = bms_pack_count;
   data[5] = 'P';
   data[6] = 'N';
+  data[7] = 0;
   send_can_std(CAN_ID_PROTECT, data, 8);
 
+  // 0x35C: Request / Enable flags
+  // Bit 7 (0x80) = Charge enable: active only if data valid, not inhibited, CCL > 0
+  // Bit 6 (0x40) = Discharge enable: active only if data valid, not inhibited, DCL > 0
   memset(data, 0, 8);
-  // Q5: request flags follow data validity — honest "no data" state asks
-  // for neither charge nor discharge (0x00); valid data → 0xC0 (both).
-  data[0] = bms_data_valid ? 0xC0 : 0x00;
+  uint8_t req_flags = 0x00;
+  if (bms_data_valid) {
+    if (!charge_inhibit && charge_current_limit > 0)
+      req_flags |= 0x80;
+    if (!discharge_inhibit && discharge_current_limit > 0)
+      req_flags |= 0x40;
+  }
+  data[0] = req_flags;
   send_can_std(CAN_ID_FLAGS, data, 2);
 
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
@@ -528,7 +746,7 @@ static uint8_t dip_read_code(void) {
 }
 
 static void dip_charge_profile_apply(uint8_t code) {
-  if (code == DIP_PROFILE_CODE_90) {
+  if (code & DIP_PROFILE_CODE_90) {
     profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DIP90;
     profile_taper_start_mv = CELL_TAPER_START_MV_DIP90;
     profile_charge_stop_mv = CELL_CHARGE_STOP_MV_DIP90;
@@ -594,7 +812,6 @@ int main(void) {
       bms_receive_response();
       if (bms_parse_response(current_addr_index + 1)) {
         last_bms_response_ms = millis();
-        bms_data_valid = true;
       }
       if (++current_addr_index >= 16) {
         current_addr_index = 0;
@@ -613,6 +830,16 @@ int main(void) {
       charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
+      charge_inhibit = false;
+      discharge_inhibit = false;
+      can_protect_b0 = 0;
+      can_protect_b1 = 0;
+      can_alarm_b2 = 0;
+      can_alarm_b3 = 0;
+      sweep_protect_b0 = 0;
+      sweep_protect_b1 = 0;
+      sweep_alarm_b2 = 0;
+      sweep_alarm_b3 = 0;
     }
 
     if (now - last_can >= 1000) {
