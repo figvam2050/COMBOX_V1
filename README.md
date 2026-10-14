@@ -31,6 +31,7 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 | [`README.md`](README.md) | цей файл: прошивка COM-Box, збірка, піни, CAN-кадри, чек-ліст Q1–Q25 |
 | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | база знань CAN/RS485 Deye (див. вище) |
 | [`ERRORS_REFERENCE.md`](ERRORS_REFERENCE.md) | конспект помилок/аварій: BMS (RS485-винятки, Warning/Protection/Error) ↔ Deye (CAN 0x359, F-коди), різниця каналів, дедукція, матриця трактування (13.10.2026) |
+| [`ANENJI_REFERENCE.md`](ANENJI_REFERENCE.md) | зведений документ по Anenji ANJ-6200W (OEM SRNE): батарейний Pylon-RS485, моніторинговий Modbus V1.3/V1.7, CRC-застереження, дискримінатор ревізій, аварійні коди, топологія портів, релевантність для Q23 (14.10.2026; апарату немає — статус «за джерелами») |
 | [`PORT_MAPPING.md`](PORT_MAPPING.md) | **незмінний еталон фізичних пінів** (`chmod 444`): піни MCU, LED, DIP, рівні упевненості |
 | [`original_firmware/ORIGINAL_FIRMWARE.md`](original_firmware/ORIGINAL_FIRMWARE.md) | повний розбір заводської прошивки Felicity Solar G5RC |
 | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32/Nano (TWAI/MCP2515, 500 kbit/s; ESP32 — ACK/normal mode з 13.10.2026) |
@@ -120,6 +121,7 @@ CAN Bus v2.0.6` + `PCS CAN-Bus-protocol-DY-low-voltage V3.3`** — прибра�
 | `src/main.cpp` | **увесь код прошивки** (env вимагає саме цієї назви) |
 | `DEYE_CAN_RS485_BASE.md` | **незмінна база знань** по CAN/RS485 Deye (`chmod 444`): кадри, Lithium Mode, Modbus, RS485-розклад, дані акумулятора |
 | `PORT_MAPPING.md` | **незмінний еталон фізичних пінів** (`chmod 444`): піни MCU, LED, DIP, рівні упевненості (піни ↔ прошивка звірені 13.10.2026) |
+| `ANENJI_REFERENCE.md` | зведений документ по Anenji ANJ-6200W (OEM SRNE): Pylon-RS485 батарея, SRNE Modbus V1.3/V1.7 телеметрія, аварії, пінаути, Q23-контекст (14.10.2026) |
 | `platformio.ini` | env `genericGD32F305` (автономна @0x08000000) + env `genericGD32F305_app` (під заводським bootloader'ом @0x08004000); `board = genericSTM32F103RC`, `framework = arduino`, `build_src_filter = +<main.cpp>` |
 | `GD32F305RC_COMBOX.ld` | лінкер: FLASH 256K @ 0x08000000, RAM 96K @ 0x20000000, SP = 0x20018000 |
 | `GD32F305RC_COMBOX_APP.ld` | той самий, але FLASH 192K @ **0x08004000** — регіон застосунку заводського bootloader'а (`0x08000000..0x08003FFF` не чіпається) |
