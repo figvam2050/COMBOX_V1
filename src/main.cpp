@@ -91,17 +91,27 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW4 voltage profile.
 #define DIP_CHARGE_CURRENT_50A 0x01
 
+// Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
+// Independent of DIP90 taper target so that software 90% profile never generates false alarms:
+#define CELL_PHYSICAL_OV_CONFIRM_MV 3600
+#define CELL_PHYSICAL_OV_WARN_CONFIRM_MV 3550
+
 // Vision V-LFP48100 cell protection thresholds (HMI ground truth: Warn 2800 mV, Protect 2500 mV, Release 3000 mV):
 #define CELL_UV_WARN_MV 2800
 #define CELL_DISCHARGE_STOP_MV 2650
 #define CELL_DISCHARGE_REENABLE_MV 3000
 #define CELL_MAX_DELTA_MV 400
 
-// Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C
+// Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C.
+// Charging re-enables with hysteresis (>= +3°C and <= 50°C) to prevent chattering.
 #define TEMP_CHARGE_MIN_C 2.0f
+#define TEMP_CHARGE_MIN_REENABLE_C 3.0f
 #define TEMP_CHARGE_MAX_C 55.0f
+#define TEMP_CHARGE_MAX_REENABLE_C 50.0f
 #define TEMP_DISCHARGE_MIN_C -20.0f
+#define TEMP_DISCHARGE_MIN_REENABLE_C -18.0f
 #define TEMP_DISCHARGE_MAX_C 60.0f
+#define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
 // 0x359 Pylontech v2.0.6 Protection & Alarm bit definitions
 #define CAN_PROT_CELL_OV       0x01
@@ -192,8 +202,10 @@ static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static uint16_t agg_min_cell_mv = 0xFFFF;
-static bool charge_inhibit = false;
-static bool discharge_inhibit = false;
+static bool charge_cell_ov_inhibit = false;
+static bool charge_temp_inhibit = false;
+static bool discharge_cell_uv_inhibit = false;
+static bool discharge_temp_inhibit = false;
 
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
@@ -360,19 +372,28 @@ static bool bms_parse_response(uint8_t expected_addr) {
   }
 
   // Multi-sensor temperature tracking: regs 18, 19, 20 (bytes 39..44)
+  // Sanity check all sensor channels (-40..120 °C) to reject disconnected (0x7FFF) or corrupted probes:
   int16_t t_a = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
   int16_t t_main = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
   int16_t t_b = (int16_t)((uart_rx_buffer[43] << 8) | uart_rx_buffer[44]);
 
-  float pack_t_max = (float)t_main;
-  float pack_t_min = (float)t_main;
+  float pack_t_max = -1000.0f;
+  float pack_t_min = 1000.0f;
+  if (t_main >= -40 && t_main <= 120) {
+    pack_t_max = (float)t_main;
+    pack_t_min = (float)t_main;
+  }
   if (t_a >= -40 && t_a <= 120) {
-    if ((float)t_a > pack_t_max) pack_t_max = (float)t_a;
-    if ((float)t_a < pack_t_min) pack_t_min = (float)t_a;
+    if (pack_t_max < -500.0f || (float)t_a > pack_t_max) pack_t_max = (float)t_a;
+    if (pack_t_min > 500.0f || (float)t_a < pack_t_min) pack_t_min = (float)t_a;
   }
   if (t_b >= -40 && t_b <= 120) {
-    if ((float)t_b > pack_t_max) pack_t_max = (float)t_b;
-    if ((float)t_b < pack_t_min) pack_t_min = (float)t_b;
+    if (pack_t_max < -500.0f || (float)t_b > pack_t_max) pack_t_max = (float)t_b;
+    if (pack_t_min > 500.0f || (float)t_b < pack_t_min) pack_t_min = (float)t_b;
+  }
+  if (pack_t_max < -500.0f) {
+    pack_t_max = BATTERY_TEMP_DEFAULT;
+    pack_t_min = BATTERY_TEMP_DEFAULT;
   }
   if (pack_t_max > agg_temp_max)
     agg_temp_max = pack_t_max;
@@ -386,7 +407,9 @@ static bool bms_parse_response(uint8_t expected_addr) {
   uint16_t reg_error   = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
 
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
-  if ((reg_protect & 0x0002) && agg_max_cell_mv >= profile_charge_stop_mv)
+  // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT profile_charge_stop_mv,
+  // so that activating the 90% software taper profile never generates false emergency cell OV alarms:
+  if ((reg_protect & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
   if ((reg_protect & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 5))
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
@@ -394,9 +417,11 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_protect_b0 |= CAN_PROT_PACK_OV;
   if ((reg_protect & 0x0004) && raw_voltage <= 4320)
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
-  if ((reg_protect & 0x0300) || pack_t_max >= TEMP_CHARGE_MAX_C)
+  if ((reg_protect & 0x0300) || pack_t_max >= TEMP_DISCHARGE_MAX_C)
     sweep_protect_b0 |= CAN_PROT_OT;
-  if ((reg_protect & 0x0C00) || pack_t_min <= TEMP_CHARGE_MIN_C)
+  // System-level UT protection stops both charge and discharge in Deye; trigger only if battery
+  // is under the physical discharge limit (-20°C) or BMS asserts protection (charge limit handled via CCL=0):
+  if ((reg_protect & 0x0C00) || pack_t_min <= TEMP_DISCHARGE_MIN_C)
     sweep_protect_b0 |= CAN_PROT_UT;
   if (reg_protect & 0x0020)
     sweep_protect_b0 |= CAN_PROT_DISCHARGE_OC;
@@ -407,7 +432,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
 
   // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
-  if ((reg_warning & 0x0002) && agg_max_cell_mv >= (profile_charge_stop_mv - 50))
+  if ((reg_warning & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
     sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
   if ((reg_warning & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 10))
     sweep_alarm_b2 |= CAN_PROT_CELL_UV;
@@ -417,7 +442,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_alarm_b2 |= CAN_PROT_CELL_UV;
   if ((reg_warning & 0x0300) || pack_t_max >= 50.0f)
     sweep_alarm_b2 |= CAN_PROT_OT;
-  if ((reg_warning & 0x0C00) || pack_t_min <= 5.0f)
+  if ((reg_warning & 0x0C00) || pack_t_min <= (TEMP_DISCHARGE_MIN_C + 5.0f))
     sweep_alarm_b2 |= CAN_PROT_UT;
   if (reg_warning & 0x0020)
     sweep_alarm_b2 |= CAN_PROT_DISCHARGE_OC;
@@ -440,26 +465,31 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   uint32_t max_current_x10 =
       (uint32_t)profile_charge_current_per_pack_x10 * pack_count;
 
-  // Temperature cut-offs: LiFePO4 plating occurs below +2°C; over-temp at 55°C
+  // Temperature cut-offs: LiFePO4 plating occurs below +2°C; over-temp at 55°C.
+  // Hysteresis release: re-enable only when temp is within [+3°C .. 50°C] to prevent chattering.
   if (agg_temp_min < TEMP_CHARGE_MIN_C || agg_temp_max > TEMP_CHARGE_MAX_C) {
-    charge_inhibit = true;
-    return 0;
+    charge_temp_inhibit = true;
+  } else if (charge_temp_inhibit) {
+    if (agg_temp_min >= TEMP_CHARGE_MIN_REENABLE_C && agg_temp_max <= TEMP_CHARGE_MAX_REENABLE_C) {
+      charge_temp_inhibit = false;
+    }
   }
 
   // System error or over-current protection from 0x359
   if (can_protect_b1 & (CAN_PROT_CHARGE_OC | CAN_PROT_SYSTEM_ERROR)) {
-    charge_inhibit = true;
     return 0;
   }
 
-  if (charge_inhibit) {
-    if (agg_max_cell_mv >= profile_charge_reenable_mv)
-      return 0;
-    charge_inhibit = false;
+  // Cell voltage cut-off: stop at profile stop, re-enable below re-enable threshold
+  if (agg_max_cell_mv >= profile_charge_stop_mv) {
+    charge_cell_ov_inhibit = true;
+  } else if (charge_cell_ov_inhibit) {
+    if (agg_max_cell_mv < profile_charge_reenable_mv) {
+      charge_cell_ov_inhibit = false;
+    }
   }
 
-  if (agg_max_cell_mv >= profile_charge_stop_mv) {
-    charge_inhibit = true;
+  if (charge_temp_inhibit || charge_cell_ov_inhibit) {
     return 0;
   }
 
@@ -478,28 +508,30 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   if (agg_min_cell_mv == 0xFFFF)
     return 0;
 
-  // Temperature cut-offs for discharge (-20°C .. +60°C)
+  // Temperature cut-offs for discharge (-20°C .. +60°C) with hysteresis
   if (agg_temp_min < TEMP_DISCHARGE_MIN_C || agg_temp_max > TEMP_DISCHARGE_MAX_C) {
-    discharge_inhibit = true;
-    return 0;
+    discharge_temp_inhibit = true;
+  } else if (discharge_temp_inhibit) {
+    if (agg_temp_min >= TEMP_DISCHARGE_MIN_REENABLE_C && agg_temp_max <= TEMP_DISCHARGE_MAX_REENABLE_C) {
+      discharge_temp_inhibit = false;
+    }
   }
 
   // System error protection
   if (can_protect_b1 & CAN_PROT_SYSTEM_ERROR) {
-    discharge_inhibit = true;
     return 0;
   }
 
-  // Hysteresis release: re-enable only when min cell recovers >= 3000 mV (Vision HMI Release)
-  if (discharge_inhibit) {
-    if (agg_min_cell_mv < CELL_DISCHARGE_REENABLE_MV)
-      return 0;
-    discharge_inhibit = false;
+  // Cell voltage cut-off: hard cut <= 2650 mV, re-enable >= 3000 mV (Vision HMI Release)
+  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
+    discharge_cell_uv_inhibit = true;
+  } else if (discharge_cell_uv_inhibit) {
+    if (agg_min_cell_mv >= CELL_DISCHARGE_REENABLE_MV) {
+      discharge_cell_uv_inhibit = false;
+    }
   }
 
-  // Hard cut: cell voltage critically low (<= 2650 mV, 150 mV above BMS hardware Protect 2500 mV)
-  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
-    discharge_inhibit = true;
+  if (discharge_temp_inhibit || discharge_cell_uv_inhibit) {
     return 0;
   }
 
@@ -696,9 +728,9 @@ static void send_all_frames(void) {
   memset(data, 0, 8);
   uint8_t req_flags = 0x00;
   if (bms_data_valid) {
-    if (!charge_inhibit && charge_current_limit > 0)
+    if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0)
       req_flags |= 0x80;
-    if (!discharge_inhibit && discharge_current_limit > 0)
+    if (!discharge_cell_uv_inhibit && !discharge_temp_inhibit && discharge_current_limit > 0)
       req_flags |= 0x40;
   }
   data[0] = req_flags;
@@ -822,8 +854,10 @@ int main(void) {
       charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
-      charge_inhibit = false;
-      discharge_inhibit = false;
+      charge_cell_ov_inhibit = false;
+      charge_temp_inhibit = false;
+      discharge_cell_uv_inhibit = false;
+      discharge_temp_inhibit = false;
       can_protect_b0 = 0;
       can_protect_b1 = 0;
       can_alarm_b2 = 0;
