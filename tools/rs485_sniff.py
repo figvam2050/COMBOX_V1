@@ -11,10 +11,15 @@ Usage:
   python3 tools/rs485_sniff.py --list
   python3 tools/rs485_sniff.py --port /dev/tty.usbserial-0001
   python3 tools/rs485_sniff.py --port /dev/tty.usbserial-0001 --baud 9600
+  python3 tools/rs485_sniff.py --port /dev/tty.usbserial-0001 --duration 600
   python3 tools/rs485_sniff.py --selftest
+
+The log file is written only on a clean exit (Ctrl-C, SIGTERM, or
+--duration elapsed); background jobs should use --duration or `kill -INT`.
 """
 
 import argparse
+import signal
 import sys
 import time
 from datetime import datetime
@@ -237,6 +242,8 @@ def main() -> int:
     ap.add_argument("--port", help="serial port, e.g. /dev/tty.usbserial-*")
     ap.add_argument("--baud", type=int, default=9600)
     ap.add_argument("--out", help="log file (default deye/rs485_sniff_<timestamp>.log)")
+    ap.add_argument("--duration", type=float,
+                    help="stop cleanly after N seconds (writes the log on exit)")
     ap.add_argument("--list", action="store_true", help="list serial ports and exit")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -270,18 +277,56 @@ def main() -> int:
     ser = serial.Serial(args.port, args.baud, timeout=0.02)
     sn = Sniffer(out_lines)
     buf = b""
+
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+
+    # Re-install both handlers explicitly: POSIX sets SIGINT to SIG_IGN for
+    # background jobs in non-interactive shells, and SIGTERM has no default
+    # Python clean exit — either would lose the in-memory log.
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
     last_rx = time.monotonic()
     t0 = time.monotonic()
+    deadline = t0 + args.duration if args.duration else None
     dropped = 0
+    dropped_bursts = 0
+    dropped_dups = 0
+
+    def handle_batch(frames, batch_t, elapsed):
+        # Some RS485 USB adapters replay a stale RX FIFO burst when the port
+        # is opened: thousands of byte-identical frames arriving far faster
+        # than the line baud allows. Drop whole batches over the physical
+        # frame rate, and consecutive byte-identical frames (which the two
+        # masters can never emit back-to-back on a healthy bus).
+        nonlocal dropped_bursts, dropped_dups
+        phys_cap = int(elapsed * (args.baud / 10) / 9) + 64
+        if len(frames) > phys_cap:
+            dropped_bursts += 1
+            msg = (f"# dropped burst: {len(frames)} frames at t={elapsed:.3f}s "
+                   f"(physical cap {phys_cap}) — stale adapter buffer replay")
+            print(msg, flush=True)
+            out_lines.append(msg)
+            return
+        prev = None
+        for f in frames:
+            if f == prev:
+                dropped_dups += 1
+                continue
+            prev = f
+            sn.handle(batch_t, f)
+
     try:
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             data = ser.read(256)
             now = time.monotonic()
             if buf and now - last_rx >= SILENCE_S:
                 frames, drop, buf = extract_frames(buf)
                 dropped += drop
-                for f in frames:
-                    sn.handle(now - t0, f)
+                handle_batch(frames, now - t0, now - t0)
             if data:
                 buf += data
                 last_rx = now
@@ -291,11 +336,15 @@ def main() -> int:
         if buf:
             frames, drop, _ = extract_frames(buf)
             dropped += drop
-            for f in frames:
-                sn.handle(time.monotonic() - t0, f)
+            te = time.monotonic() - t0
+            handle_batch(frames, te, te)
         sn.summary(time.monotonic() - t0)
         if dropped:
             print(f"# dropped/corrupt bytes: {dropped}")
+        if dropped_bursts:
+            print(f"# dropped bursts: {dropped_bursts}")
+        if dropped_dups:
+            print(f"# dropped duplicate frames: {dropped_dups}")
         with open(out_path, "w") as fh:
             fh.write("\n".join(header + out_lines) + "\n")
         print(f"# written: {out_path} ({len(out_lines)} frames)")
