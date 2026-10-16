@@ -207,12 +207,34 @@ static void decode_known(uint32_t id, const uint8_t *buf, uint8_t len) {
     }
     break;
   case 0x305:
-    if (len >= 4) {
-      Serial.print(F(" | PCS-heartbeat SOC="));
+    if (len >= 6) {
+      // PCS heartbeat = time of day (S1): sec, min, hour, day, month, year
+      // (year counts from 2000), bytes 6-7 = 0. All-zero = clock not set.
+      Serial.print(F(" | PCS-time "));
+      if (buf[2] < 10)
+        Serial.print('0');
+      Serial.print(buf[2]);
+      Serial.print(':');
+      if (buf[1] < 10)
+        Serial.print('0');
+      Serial.print(buf[1]);
+      Serial.print(':');
+      if (buf[0] < 10)
+        Serial.print('0');
       Serial.print(buf[0]);
-      Serial.print(F("% V="));
-      Serial.print(u16le(&buf[1]) / 10.0f, 1);
-      Serial.print(F("V"));
+      Serial.print(F(" ("));
+      if (buf[3] < 10)
+        Serial.print('0');
+      Serial.print(buf[3]);
+      Serial.print('.');
+      if (buf[4] < 10)
+        Serial.print('0');
+      Serial.print(buf[4]);
+      Serial.print(F(".20"));
+      if (buf[5] < 10)
+        Serial.print('0');
+      Serial.print(buf[5]);
+      Serial.print(')');
     }
     break;
   default:
