@@ -69,9 +69,9 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 540
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
-// Per-pack charge current limit, selected by DIP1 (see DIP_CHARGE_CURRENT_50A):
+// Per-pack charge current limit, selected by DIP5 (see DIP_CHARGE_CURRENT_50A):
 // OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
-#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP1_OFF_X10 400
+#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10 400
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
@@ -84,12 +84,12 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_TAPER_START_MV_DIP90 3400
 #define CELL_CHARGE_STOP_MV_DIP90 3455
 #define CELL_CHARGE_REENABLE_MV_DIP90 3405
-// 90% profile = LAST DIP switch ON (SW4, weight 8 => code 0b1000); stock SW1
-// (PYLON, code 1) stays on the default 100% voltage profile.
+// 90% profile = SW4 ON (weight 8 => code 0b01000); SW1 (stock PYLON, code 1)
+// is free in our firmware and stays on the default 100% voltage profile.
 #define DIP_PROFILE_CODE_90 8
-// DIP1 (SW1, weight 1) selects the per-pack charge current limit:
+// DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW4 voltage profile.
-#define DIP_CHARGE_CURRENT_50A 0x01
+#define DIP_CHARGE_CURRENT_50A 0x10
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
 // Independent of DIP90 taper target so that software 90% profile never generates false alarms:
@@ -152,22 +152,26 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DEYE_CAN_RX_PIN GPIO_PIN_8
 #define DEYE_CAN_TX_PIN GPIO_PIN_9
 
-// RS485 transceivers have no DE/RE pin (auto-direction, ORIGINAL_FIRMWARE.md
-// §14.3): PC5 is NOT a direction pin — stock uses it as the PCS-CAN activity
-// LED (§14.7), so PC5 must not be driven during RS485 TX.
-// LED mapping follows the factory panel (ORIGINAL_FIRMWARE.md §14.7):
-//   PC4 = Running (static HIGH), PB1 = BMS-485 activity,
-//   PC5 = PCS-CAN activity, PC13+PB0 = PCS-485 pair (dual-gpio drive).
-#define LED_RUNNING_PORT GPIOC
-#define LED_RUNNING_PIN GPIO_PIN_4
+// LED assignment per PORT_MAPPING.md §4 (factory panel labels, 17.10.2026):
+//   LED5 (PB0)  = system running (program alive) — steady ON after init;
+//   LED6 (PB1)  = BMS RS485 exchange — blinks on TX/RX with battery;
+//   LED4 (PC5)  = CAN to inverter — blinks on TX bursts;
+//   LED3 (PC4)  = inverter RS485 (UART4, Q23) — blinks on TX/RX once the
+//                 UART4 slave exists, dark until implemented;
+//   LED1 (PC13) = free/debug — dark;
+//   LED2 (VDDA) = power — wired to rail, not MCU-controlled.
+// PC5 is NOT an RS485 direction pin (PC5=DE disproven, RS485 has
+// auto-direction transceivers — ORIGINAL_FIRMWARE.md §14.3).
+#define LED_RUNNING_PORT GPIOB
+#define LED_RUNNING_PIN GPIO_PIN_0
 #define LED_BMS485_PORT GPIOB
 #define LED_BMS485_PIN GPIO_PIN_1
 #define LED_PCSCAN_PORT GPIOC
 #define LED_PCSCAN_PIN GPIO_PIN_5
-#define LED_PCS485_A_PORT GPIOC
-#define LED_PCS485_A_PIN GPIO_PIN_13
-#define LED_PCS485_B_PORT GPIOB
-#define LED_PCS485_B_PIN GPIO_PIN_0
+#define LED_INV485_PORT GPIOC
+#define LED_INV485_PIN GPIO_PIN_4
+#define LED1_DEBUG_PORT GPIOC
+#define LED1_DEBUG_PIN GPIO_PIN_13
 
 // Stock boot state for PB10 (PP HIGH) and PB11 (OD HIGH) — likely transceiver
 // enables (ORIGINAL_FIRMWARE.md §14.4); released HIGH like the factory firmware.
@@ -179,6 +183,9 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define DIP_GPIO_PORT GPIOB
 #define DIP_GPIO_RCU RCU_GPIOB
 #define DIP_GPIO_PINS (GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15)
+#define DIP5_GPIO_PORT GPIOC
+#define DIP5_GPIO_RCU RCU_GPIOC
+#define DIP5_GPIO_PIN GPIO_PIN_6
 
 static volatile uint32_t g_systick_ms = 0;
 static volatile uint8_t uart_rx_buffer[256];
@@ -244,25 +251,27 @@ static uint32_t millis(void) { return g_systick_ms; }
 static void leds_init(void) {
   rcu_periph_clock_enable(RCU_GPIOB);
   rcu_periph_clock_enable(RCU_GPIOC);
-  // Running LED: steady ON (factory semantics).
+  // LED5 (PB0): system running — steady ON (program alive).
   gpio_init(LED_RUNNING_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_RUNNING_PIN);
   gpio_bit_set(LED_RUNNING_PORT, LED_RUNNING_PIN);
-  // BMS-485 LED: ON while a poll is in flight.
+  // LED6 (PB1): BMS RS485 exchange — blinks on TX/RX (set at poll TX,
+  // cleared when the response window closes).
   gpio_init(LED_BMS485_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_BMS485_PIN);
   gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
-  // PCS-CAN LED: ON around each CAN burst, cleared ~100 ms after TX.
+  // LED4 (PC5): CAN to inverter — blinks on TX bursts.
   gpio_init(LED_PCSCAN_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_PCSCAN_PIN);
   gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
-  // PCS-485 LED pair: dual-gpio drive, complementary; OFF = A LOW / B HIGH.
-  gpio_init(LED_PCS485_A_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
-            LED_PCS485_A_PIN);
-  gpio_init(LED_PCS485_B_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
-            LED_PCS485_B_PIN);
-  gpio_bit_reset(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
-  gpio_bit_set(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
+  // LED3 (PC4): inverter RS485 (UART4/Q23) — dark until UART4 TX/RX exists.
+  gpio_init(LED_INV485_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED_INV485_PIN);
+  gpio_bit_reset(LED_INV485_PORT, LED_INV485_PIN);
+  // LED1 (PC13): free/debug — dark.
+  gpio_init(LED1_DEBUG_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
+            LED1_DEBUG_PIN);
+  gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
   // Transceiver enables: match factory boot state.
   gpio_init(TRANSCEIVER_ENA_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             TRANSCEIVER_ENA_PIN);
@@ -691,7 +700,7 @@ static void put_u16le(uint8_t *data, uint16_t value) {
 }
 
 static void send_all_frames(void) {
-  gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // PCS-CAN activity
+  gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // LED4: CAN activity
   uint8_t data[8] = {0};
   put_u16le(&data[0], charge_voltage_limit);
   put_u16le(&data[2], charge_current_limit);
@@ -766,7 +775,9 @@ static uint8_t dip_last_code = 0;
 static uint8_t dip_stable_reads = 0;
 
 static uint8_t dip_read_code(void) {
-  return (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
+  uint8_t code = (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
+  if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= DIP_CHARGE_CURRENT_50A;
+  return code;
 }
 
 static void dip_charge_profile_apply(uint8_t code) {
@@ -783,7 +794,7 @@ static void dip_charge_profile_apply(uint8_t code) {
   }
   profile_charge_current_per_pack_x10 =
       (code & DIP_CHARGE_CURRENT_50A) ? CHARGE_CURRENT_LIMIT_PER_PACK_X10
-                                      : CHARGE_CURRENT_LIMIT_PER_PACK_DIP1_OFF_X10;
+                                      : CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
 }
@@ -791,6 +802,8 @@ static void dip_charge_profile_apply(uint8_t code) {
 static void dip_charge_profile_init(void) {
   rcu_periph_clock_enable(DIP_GPIO_RCU);
   gpio_init(DIP_GPIO_PORT, GPIO_MODE_IPU, GPIO_OSPEED_2MHZ, DIP_GPIO_PINS);
+  rcu_periph_clock_enable(DIP5_GPIO_RCU);
+  gpio_init(DIP5_GPIO_PORT, GPIO_MODE_IPU, GPIO_OSPEED_2MHZ, DIP5_GPIO_PIN);
   dip_last_code = dip_read_code();
   dip_stable_reads = 2;
   dip_charge_profile_apply(dip_last_code);
@@ -820,8 +833,8 @@ int main(void) {
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms = 0, last_can = 0, led_pcs485_timer = 0, last_dip_poll = 0;
-  uint8_t current_addr_index = 0, led_pcs485_state = 0;
+  uint32_t last_bms = 0, last_can = 0, last_dip_poll = 0;
+  uint8_t current_addr_index = 0;
 
   while (1) {
     watchdog_feed();
@@ -873,20 +886,7 @@ int main(void) {
       send_all_frames();
     }
 
-    // PCS-485 LED pair: free-run blink until the UART4 slave exists.
-    if (now - led_pcs485_timer >= 500) {
-      led_pcs485_timer = now;
-      led_pcs485_state = !led_pcs485_state;
-      if (led_pcs485_state) {
-        gpio_bit_set(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
-        gpio_bit_reset(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
-      } else {
-        gpio_bit_reset(LED_PCS485_A_PORT, LED_PCS485_A_PIN);
-        gpio_bit_set(LED_PCS485_B_PORT, LED_PCS485_B_PIN);
-      }
-    }
-
-    // PCS-CAN LED: release ~100 ms after the last CAN burst.
+    // LED4 (PC5, CAN): release ~100 ms after the last CAN burst.
     if (can_led_off_ms && (int32_t)(millis() - can_led_off_ms) >= 0) {
       gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
       can_led_off_ms = 0;
