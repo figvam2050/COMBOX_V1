@@ -574,7 +574,7 @@ V-LFP48100 (Recommended charging voltage 54 V); тейпер зсунуто на
 | | Q12 (DE/RE трансивера) | ✅ Закрито | Трансивери CA-IS3080WX мають автоматичний апаратний авто-напрямок |
 | **Активні плани** | Q21 (Fast Polling) | 🟡 В планах | Скорочення циклу з 3.2 с до ~0.5 с для активних адрес ([IMPROVEMENTS_TODO.md](IMPROVEMENTS_TODO.md) §3.1) |
 | | Неблокуючий UART | 🟡 В планах | FSM-прийом без очікування 200 мс для сплячих адрес ([IMPROVEMENTS_TODO.md](IMPROVEMENTS_TODO.md) §3.2) |
-| | Сесія з інвертором Deye | 🟡 В планах | Перевірка знаку струму, динамічне перемикання DIP, PCS downlink ([IMPROVEMENTS_TODO.md](IMPROVEMENTS_TODO.md) §4) |
+| | Сесія з інвертором Deye | 🟡 Частково | Знак струму ✅ та матриця DIP ✅ (16.10, [CODE_REVIEW_15.10.2026.md](CODE_REVIEW_15.10.2026.md) §5); залишилось: 0x305 час ❌ (нулі) та невідомий кадр 0x71F ([IMPROVEMENTS_TODO.md](IMPROVEMENTS_TODO.md) §4) |
 | | Q23 (UART4 Modbus Slave) | 🔵 Розвиток | Відповіді інвертору по RS485 зі свого кешу (Proxy) |
 | | Q24 (Діагностика J1) | 🔵 Розвиток | Логування телеметрії через серійний порт |
 | | Q25 (CI / GitHub Actions) | 🔵 Розвиток | Автоматична збірка обох цілей та прогін selftest на push |
