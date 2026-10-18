@@ -118,7 +118,7 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // DIP1 ON: forced 54 V manual mode (no auto logic).
 // During a session, once min cell >= 3400 mV (~90%) the charge current cap
 // drops to 2.0 A per pack so passive balancing has hours of gentle CV time.
-#define BAL_AUTO_ENABLED 0 // 0 until test (А)/(Б) verdict; flip to 1 after
+#define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 30      // anomaly bucket: retry in 24 h
 #define BAL_SPREAD_MED_MV 20       // anomaly bucket: retry in 72 h
 #define BAL_SPREAD_EXIT_MV 15      // session success target (spread <= this)
