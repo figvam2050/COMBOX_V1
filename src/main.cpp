@@ -135,7 +135,7 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> abort session
-#define BAL_OUTAGE_AGG_N 47        // ~60 s at one aggregate per ~1.28 s
+#define BAL_OUTAGE_AGG_N 19        // ~60 s at one aggregate per 3.2 s (full poll cycle)
 #define BAL_EXIT_STREAK 3          // consecutive aggregates with spread <= exit
 #define BAL_TEMP_MIN_C 0.0f
 #define BAL_TEMP_MAX_C 45.0f
@@ -173,6 +173,16 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define UART_BMS_TX_PIN GPIO_PIN_9
 #define UART_BMS_RX_PIN GPIO_PIN_10
 
+// PCS-485 port (UART4, PC12/PD2 — PORT_MAPPING.md §3/§5; no UART5 on GD32F30x)
+#define PCS_UART UART4
+#define PCS_UART_RCU RCU_UART4
+#define PCS_TX_PORT GPIOC
+#define PCS_TX_RCU RCU_GPIOC
+#define PCS_TX_PIN GPIO_PIN_12
+#define PCS_RX_PORT GPIOD
+#define PCS_RX_RCU RCU_GPIOD
+#define PCS_RX_PIN GPIO_PIN_2
+
 #define DEYE_CAN CAN0
 #define DEYE_CAN_RCU RCU_CAN0
 #define DEYE_CAN_GPIO_PORT GPIOB
@@ -184,8 +194,8 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 //   LED5 (PB0)  = system running (program alive) — steady ON after init;
 //   LED6 (PB1)  = BMS RS485 exchange — blinks on TX/RX with battery;
 //   LED4 (PC5)  = CAN to inverter — blinks on TX bursts;
-//   LED3 (PC4)  = inverter RS485 (UART4, Q23) — blinks on TX/RX once the
-//                 UART4 slave exists, dark until implemented;
+//   LED3 (PC4)  = PCS-485 port (UART4, Q23): blinks on TX/RX — mirror mode
+//                 (DIP2 OFF) or inverter bridge traffic (DIP2 ON);
 //   LED1 (PC13) = free/debug — dark;
 //   LED2 (VDDA) = power — wired to rail, not MCU-controlled.
 // PC5 is NOT an RS485 direction pin (PC5=DE disproven, RS485 has
@@ -319,7 +329,7 @@ static void leds_init(void) {
   gpio_init(LED_PCSCAN_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_PCSCAN_PIN);
   gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
-  // LED3 (PC4): inverter RS485 (UART4/Q23) — dark until UART4 TX/RX exists.
+  // LED3 (PC4): PCS-485 (UART4) activity — mirror/bridge, see pcs_poll_service().
   gpio_init(LED_INV485_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_INV485_PIN);
   gpio_bit_reset(LED_INV485_PORT, LED_INV485_PIN);
@@ -367,10 +377,265 @@ static void rs485_clear_errors(void) {
   usart_flag_clear(USART0, USART_FLAG_PERR);
 }
 
+static void pcs_mirror_push(uint8_t b); // defined with the PCS-485 block below
+
 static void rs485_flush_rx(void) {
   while (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET)
-    (void)usart_data_receive(USART0); // залишкові байти обірваного кадру
+    pcs_mirror_push((uint8_t)usart_data_receive(USART0)); // залишкові байти обірваного кадру
   rs485_clear_errors();
+}
+
+// ===== PCS-485 port (UART4, Q23) — two modes selected by DIP2 (18.10.2026) =====
+// DIP2 OFF (default): MIRROR — the box works as always (own polls, CAN) and a
+//   byte-level copy of its BMS exchange (both directions) shifts out of UART4,
+//   so a USB-UART adapter on the PCS-485 jack hears everything the box says to
+//   the battery and everything the battery answers, without tapping the cable.
+// DIP2 ON: PURE BRIDGE — the box sends NO commands of its own to the battery;
+//   inverter requests arriving on UART4 are forwarded to the BMS line and the
+//   answer is relayed straight back. The same traffic is pushed through
+//   bms_parse_response() so CAN keeps broadcasting (listen/observe) and the
+//   balance engine keeps its aggregates. Safeguards: only fixed 8-byte
+//   FC03/FC04 read requests with a good CRC are forwarded (writes and noise
+//   are dropped, the inverter just times out).
+//   PRODUCTION KEEPS DIP2 OFF — 13.10 analysis: the inverter would read raw
+//   packs over RS485, bypassing our CCL stop-tap aggregation; this mode is
+//   research/diagnostics (DEYE_CAN_RS485_BASE.md §Q23, TODO §5.1).
+#define DIP2_BRIDGE_MODE 0x02
+#define PCS_GAP_MS 5           // ~3.5 idle chars at 9600 (3.65 ms): Modbus frame gap
+#define PCS_RESP_FIRST_MS 300  // BMS must start answering within this
+#define PCS_RESP_MAX_MS 1000   // whole bridged response hard cap
+#define PCS_RESP_STALL_MS 200  // give up on a 1..3 byte fragment after this
+#define PCS_NOISE_MIN_LEN 4    // shorter bursts (floating bus) are noise
+#define BR_SWEEP_MAX_MS 15000UL // inverter loop ≈13 s for 16 addrs @ ~400 ms
+
+static void watchdog_feed(void);
+static bool bms_parse_response(uint8_t expected_addr);
+static void bms_aggregate_data(void);
+static void agg_reset(void);
+
+static void pcs_uart_init(void) {
+  rcu_periph_clock_enable(RCU_GPIOD);
+  rcu_periph_clock_enable(PCS_TX_RCU);
+  rcu_periph_clock_enable(PCS_UART_RCU);
+  gpio_init(PCS_TX_PORT, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, PCS_TX_PIN);
+  gpio_init(PCS_RX_PORT, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, PCS_RX_PIN);
+  usart_deinit(PCS_UART);
+  usart_baudrate_set(PCS_UART, BMS_BAUDRATE);
+  usart_parity_config(PCS_UART, USART_PM_NONE);
+  usart_word_length_set(PCS_UART, USART_WL_8BIT);
+  usart_stop_bit_set(PCS_UART, USART_STB_1BIT);
+  usart_transmit_config(PCS_UART, USART_TRANSMIT_ENABLE);
+  usart_receive_config(PCS_UART, USART_RECEIVE_ENABLE);
+  usart_enable(PCS_UART);
+}
+
+// UART4 error flags, same treatment as rs485_clear_errors() gives USART0:
+// without this an overrun taken while the main loop is blocked (CAN burst)
+// could stick on the PCS port and wedge its receive path.
+static void pcs_clear_errors(void) {
+  usart_flag_clear(PCS_UART, USART_FLAG_ORERR);
+  usart_flag_clear(PCS_UART, USART_FLAG_NERR);
+  usart_flag_clear(PCS_UART, USART_FLAG_FERR);
+  usart_flag_clear(PCS_UART, USART_FLAG_PERR);
+}
+
+static uint32_t pcs_led_off_ms = 0;
+static void pcs_led_activity(void) {
+  gpio_bit_set(LED_INV485_PORT, LED_INV485_PIN);
+  pcs_led_off_ms = millis() + 100;
+}
+
+// --- mirror ring buffer (DIP2 OFF); single-threaded polling, no volatile ---
+static uint8_t pcs_mirror_q[256];
+static uint16_t pcs_mirror_head = 0;
+static uint16_t pcs_mirror_tail = 0;
+static bool pcs_bridge_mode = false;
+
+static void pcs_mirror_push(uint8_t b) {
+  if (pcs_bridge_mode)
+    return; // PCS port belongs to the inverter in bridge mode
+  uint16_t next = (uint16_t)((pcs_mirror_head + 1) & 0xFF);
+  if (next == pcs_mirror_tail)
+    return; // listener too slow — drop, never block the BMS path
+  pcs_mirror_q[pcs_mirror_head] = b;
+  pcs_mirror_head = next;
+  pcs_led_activity();
+}
+
+static void pcs_mirror_pump(void) {
+  if (pcs_mirror_head != pcs_mirror_tail &&
+      usart_flag_get(PCS_UART, USART_FLAG_TBE) != RESET) {
+    usart_data_transmit(PCS_UART, pcs_mirror_q[pcs_mirror_tail]);
+    pcs_mirror_tail = (uint16_t)((pcs_mirror_tail + 1) & 0xFF);
+    pcs_led_activity(); // LED3 follows the line until the queue drains
+  }
+}
+
+// --- bridge state (DIP2 ON) ---
+enum { BR_IDLE = 0, BR_SEND, BR_WAIT_RESP, BR_FWD_RESP };
+static uint8_t br_state = BR_IDLE;
+static uint8_t inv_frame[256]; // one complete inverter request
+static uint16_t inv_frame_n = 0;
+static uint8_t inv_rx[256]; // request bytes still collecting
+static uint16_t inv_rx_n = 0;
+static uint32_t inv_last_rx_ms = 0;
+static uint32_t br_sent_ms = 0;
+static uint32_t br_first_ms = 0;
+static uint32_t br_last_ms = 0;
+static bool br_got = false;
+
+// Modbus RTU request sanity: fixed 8-byte read (FC03/FC04), good CRC.
+static bool pcs_request_ok(const uint8_t *f) {
+  if (f[1] != 0x03 && f[1] != 0x04)
+    return false;
+  uint16_t crc = modbus_crc16(f, 6);
+  return f[6] == (uint8_t)(crc & 0xFF) && f[7] == (uint8_t)(crc >> 8);
+}
+
+static void pcs_uart_rx_service(uint32_t now) {
+  if (usart_flag_get(PCS_UART, USART_FLAG_RBNE) == RESET)
+    return;
+  uint8_t b = (uint8_t)usart_data_receive(PCS_UART);
+  pcs_led_activity();
+  if (inv_rx_n < sizeof(inv_rx))
+    inv_rx[inv_rx_n++] = b;
+  inv_last_rx_ms = now;
+}
+
+// Called every main-loop pass and inside bms_receive_response(): mirror mode
+// drains the ring; bridge mode reads UART4 and closes a request on silence.
+static void pcs_poll_service(uint32_t now) {
+  if (!pcs_bridge_mode) {
+    pcs_mirror_pump();
+    return;
+  }
+  pcs_uart_rx_service(now);
+  if (inv_frame_n == 0 && inv_rx_n != 0 && (now - inv_last_rx_ms) >= PCS_GAP_MS) {
+    if (inv_rx_n >= PCS_NOISE_MIN_LEN && pcs_request_ok(inv_rx)) {
+      memcpy(inv_frame, inv_rx, inv_rx_n);
+      inv_frame_n = inv_rx_n;
+    }
+    inv_rx_n = 0;
+  }
+}
+
+// Bridge mode drives aggregation itself (the box sends no own polls): each
+// parsed bridged response feeds the sums once per sweep (dedupe in the
+// parser), and the sweep closes when every known pack has been seen or after
+// BR_SWEEP_MAX_MS — the inverter's own loop takes ~13 s for 16 addresses.
+// A timeout with agg_count == 0 still runs bms_aggregate_data(): it only
+// does the presence bookkeeping and clears sweep_seen_mask (after a
+// fail-closed agg_reset mid-sweep the mask could otherwise stick full and
+// dedupe would starve every later response).
+static uint32_t br_sweep_start_ms = 0;
+
+static void bridge_sweep_tick(uint32_t now) {
+  if (br_sweep_start_ms == 0) {
+    br_sweep_start_ms = now;
+    return;
+  }
+  bool complete = pack_ever_seen_mask != 0 && agg_count != 0 &&
+                  ((sweep_seen_mask & pack_ever_seen_mask) == pack_ever_seen_mask);
+  if (complete || (now - br_sweep_start_ms) >= BR_SWEEP_MAX_MS) {
+    bms_aggregate_data();
+    br_sweep_start_ms = 0;
+  }
+}
+
+static bool pcs_bridge_finish(void) {
+  inv_frame_n = 0;
+  uart_rx_index = 0;
+  gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+  br_state = BR_IDLE;
+  return true; // informational only — own polling never resumes in bridge mode
+}
+
+// Bridge step: runs once per main-loop pass. Returns true when a bridged
+// transaction just finished (ignored by the caller — while DIP2 is ON the
+// box sends no polls of its own).
+static bool pcs_bridge_step(uint32_t now) {
+  switch (br_state) {
+  case BR_IDLE: {
+    if (inv_frame_n == 0)
+      return false;
+    rs485_flush_rx();
+    pcs_clear_errors(); // drop UART4 overrun left by a blocked loop pass
+    uart_rx_index = 0;
+    gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN);
+    for (uint16_t i = 0; i < inv_frame_n; i++) {
+      rs485_send_byte(inv_frame[i]);
+      pcs_poll_service(millis()); // keep UART4 RX from overrunning
+    }
+    br_sent_ms = millis();
+    br_got = false;
+    br_state = BR_WAIT_RESP;
+    return false;
+  }
+
+  case BR_WAIT_RESP: {
+    pcs_poll_service(millis());
+    if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
+      uint8_t b = (uint8_t)usart_data_receive(USART0);
+      if (!br_got) {
+        br_got = true;
+        br_first_ms = now;
+      }
+      br_last_ms = now;
+      if (uart_rx_index < sizeof(uart_rx_buffer))
+        uart_rx_buffer[uart_rx_index++] = b;
+    }
+    if (br_got && uart_rx_index >= PCS_NOISE_MIN_LEN &&
+        (now - br_last_ms) >= PCS_GAP_MS) {
+      // Feed CAN/balance from the bridged exchange: in bridge mode the box
+      // sends no own polls, so this is the ONLY data source. Keeps
+      // last_bms_response_ms fresh -> fail-closed still trips when the
+      // inverter stops polling.
+      if (bms_parse_response(uart_rx_buffer[0]))
+        last_bms_response_ms = millis();
+      br_state = BR_FWD_RESP; // complete answer — relay it as-is
+      return false;
+    }
+    if (br_got && (now - br_first_ms) >= PCS_RESP_MAX_MS)
+      return pcs_bridge_finish(); // too slow — let the inverter time out
+    if (br_got && (now - br_last_ms) >= PCS_RESP_STALL_MS)
+      return pcs_bridge_finish(); // truncated fragment (1..3 bytes)
+    if (!br_got && (now - br_sent_ms) >= PCS_RESP_FIRST_MS)
+      return pcs_bridge_finish(); // BMS stayed silent
+    return false;
+  }
+
+  case BR_FWD_RESP: {
+    for (uint16_t i = 0; i < uart_rx_index; i++) {
+      usart_data_transmit(PCS_UART, uart_rx_buffer[i]);
+      while (usart_flag_get(PCS_UART, USART_FLAG_TBE) == RESET)
+        ;
+      pcs_led_activity();
+      pcs_poll_service(millis());
+    }
+    return pcs_bridge_finish();
+  }
+
+  default:
+    return pcs_bridge_finish();
+  }
+}
+
+// DIP2 mode switch; deferred while a bridge transaction is in flight
+// (retried from the 250 ms DIP poll until the bridge goes idle).
+static void pcs_mode_apply(uint8_t code) {
+  bool bridge = (code & DIP2_BRIDGE_MODE) != 0;
+  if (bridge == pcs_bridge_mode)
+    return;
+  if (br_state != BR_IDLE || inv_frame_n != 0)
+    return; // busy — keep the old mode for now
+  pcs_bridge_mode = bridge;
+  pcs_mirror_head = pcs_mirror_tail = 0;
+  inv_rx_n = 0;
+  // Drop a half-built sweep from the other mode so dedupe/sums start clean.
+  br_sweep_start_ms = 0;
+  sweep_seen_mask = 0;
+  if (agg_count != 0)
+    agg_reset();
 }
 
 static void bms_send_query(uint8_t addr_index) {
@@ -379,8 +644,10 @@ static void bms_send_query(uint8_t addr_index) {
   gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN); // poll in flight
   // No DE pin on the transceiver (auto-direction, ORIGINAL_FIRMWARE.md §14.3):
   // just shift the frame out; direction switches in hardware.
-  for (uint8_t i = 0; i < 8; i++)
+  for (uint8_t i = 0; i < 8; i++) {
     rs485_send_byte(BMS_QUERY_TABLE[addr_index][i]);
+    pcs_mirror_push(BMS_QUERY_TABLE[addr_index][i]); // no-op in bridge mode
+  }
 }
 
 static uint16_t bms_receive_response(void) {
@@ -388,10 +655,12 @@ static uint16_t bms_receive_response(void) {
   uint32_t start_ms = millis();
   uint32_t wait_start = start_ms;
   while (millis() - wait_start < BMS_TIMEOUT_MS) {
+    pcs_poll_service(millis()); // mirror drain / inverter RX while we wait
     if (millis() - start_ms >= 500)
       break; // жорсткий дедлайн від першого байта
     if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
       uint8_t byte = usart_data_receive(USART0);
+      pcs_mirror_push(byte); // no-op in bridge mode
       if (uart_rx_index < sizeof(uart_rx_buffer)) {
         uart_rx_buffer[uart_rx_index++] = byte;
       } else {
@@ -408,16 +677,26 @@ static uint16_t bms_receive_response(void) {
 }
 
 static bool bms_parse_response(uint8_t expected_addr) {
-  if (uart_rx_index < BMS_RESPONSE_LEN)
+  if (expected_addr < 1 || expected_addr > 16)
+    return false; // not one of our pack addresses (bridge forwards anything)
+  if (uart_rx_index < 5)
     return false;
-  if (uart_rx_buffer[0] != expected_addr || uart_rx_buffer[1] != 0x03 ||
-      uart_rx_buffer[2] != 0x4E)
+  if (uart_rx_buffer[0] != expected_addr || uart_rx_buffer[1] != 0x03)
+    return false;
+  // Byte count: our own window is 0x4E (39 regs, 83 B); a bridged inverter
+  // frame (Deye) asks 0x38 (28 regs, 61 B). Other windows (e.g. reg 0x50)
+  // are not ours — they stay transparent and are never aggregated.
+  uint16_t data_bytes = uart_rx_buffer[2];
+  if (data_bytes != 0x4E && data_bytes != 0x38)
+    return false;
+  uint16_t frame_len = (uint16_t)(5 + data_bytes);
+  if (uart_rx_index < frame_len)
     return false;
 
-  uint16_t received_crc = (uart_rx_buffer[BMS_RESPONSE_LEN - 1] << 8) |
-                          uart_rx_buffer[BMS_RESPONSE_LEN - 2];
+  uint16_t received_crc = (uart_rx_buffer[frame_len - 1] << 8) |
+                          uart_rx_buffer[frame_len - 2];
   uint16_t calculated_crc =
-      modbus_crc16((uint8_t *)uart_rx_buffer, BMS_RESPONSE_LEN - 2);
+      modbus_crc16((uint8_t *)uart_rx_buffer, frame_len - 2);
   if (received_crc != calculated_crc)
     return false;
 
@@ -464,11 +743,15 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (pack_t_min < agg_temp_min)
     agg_temp_min = pack_t_min;
 
-  // Status, Warning, Protection, Error registers (regs 25..28, bytes 53..60)
+  // Status, Warning, Protection (regs 25..27, bytes 53..58): present in both
+  // accepted windows (data_bytes >= 56). Error (reg 28, bytes 59..60) exists
+  // only in the full 39-reg window — the 28-reg inverter window ends at reg 27.
   uint16_t reg_status  = ((uint16_t)uart_rx_buffer[53] << 8) | uart_rx_buffer[54];
   uint16_t reg_warning = ((uint16_t)uart_rx_buffer[55] << 8) | uart_rx_buffer[56];
   uint16_t reg_protect = ((uint16_t)uart_rx_buffer[57] << 8) | uart_rx_buffer[58];
-  uint16_t reg_error   = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
+  uint16_t reg_error   = 0;
+  if (data_bytes >= 58)
+    reg_error = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
 
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
   // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
@@ -513,14 +796,19 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_warning & 0x0010)
     sweep_alarm_b3 |= CAN_PROT_CHARGE_OC;
 
-  if (expected_addr >= 1 && expected_addr <= 16)
-    sweep_seen_mask |= (1 << (expected_addr - 1));
+  bool dup = (sweep_seen_mask & (1 << (expected_addr - 1))) != 0;
+  sweep_seen_mask |= (1 << (expected_addr - 1));
 
-  agg_voltage_sum += raw_voltage / 100.0f;
-  agg_current_sum += raw_current / 100.0f;
-  agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
-  agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
-  agg_count++;
+  // Feed the sums once per address per sweep: in bridge mode the inverter may
+  // repeat an address and would bias the averages toward it. Cells/temps and
+  // the |= latches above stay idempotent, so only the sums are gated.
+  if (!dup) {
+    agg_voltage_sum += raw_voltage / 100.0f;
+    agg_current_sum += raw_current / 100.0f;
+    agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
+    agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
+    agg_count++;
+  }
 
   return true;
 }
@@ -1063,6 +1351,7 @@ static void dip_charge_profile_apply(uint8_t code) {
                                       : CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
+  pcs_mode_apply(code); // DIP2: mirror (OFF) vs inverter bridge (ON)
 }
 
 static void dip_charge_profile_init(void) {
@@ -1096,6 +1385,7 @@ int main(void) {
   dip_charge_profile_init();
   leds_init();
   rs485_init();
+  pcs_uart_init(); // PCS-485 port (mirror/bridge, mode from DIP2)
   can_init_500k();
   watchdog_init();
 
@@ -1105,12 +1395,16 @@ int main(void) {
   while (1) {
     watchdog_feed();
     uint32_t now = millis();
+    pcs_poll_service(now); // mirror drain / bridge RX every pass
     if (now - last_dip_poll >= 250) {
       last_dip_poll = now;
       dip_charge_profile_poll();
+      pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
       balance_led_tick(now);
     }
-    if (now - last_bms >= BMS_POLL_PERIOD_MS) {
+    // Own BMS polls only in mirror mode — DIP2 ON is a pure bridge (no own
+    // commands on the battery line at all).
+    if (now - last_bms >= BMS_POLL_PERIOD_MS && !pcs_bridge_mode) {
       last_bms = now;
       bms_send_query(current_addr_index);
       bms_receive_response();
@@ -1121,6 +1415,13 @@ int main(void) {
         current_addr_index = 0;
         bms_aggregate_data();
       }
+    }
+
+    // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
+    // same traffic (parse happens inside the step; aggregates close per sweep).
+    if (pcs_bridge_mode) {
+      pcs_bridge_step(now);
+      bridge_sweep_tick(now);
     }
 
     if (millis() - last_bms_response_ms > BMS_DEFAULT_TIMEOUT_MS) {
@@ -1158,6 +1459,12 @@ int main(void) {
     if (can_led_off_ms && (int32_t)(millis() - can_led_off_ms) >= 0) {
       gpio_bit_reset(LED_PCSCAN_PORT, LED_PCSCAN_PIN);
       can_led_off_ms = 0;
+    }
+
+    // LED3 (PC4, PCS-485): release ~100 ms after the last mirror/bridge byte.
+    if (pcs_led_off_ms && (int32_t)(millis() - pcs_led_off_ms) >= 0) {
+      gpio_bit_reset(LED_INV485_PORT, LED_INV485_PIN);
+      pcs_led_off_ms = 0;
     }
   }
 }
