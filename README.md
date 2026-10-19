@@ -1,5 +1,7 @@
 # COM-Box — Прошивка конвертера BMS RS485 → CAN (Deye / Pylontech)
 
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
 Прошивка PlatformIO для мікроконтролера **GD32F305RCT6** (Cortex-M4F, 256K Flash, 96K RAM), яка виконує роль інтелектуального шлюзу між акумуляторним банком **Vision V-LFP48100 (15S LiFePO4)** та гібридним інвертором **Deye** (протокол CAN Lithium Mode 00 = Pylontech CAN v2.0.6, 500 кбіт/с).
 
 Єдине джерело коду прошивки — [`src/main.cpp`](src/main.cpp) (~1470 рядків, чистий FSM, без RTOS).
