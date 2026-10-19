@@ -10,6 +10,9 @@
  *
  * CAN bus speed: 500 kbit/s, measured manually on real hardware (BTR = 0x030A0000).
  * The 250 kbit/s value was never confirmed and is not a valid option.
+ *
+ * SPDX-License-Identifier: CC-BY-NC-SA-4.0
+ * Copyright (C) 2026 FigVam
  */
 
 #include "gd32f30x.h"
