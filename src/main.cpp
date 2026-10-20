@@ -87,8 +87,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_TAPER_START_MV_DIP90 3400
 #define CELL_CHARGE_STOP_MV_DIP90 3455
 #define CELL_CHARGE_REENABLE_MV_DIP90 3405
-// 90% profile = SW1 ON (weight 1 => code 0b00001), moved from SW4 on 17.10.2026
-// (convenient switch); stock SW1 protocol meaning (PYLON) is not used by us.
+// DIP1 OFF (default) = standard 54.0 V mode (100% profile, full thresholds);
+// DIP1 ON = 51.8 V option (90% profile, economy thresholds, auto balance
+// sessions disabled, trickle cap from 3400 mV, LED1 solid indicator).
+// Bit moved from SW4 on 17.10.2026 (convenient end switch, silkscreen "SW1"
+// near the PCS-485/CAN jacks); stock SW1 protocol meaning (PYLON) unused.
 #define DIP_PROFILE_CODE_90 1
 // DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW1 voltage profile.
@@ -117,10 +120,11 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
 // ===== Balance session engine (17.10.2026) =====
-// DIP1 OFF: 51.8 V base + auto sessions at 54 V driven by cell analysis.
-// DIP1 ON: forced 54 V manual mode (no auto logic).
-// During a session, once min cell >= 3400 mV (~90%) the charge current cap
-// drops to 2.0 A per pack so passive balancing has hours of gentle CV time.
+// DIP1 OFF (standard): CVL 54.0 V; auto balance windows (BAL_AUTO_ENABLED)
+// open on cell-spread analysis: full thresholds + 2 A per pack cap.
+// DIP1 ON (51.8 V option): auto logic disabled, profile holds 51.8 V with
+// the same 2 A trickle from 3400 mV (~90%) so passive balancing has gentle
+// CV time.
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 30      // anomaly bucket: retry in 24 h
 #define BAL_SPREAD_MED_MV 20       // anomaly bucket: retry in 72 h
@@ -910,12 +914,12 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 }
 
 // ===== Balance session engine (17.10.2026) =====
-// DIP1 OFF: CVL 51.8 V + auto sessions at 54 V (BAL_AUTO_ENABLED), driven by
-// cell-spread analysis. DIP1 ON: forced 54 V manual mode, no auto logic.
-// Both modes cap the current at 2 A per pack once min cell >= 3400 mV (~90%),
-// giving passive balancing hours of gentle CV time. Sessions exit on spread
-// convergence, BMS loss, sustained discharge (grid outage), no progress or
-// an 8 h timeout, then fall back to the 90% profile.
+// DIP1 OFF (standard 54.0 V): auto sessions (BAL_AUTO_ENABLED) driven by
+// cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
+// full; current capped at 2 A per pack once min cell >= 3400 mV).
+// DIP1 ON (51.8 V option): auto logic disabled; the same 2 A trickle from
+// 3400 mV applies. Sessions exit on spread convergence, BMS loss, sustained
+// discharge (grid outage), no progress or an 8 h timeout.
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
@@ -964,9 +968,9 @@ static void balance_update(uint8_t packs) {
   if (have_cells)
     balance_hist_push(spread, now);
 
-  // DIP1 transitions: manual takes over an active session; leaving manual
-  // drops back to the plain 90% mode behind a cooldown so an auto session
-  // cannot re-trigger instantly.
+  // DIP1 transitions: switching the 51.8 V option ON aborts an active
+  // session; leaving the option returns to standard 54 V behind a cooldown
+  // so an auto session cannot re-trigger instantly.
   if (manual && !bal_manual_prev) {
     bal_session_active = false;
     bal_manual_prev = true;
@@ -1091,8 +1095,8 @@ static void balance_update(uint8_t packs) {
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 }
 
-// LED1 (PC13): OFF = 90% mode, slow blink = auto session, solid = manual
-// DIP1 ON (left enabled). Called from the main loop.
+// LED1 (PC13): solid = 51.8 V option (DIP1 ON), slow blink = auto session,
+// off = standard 54 V without session. Called from the main loop.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
