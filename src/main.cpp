@@ -108,6 +108,47 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_DISCHARGE_REENABLE_MV 3000
 #define CELL_MAX_DELTA_MV 400
 
+// ===== SOC з напруги комірок (P1.1, 22.10.2026) =====
+// Заводський SOC Vision (рег 24) мертвий — зависає на 100% навіть за
+// розряду до 3.43 В/комірку (польові логи 22.10: SOC=100 при мін 3425 мВ).
+// Тому 0x355 SOC рахується з мінімальної (найгіршої) комірки за LFP
+// OCV-таблицею (25 °C) з EMA-згладжуванням (α=1/8 ≈ 8 sweep-ів). Мінімальна
+// комірка — консервативний вибір: інвертор ніколи не бачить більше, ніж є.
+// Обмеження: плоска ділянка LFP 3.33–3.38 В дає похибку ±10%; просідання
+// напруги під навантаженням тимчасово занижує SOC — EMA вирівнює.
+// Валідність лише для 15S LFP (Vision); для інших хімій/серий — своя таблиця.
+static const struct {
+  uint16_t mv;
+  uint8_t soc;
+} lfp_ocv_table[] = {
+    {3650, 100}, {3600, 99}, {3550, 95}, {3500, 90}, {3450, 85},
+    {3420, 80},  {3400, 70}, {3380, 60}, {3360, 50}, {3340, 40},
+    {3320, 30},  {3300, 20}, {3280, 15}, {3250, 10}, {3200, 5},
+    {3100, 2},   {2900, 0},
+};
+static int16_t soc_ema_x8 = 0;   // SOC у 1/8 % для EMA без дробів
+static bool soc_ema_valid = false;
+
+static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
+  uint8_t n = sizeof(lfp_ocv_table) / sizeof(lfp_ocv_table[0]);
+  if (cell_mv >= lfp_ocv_table[0].mv)
+    return 100;
+  if (cell_mv <= lfp_ocv_table[n - 1].mv)
+    return 0;
+  for (uint8_t i = 1; i < n; i++) {
+    if (cell_mv >= lfp_ocv_table[i].mv) {
+      uint16_t mv_hi = lfp_ocv_table[i - 1].mv;
+      uint16_t mv_lo = lfp_ocv_table[i].mv;
+      uint8_t soc_hi = lfp_ocv_table[i - 1].soc;
+      uint8_t soc_lo = lfp_ocv_table[i].soc;
+      return (uint8_t)(soc_lo +
+                       (uint16_t)(soc_hi - soc_lo) * (cell_mv - mv_lo) /
+                           (mv_hi - mv_lo));
+    }
+  }
+  return 0;
+}
+
 // Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C.
 // Charging re-enables with hysteresis (>= +3°C and <= 50°C) to prevent chattering.
 #define TEMP_CHARGE_MIN_C 2.0f
@@ -247,7 +288,6 @@ static uint8_t bms_pack_count = 0;
 
 static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
-static uint32_t agg_soc_sum = 0;
 static uint32_t agg_soh_sum = 0;
 static float agg_temp_max = -1000.0f;
 static float agg_temp_min = 1000.0f;
@@ -709,8 +749,12 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   uint16_t raw_voltage = (uart_rx_buffer[3] << 8) | uart_rx_buffer[4];
   int16_t raw_current = (int16_t)((uart_rx_buffer[5] << 8) | uart_rx_buffer[6]);
-  uint16_t raw_soc = (uart_rx_buffer[45] << 8) | uart_rx_buffer[46];
-  uint16_t raw_soh = (uart_rx_buffer[47] << 8) | uart_rx_buffer[48];
+  // P1.1 (22.10.2026): офсети за PDF V01.01 — SOC = рег 0024, SOH = рег 0023.
+  // Раніше читались рег 21 (Cap Remaining) і 22 (MaxCharge) — маскувалось
+  // 100 А·ч. SOC тут лише для UV-гейтів (він мертвий у Vision, див. P1.1
+  // у IMPROVEMENTS_TODO); CAN-SOC рахується з напруги комірок.
+  uint16_t raw_soc = (uart_rx_buffer[51] << 8) | uart_rx_buffer[52];
+  uint16_t raw_soh = (uart_rx_buffer[49] << 8) | uart_rx_buffer[50];
 
   for (uint8_t cell = 0; cell < 15; cell++) {
     uint16_t cell_mv = ((uint16_t)uart_rx_buffer[7 + cell * 2] << 8) |
@@ -812,7 +856,6 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (!dup) {
     agg_voltage_sum += raw_voltage / 100.0f;
     agg_current_sum += raw_current / 100.0f;
-    agg_soc_sum += (uint8_t)(raw_soc & 0xFF);
     agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
     agg_count++;
   }
@@ -1123,7 +1166,6 @@ static void balance_led_tick(uint32_t now) {
 static void agg_reset(void) {
   agg_voltage_sum = 0.0f;
   agg_current_sum = 0.0f;
-  agg_soc_sum = 0;
   agg_soh_sum = 0;
   agg_temp_max = -1000.0f;
   agg_temp_min = 1000.0f;
@@ -1157,7 +1199,18 @@ static void bms_aggregate_data(void) {
   // Deye PCS CAN V3.3: 0x356 current is discharge positive, charge negative.
   bms_current = BMS_CURRENT_CHARGE_IS_POSITIVE ? -agg_current_sum
                                                : agg_current_sum;
-  bms_soc = (uint8_t)(agg_soc_sum / agg_count);
+  // P1.1: SOC з мінімальної комірки (мертвий рег 24 BMS не використовується);
+  // перший sweep — snap без фільтра, далі EMA α=1/8.
+  if (agg_min_cell_mv != 0xFFFF) {
+    uint8_t soc_now = soc_from_cell_mv(agg_min_cell_mv);
+    if (!soc_ema_valid) {
+      soc_ema_x8 = (int16_t)soc_now * 8;
+      soc_ema_valid = true;
+    } else {
+      soc_ema_x8 += ((int16_t)soc_now * 8 - soc_ema_x8) / 8;
+    }
+    bms_soc = (uint8_t)((soc_ema_x8 + 4) / 8);
+  }
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
 
@@ -1274,7 +1327,16 @@ static void send_all_frames(void) {
   send_can_std(CAN_ID_LIMITS, data, 8);
 
   memset(data, 0, 8);
-  put_u16le(&data[0], bms_soc);
+  // Deye off-grid workaround (Battery-Emulator BYD-CAN.cpp): оф-грід Deye
+  // ігнорує CCL/DCL і розряджає до SOC=0. Дзеркалити ліміти в SOC:
+  // DCL=0 (розряд заборонено / порожній) → SOC=0; CCL=0 (заряд заборонено /
+  // повний) → SOC=100. Обидва 0 (нема даних) → SOC=0 (чесний «не запрошуй»).
+  uint8_t can_soc = bms_soc;
+  if (discharge_current_limit == 0)
+    can_soc = 0;
+  else if (charge_current_limit == 0)
+    can_soc = 100;
+  put_u16le(&data[0], can_soc);
   put_u16le(&data[2], bms_soh);
   send_can_std(CAN_ID_SOC, data, 4);
 
@@ -1440,6 +1502,7 @@ int main(void) {
       bms_soc = BATTERY_SOC_DEFAULT;
       bms_soh = BATTERY_SOH_DEFAULT;
       bms_temp = BATTERY_TEMP_DEFAULT;
+      soc_ema_valid = false; // наступний sweep snap без фільтра
       charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;

@@ -40,17 +40,21 @@ CELL_COUNT = 15
 REG_TEMP_A = 0x0012    # байти [39,40]
 REG_TEMP = 0x0013      # байти [41,42] — парсер бере саме цей (цілі °C)
 REG_TEMP_B = 0x0014    # байти [43,44]
-REG_SOC = 0x0015       # байти [45,46] — формула 0x00XX → & 0xFF
-REG_SOH = 0x0016       # байти [47,48]
+# P1.1 (22.10.2026): офсети за PDF V01.01 — SOC = рег 0024, SOH = рег 0023.
+# Раніше REG_SOC/REG_SOH вказували на рег 21 (Cap Remaining) / 22 (MaxCharge) —
+# маскувалось 100 А·ч (у фікстурі CapRem=50 читався як «SOC 50», реальний 49).
+REG_SOC = 0x0018       # байти [51,52]
+REG_SOH = 0x0017       # байти [49,50]
 REG_CELL_COUNT = 0x0024  # байти [75,76]
 REG_PACK_100AH = 0x0025  # байти [77,78] (у дампі = 1000)
 
-# Очікувані значення з дампа 08.10.2026 (ANALYSIS.md, Q3) — для --selftest
+# Очікувані значення з дампа 08.10.2026 (ANALYSIS.md, Q3) — для --selftest.
+# SOC=49 з реєстру 0024 (не 50 — це був Cap Remaining, рег 0021).
 GOLDEN = {
     "voltage_v": 49.45,
     "current_a": 0.0,
     "temp_c": 23.0,
-    "soc_pct": 50,
+    "soc_pct": 49,
     "soh_pct": 100,
     "cells_mv": [3297] * 15,
     "cell16_mv": 0,
@@ -206,7 +210,7 @@ def build_synthetic_frame(current_raw: int = 0) -> bytes:
     put(REG_TEMP_A, 24)
     put(REG_TEMP, 23)
     put(REG_TEMP_B, 23)
-    put(REG_SOC, 50)
+    put(REG_SOC, 49)
     put(REG_SOH, 100)
     put(REG_CELL_COUNT, 15)
     put(REG_PACK_100AH, 1000)
@@ -290,7 +294,7 @@ def selftest() -> int:
                 fails.append(f"{loc} невідомий тип кадру (довжина {len(fr)})")
     if not fails and golden_files:
         print(f"Золоті фікстури: {len(golden_files)} файл(и) у tools/dumps/ — усі кадри валідні "
-              f"(49.45 V, SOC 50, SOH 100, 23°C, 15 комірок, модель LFP-15S…)")
+              f"(49.45 V, SOC 49, SOH 100, 23°C, 15 комірок, модель LFP-15S…)")
 
     if fails:
         print("SELFTEST FAIL:")
