@@ -167,9 +167,9 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 // the same 2 A trickle from 3400 mV (~90%) so passive balancing has gentle
 // CV time.
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
-#define BAL_SPREAD_HIGH_MV 30      // anomaly bucket: retry in 24 h
-#define BAL_SPREAD_MED_MV 20       // anomaly bucket: retry in 72 h
-#define BAL_SPREAD_EXIT_MV 15      // session success target (spread <= this)
+#define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
+#define BAL_SPREAD_MED_MV 30       // regular spread bucket (30..100 mV): retry in 72 h
+#define BAL_SPREAD_EXIT_MV 25      // session success target (spread <= 25 mV)
 #define BAL_TREND_DELTA_MV_12H 5   // 5 mV over 12 h == 10 mV/24 h -> HIGH
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_MED_MS (72UL * 3600UL * 1000UL)
@@ -961,8 +961,8 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 // cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
 // full; current capped at 2 A per pack once min cell >= 3400 mV).
 // DIP1 ON (51.8 V option): auto logic disabled; the same 2 A trickle from
-// 3400 mV applies. Sessions exit on spread convergence, BMS loss, sustained
-// discharge (grid outage), no progress or an 8 h timeout.
+// 3400 mV applies. Sessions exit on spread convergence (<= 25 mV), BMS loss,
+// sustained discharge (grid outage), no progress or an 8 h timeout.
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
@@ -1106,8 +1106,8 @@ static void balance_update(uint8_t packs) {
   if ((int32_t)(now - bal_cooldown_until_ms) < 0)
     return;
 
-  // Severity: spread bucket + 12 h trend. An outlier >=50 mV is covered by
-  // the HIGH bucket (50 > 30).
+  // Severity: spread bucket + 12 h trend. Outliers >= 100 mV are covered by
+  // the HIGH bucket (interval: 24 h).
   uint32_t interval;
   if ((spread >= BAL_SPREAD_HIGH_MV) || balance_trend_high())
     interval = BAL_INTERVAL_HIGH_MS;
