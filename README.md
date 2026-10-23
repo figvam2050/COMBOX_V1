@@ -105,8 +105,6 @@
 | | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32 (режим ACK) та Arduino Nano для тестування COM-Box без інвертора |
 | | [`tools/rs485_sniff.py`](tools/rs485_sniff.py) | Пасивний сніфер батарейної шини Modbus RTU з авто-декодом полів Vision |
 | | [`tools/verify_dump.py`](tools/verify_dump.py) | Регресійні тести парсера BMS на реальних фікстурах дампів (`--selftest`, `--queries`) |
-| | [`HUAWEI_REFERENCE.md`](HUAWEI_REFERENCE.md) | Дослідження протоколу батарей Huawei ESM-48100 (довідковий матеріал на майбутнє) |
-| | [`ANENJI_REFERENCE.md`](ANENJI_REFERENCE.md) | Дослідження протоколів інвертора Anenji/SRNE (довідковий матеріал на майбутнє) |
 
 ---
 
