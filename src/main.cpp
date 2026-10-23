@@ -20,10 +20,10 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-#define BMS_TIMEOUT_MS 200
+#define BMS_TIMEOUT_MS 400         // 400 ms: matches Deye RS485 turnaround window for slow BMS
 #define BMS_RESPONSE_LEN 83
-#define BMS_POLL_PERIOD_MS 200
-#define BMS_DEFAULT_TIMEOUT_MS 4000
+#define BMS_POLL_GAP_MS 20         // 20 ms bus quiet gap between RS485 transactions
+#define BMS_DEFAULT_TIMEOUT_MS 8000 // 8 s fail-closed: covers full 16-addr sweep (16 * 400 ms = 6.4 s)
 
 const uint8_t BMS_QUERY_TABLE[16][8] = {
     {0x01, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xD0},
@@ -98,6 +98,10 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW1 voltage profile.
 #define DIP_CHARGE_CURRENT_50A 0x10
+// DIP3 (SW3, weight 4, PB14): fast polling mode (active packs only)
+// OFF = full scan across all 16 addresses, ON = fast polling latched active packs.
+#define DIP_FAST_POLL_MASK 0x04
+#define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
 // Independent of DIP90 taper target so that software 90% profile never generates false alarms:
@@ -355,6 +359,14 @@ static uint8_t bal_prev_packs = 0;
 static uint16_t bal_hist_mv[BAL_HIST_HOURS];
 static uint8_t bal_hist_n = 0;
 static uint32_t bal_last_hist_ms = 0;
+
+// Fast polling state (DIP3 / SW3)
+static bool fast_poll_enabled = false;
+static uint16_t fast_poll_mask = 0;
+static uint32_t last_bg_probe_ms = 0;
+static uint8_t bg_probe_candidate = 0;
+static bool bg_probe_in_flight = false;
+static uint8_t current_addr_index = 0;
 
 static uint8_t dip_applied_code = 0xFF;
 static uint8_t dip_last_code = 0;
@@ -712,8 +724,8 @@ static uint16_t bms_receive_response(void) {
   uint32_t wait_start = start_ms;
   while (millis() - wait_start < BMS_TIMEOUT_MS) {
     pcs_poll_service(millis()); // mirror drain / inverter RX while we wait
-    if (millis() - start_ms >= 500)
-      break; // жорсткий дедлайн від першого байта
+    if (millis() - start_ms >= 700)
+      break; // жорсткий дедлайн від першого байта (запас під повільні BMS)
     if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
       uint8_t byte = usart_data_receive(USART0);
       pcs_mirror_push(byte); // no-op in bridge mode
@@ -1213,12 +1225,13 @@ static void agg_reset(void) {
 static void bms_aggregate_data(void) {
   // Update pack presence with 3-miss debounce (Q21)
   uint8_t active_pack_count = 0;
+  uint16_t expected_mask = (fast_poll_enabled && fast_poll_mask != 0) ? fast_poll_mask : pack_ever_seen_mask;
   for (uint8_t i = 0; i < 16; i++) {
     if (sweep_seen_mask & (1 << i)) {
       pack_ever_seen_mask |= (1 << i);
       pack_miss_count[i] = 0;
       active_pack_count++;
-    } else if (pack_ever_seen_mask & (1 << i)) {
+    } else if (expected_mask & (1 << i)) {
       if (pack_miss_count[i] < 255)
         pack_miss_count[i]++;
       if (pack_miss_count[i] <= 2) {
@@ -1451,6 +1464,106 @@ static void watchdog_init(void) {
 
 static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
+static void fast_poll_mode_apply(uint8_t code) {
+  bool enabled = (code & DIP_FAST_POLL_MASK) != 0;
+  if (enabled == fast_poll_enabled)
+    return;
+  fast_poll_enabled = enabled;
+  if (enabled) {
+    uint16_t mask = pack_ever_seen_mask;
+    if (mask == 0)
+      mask = sweep_seen_mask;
+    fast_poll_mask = mask;
+    last_bg_probe_ms = millis();
+    bg_probe_candidate = 0;
+    bg_probe_in_flight = false;
+    if (fast_poll_mask != 0) {
+      for (uint8_t i = 0; i < 16; i++) {
+        if (fast_poll_mask & (1 << i)) {
+          current_addr_index = i;
+          break;
+        }
+      }
+    }
+  } else {
+    fast_poll_mask = 0;
+    bg_probe_in_flight = false;
+  }
+}
+
+static void bms_advance_poll_address(uint32_t now) {
+  if (!fast_poll_enabled || fast_poll_mask == 0) {
+    current_addr_index++;
+    if (current_addr_index >= 16) {
+      current_addr_index = 0;
+      bms_aggregate_data();
+      if (fast_poll_enabled && pack_ever_seen_mask != 0) {
+        fast_poll_mask = pack_ever_seen_mask;
+        for (uint8_t i = 0; i < 16; i++) {
+          if (fast_poll_mask & (1 << i)) {
+            current_addr_index = i;
+            break;
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  if (bg_probe_in_flight) {
+    bg_probe_in_flight = false;
+    for (uint8_t i = 0; i < 16; i++) {
+      if (fast_poll_mask & (1 << i)) {
+        current_addr_index = i;
+        break;
+      }
+    }
+    return;
+  }
+
+  uint8_t next_idx = 0xFF;
+  for (uint8_t a = current_addr_index + 1; a < 16; a++) {
+    if (fast_poll_mask & (1 << a)) {
+      next_idx = a;
+      break;
+    }
+  }
+
+  if (next_idx != 0xFF) {
+    current_addr_index = next_idx;
+    return;
+  }
+
+  // Fast sweep complete for all latched packs
+  bms_aggregate_data();
+
+  // Background discovery probe check
+  if ((fast_poll_mask != 0xFFFF) && (now - last_bg_probe_ms >= BG_PROBE_INTERVAL_MS)) {
+    uint8_t cand = 0xFF;
+    for (uint8_t s = 0; s < 16; s++) {
+      uint8_t c = (bg_probe_candidate + s) & 0x0F;
+      if (!(fast_poll_mask & (1 << c))) {
+        cand = c;
+        break;
+      }
+    }
+    if (cand != 0xFF) {
+      bg_probe_candidate = (cand + 1) & 0x0F;
+      last_bg_probe_ms = now;
+      bg_probe_in_flight = true;
+      current_addr_index = cand;
+      return;
+    }
+  }
+
+  for (uint8_t i = 0; i < 16; i++) {
+    if (fast_poll_mask & (1 << i)) {
+      current_addr_index = i;
+      break;
+    }
+  }
+}
+
 static uint8_t dip_read_code(void) {
   uint8_t code = (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
   if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= DIP_CHARGE_CURRENT_50A;
@@ -1474,7 +1587,8 @@ static void dip_charge_profile_apply(uint8_t code) {
                                       : CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10;
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
-  pcs_mode_apply(code); // DIP2: mirror (OFF) vs inverter bridge (ON)
+  pcs_mode_apply(code);       // DIP2: mirror (OFF) vs inverter bridge (ON)
+  fast_poll_mode_apply(code); // DIP3: full scan (OFF) vs fast polling (ON)
 }
 
 static void dip_charge_profile_init(void) {
@@ -1513,7 +1627,6 @@ int main(void) {
   watchdog_init();
 
   uint32_t last_bms = 0, last_can = 0, last_dip_poll = 0;
-  uint8_t current_addr_index = 0;
 
   while (1) {
     watchdog_feed();
@@ -1527,17 +1640,18 @@ int main(void) {
     }
     // Own BMS polls only in mirror mode — DIP2 ON is a pure bridge (no own
     // commands on the battery line at all).
-    if (now - last_bms >= BMS_POLL_PERIOD_MS && !pcs_bridge_mode) {
-      last_bms = now;
+    if (now - last_bms >= BMS_POLL_GAP_MS && !pcs_bridge_mode) {
       bms_send_query(current_addr_index);
       bms_receive_response();
       if (bms_parse_response(current_addr_index + 1)) {
         last_bms_response_ms = millis();
+        if (fast_poll_enabled && bg_probe_in_flight) {
+          fast_poll_mask |= (1 << current_addr_index);
+          pack_ever_seen_mask |= (1 << current_addr_index);
+        }
       }
-      if (++current_addr_index >= 16) {
-        current_addr_index = 0;
-        bms_aggregate_data();
-      }
+      bms_advance_poll_address(millis());
+      last_bms = millis();
     }
 
     // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
