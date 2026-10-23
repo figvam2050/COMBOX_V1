@@ -22,7 +22,8 @@
 #define BMS_BAUDRATE 9600
 #define BMS_TIMEOUT_MS 400         // 400 ms: matches Deye RS485 turnaround window for slow BMS
 #define BMS_RESPONSE_LEN 83
-#define BMS_POLL_GAP_MS 20         // 20 ms bus quiet gap between RS485 transactions
+#define BMS_POLL_PERIOD_MS 400     // 400 ms per query: matches Deye inverter polling cadence
+#define BMS_POLL_GAP_MS 20         // 20 ms minimum bus quiet gap between RS485 transactions
 #define BMS_DEFAULT_TIMEOUT_MS 8000 // 8 s fail-closed: covers full 16-addr sweep (16 * 400 ms = 6.4 s)
 
 const uint8_t BMS_QUERY_TABLE[16][8] = {
@@ -1626,7 +1627,7 @@ int main(void) {
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms = 0, last_can = 0, last_dip_poll = 0;
+  uint32_t last_bms_start = 0, last_bms_finish = 0, last_can = 0, last_dip_poll = 0;
 
   while (1) {
     watchdog_feed();
@@ -1640,7 +1641,9 @@ int main(void) {
     }
     // Own BMS polls only in mirror mode — DIP2 ON is a pure bridge (no own
     // commands on the battery line at all).
-    if (now - last_bms >= BMS_POLL_GAP_MS && !pcs_bridge_mode) {
+    // Polling cadence: 400 ms per query (matches Deye inverter) with min 20 ms bus silence.
+    if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS && !pcs_bridge_mode) {
+      last_bms_start = now;
       bms_send_query(current_addr_index);
       bms_receive_response();
       if (bms_parse_response(current_addr_index + 1)) {
@@ -1651,7 +1654,7 @@ int main(void) {
         }
       }
       bms_advance_poll_address(millis());
-      last_bms = millis();
+      last_bms_finish = millis();
     }
 
     // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
