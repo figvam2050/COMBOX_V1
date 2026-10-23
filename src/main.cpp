@@ -72,6 +72,8 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 540
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
+#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 516 // 51.6 V (3.44 V/cell * 15): hold voltage during balancing
+
 // Per-pack charge current limit, selected by DIP5 (see DIP_CHARGE_CURRENT_50A):
 // OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
 #define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10 400
@@ -179,6 +181,10 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 #define BAL_MIN_SOC_START 85
 #define BAL_TRICKLE_CELL_MV 3400   // ~90% -> 2 A per pack phase
 #define BAL_TRICKLE_A_X10 20       // 2.0 A per pack cap
+#define BAL_HOLD_CELL_MV 3560      // Float hold trigger: max cell reaches 3.56 V
+#define BAL_HOLD_RELEASE_MV 3530   // Float hold release: max cell relaxes below 3.53 V
+#define BAL_HOLD_A_X10 10          // 1.0 A per pack holding cap during float hold
+#define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
@@ -334,6 +340,9 @@ static uint16_t calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 // Balance session engine state
 static bool bal_session_active = false;
 static bool bal_trickle = false;
+static bool bal_float_hold = false;
+static uint16_t bms_balance_mask = 0;
+static uint16_t sweep_balance_mask = 0;
 static bool bal_manual_prev = false;
 static uint32_t bal_last_success_ms = 0;
 static uint32_t bal_cooldown_until_ms = 0;
@@ -803,6 +812,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
   uint16_t reg_error   = 0;
   if (data_bytes >= 58)
     reg_error = ((uint16_t)uart_rx_buffer[59] << 8) | uart_rx_buffer[60];
+  if (data_bytes >= 78) {
+    uint16_t reg_balance = ((uint16_t)uart_rx_buffer[79] << 8) | uart_rx_buffer[80];
+    sweep_balance_mask |= reg_balance;
+  }
 
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
   // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
@@ -865,10 +878,16 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
   uint32_t per_pack_x10 = profile_charge_current_per_pack_x10;
-  // Balance/manual top-off phase: cap at 2.0 A per pack so passive balancing
-  // gets hours of gentle CV time instead of a rushed stop at the threshold.
-  if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10)
+  // Balance/manual top-off phase: cap at 2.0 A per pack (or 1.0 A during float hold)
+  // so passive balancing gets hours of gentle CV time instead of a rushed stop at the threshold.
+  if (bal_session_active) {
+    if (bal_float_hold && per_pack_x10 > BAL_HOLD_A_X10)
+      per_pack_x10 = BAL_HOLD_A_X10;
+    else if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10)
+      per_pack_x10 = BAL_TRICKLE_A_X10;
+  } else if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10) {
     per_pack_x10 = BAL_TRICKLE_A_X10;
+  }
   uint32_t max_current_x10 = per_pack_x10 * pack_count;
 
   // Temperature cut-offs: LiFePO4 plating occurs below +2°C; over-temp at 55°C.
@@ -886,19 +905,26 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     return 0;
   }
 
-  // Cell voltage cut-off: stop at active stop, re-enable below re-enable threshold
-  // (active thresholds = DIP profile, or the full-charge triple during a
-  // balance session — see balance_update())
-  if (agg_max_cell_mv >= calc_charge_stop_mv) {
+  // Cell voltage cut-off:
+  // In a balance session, hard cutoff is pushed to CELL_EMERGENCY_OV_MV (3620 mV)
+  // because float-hold voltage regulation (51.6 V) prevents cells from staying too high,
+  // avoiding premature 0 A cutoffs that force Deye into Standby.
+  uint16_t stop_mv = bal_session_active ? CELL_EMERGENCY_OV_MV : calc_charge_stop_mv;
+  uint16_t reenable_mv = bal_session_active ? (CELL_EMERGENCY_OV_MV - 50) : calc_charge_reenable_mv;
+  if (agg_max_cell_mv >= stop_mv) {
     charge_cell_ov_inhibit = true;
   } else if (charge_cell_ov_inhibit) {
-    if (agg_max_cell_mv < calc_charge_reenable_mv) {
+    if (agg_max_cell_mv < reenable_mv) {
       charge_cell_ov_inhibit = false;
     }
   }
 
   if (charge_temp_inhibit || charge_cell_ov_inhibit) {
     return 0;
+  }
+
+  if (bal_session_active && bal_float_hold) {
+    return (uint16_t)max_current_x10;
   }
 
   if (agg_max_cell_mv <= calc_taper_start_mv)
@@ -967,6 +993,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
   bal_trickle = false;
+  bal_float_hold = false;
   bal_exit_streak = 0;
   bal_outage_agg = 0;
   if (success)
@@ -1040,6 +1067,14 @@ static void balance_update(uint8_t packs) {
     // (applied by calculate_charge_limit() through bal_trickle).
     bal_trickle = (agg_min_cell_mv != 0xFFFF) &&
                   (agg_min_cell_mv >= BAL_TRICKLE_CELL_MV);
+
+    // Dynamic Float Hold: when max cell reaches 3.56 V, clamp requested voltage
+    // to 51.6 V to prevent emergency cell OV while maintaining gentle balance current.
+    if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
+      bal_float_hold = true;
+    } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
+      bal_float_hold = false;
+    }
 
     if (bal_trickle) {
       if (bal_best_spread_mv == 0xFFFF) {
@@ -1133,6 +1168,7 @@ static void balance_update(uint8_t packs) {
   bal_best_spread_mv = 0xFFFF;
   bal_last_improve_ms = now;
   bal_trickle = false;
+  bal_float_hold = false;
   calc_taper_start_mv = CELL_TAPER_START_MV;
   calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
@@ -1223,13 +1259,19 @@ static void bms_aggregate_data(void) {
   sweep_protect_b1 = 0;
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
+  bms_balance_mask = sweep_balance_mask;
+  sweep_balance_mask = 0;
 
   uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
   bms_pack_count = effective_packs;
 
   balance_update(effective_packs);
-  charge_voltage_limit = bal_session_active ? CHARGE_VOLTAGE_LIMIT_STATIC
-                                            : profile_charge_voltage_limit;
+  if (bal_session_active) {
+    charge_voltage_limit = bal_float_hold ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
+                                          : CHARGE_VOLTAGE_LIMIT_STATIC;
+  } else {
+    charge_voltage_limit = profile_charge_voltage_limit;
+  }
   charge_current_limit = calculate_charge_limit(effective_packs);
   discharge_current_limit = calculate_discharge_limit(effective_packs);
 
@@ -1332,10 +1374,16 @@ static void send_all_frames(void) {
   // DCL=0 (розряд заборонено / порожній) → SOC=0; CCL=0 (заряд заборонено /
   // повний) → SOC=100. Обидва 0 (нема даних) → SOC=0 (чесний «не запрошуй»).
   uint8_t can_soc = bms_soc;
-  if (discharge_current_limit == 0)
+  if (discharge_current_limit == 0) {
     can_soc = 0;
-  else if (charge_current_limit == 0)
+  } else if (bal_session_active) {
+    // During active balance session: protect inverter from jumping to Standby on SOC=100.
+    // Retain cell-based OCV calculation, capped at 98% until session completes successfully.
+    if (can_soc > 98)
+      can_soc = 98;
+  } else if (charge_current_limit == 0) {
     can_soc = 100;
+  }
   put_u16le(&data[0], can_soc);
   put_u16le(&data[2], bms_soh);
   send_can_std(CAN_ID_SOC, data, 4);
@@ -1361,11 +1409,17 @@ static void send_all_frames(void) {
   // 0x35C: Request / Enable flags
   // Bit 7 (0x80) = Charge enable: active only if data valid, not inhibited, CCL > 0
   // Bit 6 (0x40) = Discharge enable: active only if data valid, not inhibited, DCL > 0
+  // Bit 3 (0x08) = Request Full Charge (Pylontech v1.2+ for balancing/equalization)
   memset(data, 0, 8);
   uint8_t req_flags = 0x00;
   if (bms_data_valid) {
-    if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0)
-      req_flags |= 0x80;
+    if (bal_session_active) {
+      if (!charge_temp_inhibit && charge_current_limit > 0)
+        req_flags |= (0x80 | 0x08);
+    } else {
+      if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0)
+        req_flags |= 0x80;
+    }
     if (!discharge_cell_uv_inhibit && !discharge_temp_inhibit && discharge_current_limit > 0)
       req_flags |= 0x40;
   }
