@@ -10,13 +10,11 @@ compiled_firmware_app/
 # --- VS Code / PlatformIO IDE: machine-specific, regenerated locally ---
 .vscode/
 
-# --- Особисті робочі нотатки та локальні інструкції (не для публічного репозиторію) ---
+# --- Особисті робочі нотатки (не для публічного репозиторію) ---
 CODE_REVIEW*.md
-USER_MANUAL*.md
 IDEAS_BRAINSTORM.md
-USER_MANUAL*.html
-USER_MANUAL*.pdf
 *.pdf
+!USER_MANUAL.pdf
 IMG*.*
 *.jpeg
 *.jpg

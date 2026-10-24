@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COM-Box V1.3 — Посібник користувача та монтажника</title>
+<style>
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    color: #1f2328;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 24px;
+}
+h1, h2, h3, h4, h5, h6 {
+    color: #0f172a;
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
+    border-bottom: 1px solid #d1d9e0;
+    padding-bottom: 0.25em;
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+}
+h1 {
+    font-size: 22px;
+    border-bottom: 2.5px solid #0969da;
+    color: #0969da;
+}
+h2 {
+    font-size: 17px;
+    margin-top: 1.4em;
+    border-bottom: 1.5px solid #d1d9e0;
+}
+h3 {
+    font-size: 14.5px;
+    border-bottom: none;
+    color: #334155;
+}
+h4 {
+    font-size: 13.5px;
+    border-bottom: none;
+    color: #1e293b;
+    margin-top: 1em;
+}
+.table-card, .diagram-card {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    margin: 14px 0;
+}
+.table-card > h1, .table-card > h2, .table-card > h3, .table-card > h4, .table-card > h5, .table-card > h6,
+.diagram-card > h1, .diagram-card > h2, .diagram-card > h3, .diagram-card > h4, .diagram-card > h5, .diagram-card > h6 {
+    margin-top: 0;
+    margin-bottom: 6px;
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+}
+.table-card > p, .diagram-card > p {
+    margin-top: 0;
+    margin-bottom: 6px;
+    font-weight: 500;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 6px 0 0 0;
+    font-size: 11.5px;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+thead {
+    display: table-header-group;
+}
+th, td {
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+}
+tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+th {
+    background-color: #f1f5f9;
+    font-weight: 600;
+    color: #0f172a;
+}
+tr:nth-child(even) {
+    background-color: #f8fafc;
+}
+pre {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding: 10px 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 10.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    border: 1px solid #334155;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    margin: 8px 0;
+}
+code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    background-color: #f1f5f9;
+    color: #0969da;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-size: 88%;
+}
+pre code {
+    background: none;
+    color: inherit;
+    padding: 0;
+}
+blockquote {
+    margin: 12px 0;
+    padding: 10px 14px;
+    color: #1e293b;
+    background-color: #f0fdf4;
+    border-left: 4px solid #22c55e;
+    border-radius: 4px;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+blockquote h3 {
+    margin-top: 0;
+    border: none;
+    color: #dc2626;
+}
+ul, ol {
+    padding-left: 22px;
+}
+li {
+    margin-bottom: 4px;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+hr {
+    border: none;
+    border-top: 1px solid #e2e8f0;
+    margin: 18px 0;
+}
+@media print {
+    body {
+        max-width: 100%;
+        padding: 0;
+        font-size: 10pt;
+    }
+    @page {
+        margin: 12mm 14mm;
+        size: A4;
+    }
+    h1, h2, h3, h4, h5, h6 {
+        break-after: avoid !important;
+        page-break-after: avoid !important;
+    }
+    .table-card, .diagram-card, pre, blockquote, tr, li {
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+    }
+}
+
+</style>
+</head>
+<body>
+<h1 id="com-box-v13">Керівництво користувача та посібник з монтажу COM-Box V1.3</h1>
+<h3 id="bms-rs485-vision-15s-lifepo4-can-deye-hybrid-inverter">Інтелектуальний шлюз BMS RS485 (Vision 15S LiFePO4) → CAN (Deye Hybrid Inverter)</h3>
+<blockquote>
+<p><strong>Призначення документа:</strong> Практична інструкція для монтажників, сервісних інженерів та власників енергосистем. Охоплює виготовлення кабелів, налаштування перемикачів, введення в експлуатацію, світлодіодну індикацію та щоденне обслуговування.</p>
+</blockquote>
+<hr/>
+<h2 id="_1">Зміст</h2>
+<ol>
+<li><a href="#1-огляд-системи-та-призначення-com-box">Огляд системи та призначення COM-Box</a></li>
+<li><a href="#2-фізичні-розєми-розпіновка-та-виготовлення-кабелів">Фізичні роз'єми, розпіновка та виготовлення кабелів</a></li>
+<li><a href="#3-адресація-та-комутація-акумуляторних-блоків-vision">Адресація та комутація акумуляторних блоків Vision</a></li>
+<li><a href="#4-налаштування-dip-перемикачів-на-com-box">Налаштування DIP-перемикачів на COM-Box</a></li>
+<li><a href="#5-світлодіодна-індикація-led-як-читати-стан-коробки">Світлодіодна індикація (LED): Як читати стан коробки</a></li>
+<li><a href="#6-налаштування-гібридного-інвертора-deye">Налаштування гібридного інвертора Deye</a></li>
+<li><a href="#7-режими-експлуатації-безпека-та-авто-балансування">Режими експлуатації, безпека та авто-балансування</a></li>
+<li><a href="#8-покроковий-чек-лист-першого-запуску">Покроковий чек-лист першого запуску</a></li>
+<li><a href="#9-пошук-та-усунення-несправностей-troubleshooting">Пошук та усунення несправностей (Troubleshooting)</a></li>
+<li><a href="#10-як-зберегти-або-експортувати-цю-інструкцію-у-pdf">Як зберегти або експортувати цю інструкцію у PDF</a></li>
+<li><a href="#11-додаток-коротка-шпаргалка-для-друку-стікер-на-корпус">Додаток: Коротка шпаргалка для друку (стікер на корпус)</a></li>
+</ol>
+<hr/>
+<h2 id="1-com-box">1. Огляд системи та призначення COM-Box</h2>
+<h3 id="11">1.1. Яку проблему вирішує пристрій</h3>
+<p>Акумуляторні батареї <strong>Vision V-LFP48100</strong> (15 послідовних елементів LiFePO4, номінальна напруга 48 В, ємність 100 А·год) оснащені внутрішньою платою керування (BMS), яка підтримує обмін даними за протоколом <strong>RS-485 (Modbus RTU)</strong>. </p>
+<p>Гібридні інвертори <strong>Deye</strong> (а також сумісні SunSynk) для точного керування зарядом та розрядом очікують високошвидкісну автомобільну шину <strong>CAN (протокол Pylontech CAN v2.0.6, 500 кбіт/с)</strong>.</p>
+<p>Без пристрою COM-Box інвертор змушений працювати з літієвими батареями в «сліпому» свинцево-кислотному режимі (по загальній напрузі), що призводить до:
+* Передчасного вимкнення інвертора при розряді.
+* Небезпеки перезаряду або перегріву окремих слабких комірок.
+* Неможливості побачити справжній залишок заряду (SOC %) на екрані інвертора.</p>
+<p><strong>COM-Box</strong> є компактним інтелектуальним апаратним мостом-перекладачем, який розміщується між акумуляторним банком та інвертором.</p>
+<pre><code>┌────────────────────────────────┐         RS-485 (Modbus RTU)        ┌──────────────┐         CAN (500 kbps)         ┌────────────────┐
+│ Батарейний банк Vision 15S     │ ────────────────────────────────── │   COM-Box    │ ────────────────────────────── │ Інвертор Deye  │
+│ (від 1 до 16 блоків паралельно)│ Pin 1: GND, Pin 5: B-, Pin 6: A+   │  (GD32F305)  │ Pin 1: GND, Pin 7: L, Pin 8: H │ (Lithium 00)   │
+└────────────────────────────────┘                                    └──────────────┘                                └────────────────┘
+                                                                             │
+                                                                      Живлення 15..60 В DC
+                                                                      (від клем батареї)
+</code></pre>
+<h3 id="12-com-box">1.2. Що COM-Box робить повністю автоматично</h3>
+<ol>
+<li><strong>Постійне опитування всіх модулів</strong>: шлюз послідовно збирає телеметрію з кожного підключеного акумулятора (напруга кожної з 15 комірок, сумарний струм, 3 датчики температури, стан аварій).</li>
+<li><strong>Інтелектуальна агрегація та точний розрахунок SOC</strong>: розраховує справжній відсоток заряду (SOC) з напруги найслабшої комірки (обходячи зависання заводського регістру BMS Vision), сумує реальні струми блоків та передає інвертору безпечні динамічні ліміти заряду/розряду.</li>
+<li><strong>Захист кожної окремої комірки</strong>:</li>
+<li>При наближенні найсильнішої комірки до 3.55…3.60 В струм заряду плавно дротелюється аж до повного зупинення, запобігаючи аварійному відключенню BMS.</li>
+<li>При зниженні найслабшої комірки до 2.90 В струм розряду обмежується на 50% (Soft Warning), а при 2.75 В — розряд повністю блокується (Soft Cut-off із запасом 250 мВ до апаратного вимкнення BMS 2.50 В, що рятує ключі від дугового розриву під навантаженням).</li>
+<li><strong>Температурний нагляд</strong>: якщо температура в акумуляторах опускається нижче +2 °C, заряд негайно блокується для запобігання деградації та незворотної металізації літію.</li>
+<li><strong>Автономне вирівнювання (балансування) із захистом від Standby</strong>: шлюз самостійно визначає дисбаланс комірок і проводить делікатні сесії вирівнювання. При досягненні 3.56 В активується режим <strong>Float Hold (51.6 В, 1.0 А на блок)</strong>, а інвертор утримується активним за протоколом Pylontech (прапорці 0x35C 0x88, SOC ≤ 98%), дозволяючи резисторам BMS ефективно усунути розкид без передчасного вимкнення інвертора.</li>
+<li><strong>Абсолютна безпека зв'язку (Fail-Closed)</strong>: у разі обриву кабелю зв'язку з батареями COM-Box через 8 секунд передає на інвертор команду негайного зупинення заряду та розряду (0 А).</li>
+</ol>
+<h3 id="13">1.3. Комплект поставки (Заводська комплектація)</h3>
+<p>Згідно з оригінальним керівництвом виробника (<em>1. Rendergraph</em>), до комплекту входять:
+1. <strong>BMS COM BOX</strong> — шлюз-конвертер в металевому корпусі з вушками для кріплення на стіну.
+2. <strong>Com Line 1</strong> — сигнальний кабель зв'язку RJ45-RJ45 (прямий патч-корд для підключення до АКБ).
+3. <strong>Com Line 2</strong> — сигнальний кабель зв'язку RJ45-RJ45 (прямий патч-корд; ⚠️ <em>потребує переобтискання під крос для Deye!</em>).
+4. <strong>Power Line</strong> — кабель живлення постійного струму з клемними наконечниками.
+5. <strong>User Guide</strong> — паспорт / інструкція з експлуатації.</p>
+<hr/>
+<div class="diagram-card"><h2 id="2">2. Фізичні роз'єми, геометрія корпусу та виготовлення кабелів</h2><p>Конструктивно роз'єми шлюзу COM-Box рознесені на <strong>дві протилежні торцеві панелі</strong>:</p><pre><code>           ┌────────────────────────────────────────────────────────┐
+           │                     ВЕРХНЯ КРИШКА                      │
+           │                                                        │
+           │     [LED 1]      [LED 2]         [LED 3]     [LED 4]   │
+           │     PCS-485      PCS-CAN         BMS-485     Running   │
+           │     Connect      Connect         Connect               │
+┌──────────┴────────────────────────────────────────────────────────┴──────────┐
+│  ТОРЕЦЬ А (До інвертора / ПК):        │  ТОРЕЦЬ B (До батареї та живлення):│
+│                                       │                                    │
+│   [ PCS-CAN ]      [ PCS-485 ]        │    [ BMS-485 ]    [ B- ]  [ B+ ]   │
+│   (CAN 500K)       (RS485 9600)       │    (RS485 9600)   Живлення 15..60V │
+│   Гніздо RJ45      Гніздо RJ45        │    Гніздо RJ45                     │
+│    (Поз. 5)         (Поз. 6)          │     (Поз. 9)     [1 2 3 4 5] SW    │
+│                                       │                   DIP-перемикачі   │
+└───────────────────────────────────────┴────────────────────────────────────┘
+</code></pre></div>
+
+
+<h3 id="21-com-box">2.1. Заводська специфікація роз'ємів COM-Box (З мануалу пристрою)</h3>
+<div class="table-card"><h4 id="1-bms-485-9-b-9600">1. Порт <code>BMS-485</code> (Поз. 9, Торець B — зв'язок з батареєю, 9600 бод):</h4><table>
+<thead>
+<tr>
+<th style="text-align: center;">Пін RJ45</th>
+<th style="text-align: center;">Заводське маркування</th>
+<th style="text-align: left;">Призначення</th>
+<th style="text-align: left;">Опис</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>1</strong></td>
+<td style="text-align: center;"><strong>GND</strong></td>
+<td style="text-align: left;">Сигнальне / силове заземлення</td>
+<td style="text-align: left;"><strong>Спільний сигнальний мінус</strong> ⚠️ <em>(Обов'язковий!)</em></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>2..4</strong></td>
+<td style="text-align: center;"><strong>CN</strong></td>
+<td style="text-align: left;">Connect None</td>
+<td style="text-align: left;">Вільні (не підключені)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>5</strong></td>
+<td style="text-align: center;"><strong>BMS-485B</strong></td>
+<td style="text-align: left;">Лінія даних RS-485 B (-)</td>
+<td style="text-align: left;">Інверсний сигнал Modbus RTU</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>6</strong></td>
+<td style="text-align: center;"><strong>BMS-485A</strong></td>
+<td style="text-align: left;">Лінія даних RS-485 A (+)</td>
+<td style="text-align: left;">Прямий сигнал Modbus RTU</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>7..8</strong></td>
+<td style="text-align: center;"><strong>CN</strong></td>
+<td style="text-align: left;">Connect None</td>
+<td style="text-align: left;">Вільні (не підключені)</td>
+</tr>
+</tbody>
+</table></div>
+
+<div class="table-card"><h4 id="2-pcs-485-6-a-9600">2. Порт <code>PCS-485</code> (Поз. 6, Торець A — зв'язок із зовнішніми пристроями / ПК, 9600 бод):</h4><table>
+<thead>
+<tr>
+<th style="text-align: center;">Пін RJ45</th>
+<th style="text-align: center;">Заводське маркування</th>
+<th style="text-align: left;">Призначення</th>
+<th style="text-align: left;">Опис</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>1</strong></td>
+<td style="text-align: center;"><strong>GND</strong></td>
+<td style="text-align: left;">Сигнальне / силове заземлення</td>
+<td style="text-align: left;">Спільний сигнальний мінус ⚠️</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>2..4</strong></td>
+<td style="text-align: center;"><strong>CN</strong></td>
+<td style="text-align: left;">Connect None</td>
+<td style="text-align: left;">Вільні (не підключені)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>5</strong></td>
+<td style="text-align: center;"><strong>BMS-485B</strong></td>
+<td style="text-align: left;">Лінія даних RS-485 B (-)</td>
+<td style="text-align: left;">Діагностичне дзеркало (DIP2=OFF) / Міст (DIP2=ON)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>6</strong></td>
+<td style="text-align: center;"><strong>BMS-485A</strong></td>
+<td style="text-align: left;">Лінія даних RS-485 A (+)</td>
+<td style="text-align: left;">Діагностичне дзеркало (DIP2=OFF) / Міст (DIP2=ON)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>7..8</strong></td>
+<td style="text-align: center;"><strong>CN</strong></td>
+<td style="text-align: left;">Connect None</td>
+<td style="text-align: left;">Вільні (не підключені)</td>
+</tr>
+</tbody>
+</table></div>
+
+<div class="table-card"><h4 id="3-pcs-can-5-a-can-500">3. Порт <code>PCS-CAN</code> (Поз. 5, Торець A — зв'язок з інвертором, CAN 500 кбіт/с):</h4><table>
+<thead>
+<tr>
+<th style="text-align: center;">Пін RJ45</th>
+<th style="text-align: center;">Заводське маркування</th>
+<th style="text-align: left;">Призначення</th>
+<th style="text-align: left;">Опис</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>1</strong></td>
+<td style="text-align: center;"><strong>GND</strong></td>
+<td style="text-align: left;">Сигнальне / силове заземлення</td>
+<td style="text-align: left;"><strong>Спільний сигнальний мінус</strong> ⚠️ <em>(Обов'язковий!)</em></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>2..6</strong></td>
+<td style="text-align: center;"><strong>CN</strong></td>
+<td style="text-align: left;">Connect None</td>
+<td style="text-align: left;">Вільні (не підключені)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>7</strong></td>
+<td style="text-align: center;"><strong>CANL</strong></td>
+<td style="text-align: left;">Лінія даних CAN-L</td>
+<td style="text-align: left;">Диференційний сигнал низького рівня</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8</strong></td>
+<td style="text-align: center;"><strong>CANH</strong></td>
+<td style="text-align: left;">Лінія даних CAN-H</td>
+<td style="text-align: left;">Диференційний сигнал високого рівня</td>
+</tr>
+</tbody>
+</table></div>
+
+<hr/>
+<div class="table-card"><h3 id="22-bms-deye">2.2. Офіційна специфікація та апаратна топологія плати порту BMS інвертора Deye</h3><p>Згідно з офіційним керівництвом з експлуатації та схемотехнічною топологією друкованої плати (PCB роз'єму J1) інверторів Deye, роз'єм <strong>BMS (RJ45)</strong> містить дві незалежні шини:</p><table>
+<thead>
+<tr>
+<th style="text-align: center;">Контакт роз'єму BMS Deye</th>
+<th style="text-align: left;">Офіційне маркування Deye</th>
+<th style="text-align: left;">Призначення</th>
+<th style="text-align: left;">Топологія друкованої плати інвертора Deye</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>Pin 1</strong></td>
+<td style="text-align: left;"><strong>BMS-485_B</strong></td>
+<td style="text-align: left;">Шина RS-485 (B)</td>
+<td style="text-align: left;">⚠️ <strong>З'єднаний прямою мідною доріжкою на платі з Pin 8!</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 2</strong></td>
+<td style="text-align: left;"><strong>BMS-485_A</strong></td>
+<td style="text-align: left;">Шина RS-485 (A)</td>
+<td style="text-align: left;">⚠️ <strong>З'єднаний прямою мідною доріжкою на платі з Pin 7!</strong> (НЕ земля!)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 3</strong></td>
+<td style="text-align: left;"><strong>BMS-GND_485</strong></td>
+<td style="text-align: left;">Сигнальна земля</td>
+<td style="text-align: left;"><strong>Справжня сигнальна земля GND</strong> (з'єднана доріжкою з Pin 6)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 4</strong></td>
+<td style="text-align: left;"><strong>CAN-H</strong></td>
+<td style="text-align: left;"><strong>Шина CAN (High)</strong></td>
+<td style="text-align: left;"><strong>Прямий вхід CAN-трансивера Deye</strong> (окрема диференційна пара)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 5</strong></td>
+<td style="text-align: left;"><strong>CAN-L</strong></td>
+<td style="text-align: left;"><strong>Шина CAN (Low)</strong></td>
+<td style="text-align: left;"><strong>Прямий вхід CAN-трансивера Deye</strong> (окрема диференційна пара)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 6</strong></td>
+<td style="text-align: left;"><strong>BMS-GND_485</strong></td>
+<td style="text-align: left;">Сигнальна земля</td>
+<td style="text-align: left;">Резервна сигнальна земля GND (з'єднана доріжкою з Pin 3)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 7</strong></td>
+<td style="text-align: left;"><strong>BMS-485_A</strong></td>
+<td style="text-align: left;">Шина RS-485 (A)</td>
+<td style="text-align: left;">⚠️ Запаралелений на платі з Pin 2 (шина RS-485, <strong>НЕ CAN!</strong>)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 8</strong></td>
+<td style="text-align: left;"><strong>BMS-485_B</strong></td>
+<td style="text-align: left;">Шина RS-485 (B)</td>
+<td style="text-align: left;">⚠️ Запаралелений на платі з Pin 1 (шина RS-485, <strong>НЕ CAN!</strong>)</td>
+</tr>
+</tbody>
+</table></div>
+
+
+<hr/>
+<blockquote>
+<h3 id="-1-1">⚠️ КАТАСТРОФІЧНІ НАСЛІДКИ ПІДКЛЮЧЕННЯ ПРЯМОГО ПАТЧ-КОРДУ 1-В-1</h3>
+<p>Погляньте на те, що фізично відбувається на доріжках плати Deye при спробі вставити стандартний прямий кабель:
+1. На роз'ємі <strong>COM-Box (<code>PCS-CAN</code>)</strong>: Pin 1 = GND, Pin 7 = CAN-L, Pin 8 = CAN-H.
+2. При прямому кабелі <strong>Pin 8 COM-Box (CAN-H)</strong> потрапляє на <strong>Pin 8 Deye</strong> (<code>BMS-485_B</code>).
+3. Одночасно <strong>Pin 1 COM-Box (GND)</strong> потрапляє на <strong>Pin 1 Deye</strong> (<code>BMS-485_B</code>).
+4. <strong>Оскільки Pin 1 та Pin 8 на платі Deye замкнені спільною червоною мідною доріжкою — вихід CAN-H коробки наглухо замикається накоротко на землю GND через плату інвертора!</strong>
+5. Вихід <strong>CAN-L (Pin 7)</strong> коробки сідає на лінію RS485_A (Pin 7/2) інвертора.
+6. Справжні входи CAN інвертора Deye (<strong>Pin 4 CAN-H</strong> та <strong>Pin 5 CAN-L</strong>) залишаються <strong>абсолютно порожніми</strong>!</p>
+<p>У результаті інвертор Deye не отримує жодного байта і миттєво сигналізує аварію <strong><code>F20 BMS Comm Fault</code></strong>, а вихідний каскад CAN-трансивера перебуває в режимі короткого замикання.</p>
+<p><strong>Висновок: Прямий кабель між COM-Box та Deye суворо заборонений! Використовується виключно спеціальний крос-кабель!</strong></p>
+</blockquote>
+<hr/>
+<h3 id="23">2.3. Схеми виготовлення кабелів</h3>
+<h4 id="1-com-box-vision-bms-485">Кабель 1: Зв'язок COM-Box ↔ Батарея Vision (<code>BMS-485</code>)</h4>
+<p>Використовується прямий кабель витої пари (T568B з обох боків):
+* <strong>Pin 1 (Біло-помаранчевий):</strong> COM-Box Pin 1 (GND) ──► Батарея Vision Pin 1 (GND) ⚠️ <em>(Обов'язково!)</em>
+* <strong>Pin 5 (Біло-синій):</strong> COM-Box Pin 5 (RS485-B) ──► Батарея Vision Pin 5 (RS485-B)
+* <strong>Pin 6 (Зелений):</strong> COM-Box Pin 6 (RS485-A) ──► Батарея Vision Pin 6 (RS485-A)
+<em>(Піни 2, 3, 4, 7, 8 не підключаються).</em></p>
+<div class="diagram-card"><h4 id="2-com-box-deye-pcs-can-bms-can-">Кабель 2: Зв'язок COM-Box ↔ Інвертор Deye (<code>PCS-CAN</code> ↔ <code>BMS CAN</code>) — СПЕЦІАЛЬНИЙ КРОС-КАБЕЛЬ</h4><p>Кабель виготовляється за схемою кросування:</p><pre><code>Вилка RJ45 до COM-Box (порт PCS-CAN)              Вилка RJ45 до Deye (порт BMS)
+┌───────────────────────────────────┐             ┌───────────────────────────────────┐
+│ Pin 8 (CAN-H)  [Коричневий]       │ ──────────► │ Pin 4 (CAN-H)                     │
+│ Pin 7 (CAN-L)  [Біло-коричневий]  │ ──────────► │ Pin 5 (CAN-L)                     │
+│ Pin 1 (GND)    [Біло-помаранчевий]│ ──────────► │ Pin 3 (BMS-GND_485)               │
+│ (Піни 2, 3, 4, 5, 6 — обрізати)   │             │ (Піни 1, 2, 6, 7, 8 — НЕ СТАВИТИ!)│
+└───────────────────────────────────┘             └───────────────────────────────────┘
+</code></pre></div>
+
+
+<div class="table-card"><p>Таблиця з'єднання провідників для кабелю COM-Box ↔ Deye:</p><table>
+<thead>
+<tr>
+<th style="text-align: center;">Контакт вилки COM-Box (<code>PCS-CAN</code>)</th>
+<th style="text-align: center;">Колір витої пари (T568B)</th>
+<th style="text-align: center;">Контакт вилки Deye (<code>BMS</code>)</th>
+<th style="text-align: left;">Сигнал</th>
+<th style="text-align: left;">Примітка</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>Pin 8</strong></td>
+<td style="text-align: center;">Коричневий</td>
+<td style="text-align: center;"><strong>Pin 4</strong></td>
+<td style="text-align: left;"><strong>CAN-H</strong></td>
+<td style="text-align: left;">Прямий зв'язок CAN High</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 7</strong></td>
+<td style="text-align: center;">Біло-коричневий</td>
+<td style="text-align: center;"><strong>Pin 5</strong></td>
+<td style="text-align: left;"><strong>CAN-L</strong></td>
+<td style="text-align: left;">Прямий зв'язок CAN Low</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Pin 1</strong></td>
+<td style="text-align: center;">Біло-помаранчевий</td>
+<td style="text-align: center;"><strong>Pin 3</strong> (або Pin 6)</td>
+<td style="text-align: left;"><strong>GND</strong></td>
+<td style="text-align: left;">Спільна сигнальна земля (BMS-GND)</td>
+</tr>
+<tr>
+<td style="text-align: center;">—</td>
+<td style="text-align: center;">—</td>
+<td style="text-align: center;"><strong>Pin 1, 8</strong></td>
+<td style="text-align: left;"><strong>НЕ ПІДКЛЮЧАТИ!</strong></td>
+<td style="text-align: left;">Шина RS485-B інвертора Deye</td>
+</tr>
+<tr>
+<td style="text-align: center;">—</td>
+<td style="text-align: center;">—</td>
+<td style="text-align: center;"><strong>Pin 2, 7</strong></td>
+<td style="text-align: left;"><strong>НЕ ПІДКЛЮЧАТИ!</strong></td>
+<td style="text-align: left;">Шина RS485-A інвертора Deye</td>
+</tr>
+</tbody>
+</table></div>
+
+<hr/>
+<h3 id="24-b-b-">2.4. Підключення живлення (Клеми B+ / B-)</h3>
+<ul>
+<li>Живлення COM-Box здійснюється постійною напругою в діапазоні <strong>від 15 В до 60 В DC</strong>.</li>
+<li>Живлення подається безпосередньо з шини акумуляторного банку 48 В.</li>
+<li><strong>Полярність клем:</strong></li>
+<li><strong>B+</strong> — підключається до плюсової шини акумулятора (+48 В).</li>
+<li><strong>B-</strong> — підключається до мінусової шини акумулятора (GND / 0 В).</li>
+<li>Внутрішній імпульсний перетворювач захищений від перевантажень, споживання пристрою становить менше 0.5 Вт.</li>
+</ul>
+<hr/>
+<h2 id="3-vision">3. Адресація та комутація акумуляторних блоків Vision</h2>
+<p>Акумулятори <strong>Vision V-LFP48100</strong> підтримують паралельне з'єднання до 16 блоків. Для опитування кожен блок повинен мати свою унікальну адресу Modbus на перемикачах <strong>ID (DIP)</strong> на лицьовій панелі акумулятора.</p>
+<p>На лицьовій панелі батареї розташований червоний перемикач на 4 позиції з написом <strong>ID</strong> та два спарених порти <strong>RS485</strong>.</p>
+<blockquote>
+<p>⚠️ <strong>КРИТИЧНО ВАЖЛИВО: НАПРЯМОК ВІДЛІКУ БІТІВ (СПРАВА НАЛІВО)!</strong></p>
+<p>На корпусі самого перемикача цифри <code>1 2 3 4</code> нанесені зліва направо, але <strong>вага розрядів адреси йде СПРАВА НАЛІВО</strong>:
+* <strong>DIP 4 (крайній справа):</strong> Молодший біт (LSB, вага <strong>1</strong>). Важіль <strong>ВГОРУ (ON) = +1</strong>.
+* <strong>DIP 3 (другий справа):</strong> Біт 1 (вага <strong>2</strong>). Важіль <strong>ВГОРУ (ON) = +2</strong>.
+* <strong>DIP 2 (другий зліва):</strong> Біт 2 (вага <strong>4</strong>). Важіль <strong>ВГОРУ (ON) = +4</strong>.
+* <strong>DIP 1 (крайній зліва):</strong> Старший біт (MSB, вага <strong>8</strong>). Важіль <strong>ВГОРУ (ON) = +8</strong>.
+* Важіль <strong>ВГОРУ = ON</strong> (увімкнено), важіль <strong>ВНИЗ = OFF</strong> (вимкнено).</p>
+</blockquote>
+<pre><code>       ┌────────────────────────┐
+       │   Блок 1 (Master)      │  ID: [Вниз, Вниз, Вниз, ВГОРУ] ──► Адреса 0x01
+       │   [RS485]      [RS485] │      (крайній справа важіль DIP 4 піднято вгору)
+       └──────┬────────────┬────┘
+              │            │ Прямий патч-корд RS485 (міжблочний)
+              │            ▼
+       Кабель │   ┌────────────────────────┐
+      BMS-485 │   │   Блок 2 (Slave 1)     │  ID: [Вниз, Вниз, ВГОРУ, Вниз] ──► Адреса 0x02
+       до     │   │   [RS485]      [RS485] │      (другий справа важіль DIP 3 піднято вгору)
+      COM-Box │   └────────────────┬───────┘
+              │                    │ Прямий патч-корд RS485
+              ▼                    ▼
+          [COM-Box]       ┌────────────────────────┐
+                          │   Блок 3 (Slave 2)     │  ID: [Вниз, Вниз, ВГОРУ, ВГОРУ] ──► Адреса 0x03
+                          │   [RS485]      [RS485] │      (DIP 3 та DIP 4 вгору — ЯК НА ФОТО БАТАРЕЇ!)
+                          └────────────────┬───────┘
+                                           │
+                                           ▼ ... До 16 блоків
+</code></pre>
+<div class="table-card"><h3 id="id">Таблиця адрес акумуляторних блоків (Перемикачі ID на батареї)</h3><table>
+<thead>
+<tr>
+<th style="text-align: center;">Номер блоку</th>
+<th style="text-align: center;">Адреса Modbus</th>
+<th style="text-align: center;">Положення важелів [DIP 1..4]</th>
+<th style="text-align: center;">DIP 1 (зліва, вага 8)</th>
+<th style="text-align: center;">DIP 2 (вага 4)</th>
+<th style="text-align: center;">DIP 3 (другий справа, вага 2)</th>
+<th style="text-align: center;">DIP 4 (крайній справа, вага 1)</th>
+<th style="text-align: left;">Роль у системі</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>Блок 1</strong></td>
+<td style="text-align: center;"><strong><code>0x01</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, Вниз, Вниз, ВГОРУ ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: left;"><strong>Головний (Master)</strong> — сюди вмикається кабель від COM-Box</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 2</strong></td>
+<td style="text-align: center;"><strong><code>0x02</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, Вниз, ВГОРУ, Вниз ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: left;">Підлеглий (Slave 1)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 3</strong></td>
+<td style="text-align: center;"><strong><code>0x03</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, Вниз, ВГОРУ, ВГОРУ ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: left;">Підлеглий (Slave 2) <em>(налаштування як на фото)</em></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 4</strong></td>
+<td style="text-align: center;"><strong><code>0x04</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, ВГОРУ, Вниз, Вниз ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: left;">Підлеглий (Slave 3)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 5</strong></td>
+<td style="text-align: center;"><strong><code>0x05</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, ВГОРУ, Вниз, ВГОРУ ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: left;">Підлеглий (Slave 4)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 6</strong></td>
+<td style="text-align: center;"><strong><code>0x06</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, ВГОРУ, ВГОРУ, Вниз ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: left;">Підлеглий (Slave 5)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 7</strong></td>
+<td style="text-align: center;"><strong><code>0x07</code></strong></td>
+<td style="text-align: center;"><code>[ Вниз, ВГОРУ, ВГОРУ, ВГОРУ ]</code></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: left;">Підлеглий (Slave 6)</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>Блок 8</strong></td>
+<td style="text-align: center;"><strong><code>0x08</code></strong></td>
+<td style="text-align: center;"><code>[ ВГОРУ, Вниз, Вниз, Вниз ]</code></td>
+<td style="text-align: center;"><strong>ON</strong></td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: center;">OFF</td>
+<td style="text-align: left;">Підлеглий (Slave 7)</td>
+</tr>
+<tr>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: center;">...</td>
+<td style="text-align: left;">До 16 модулів включно</td>
+</tr>
+</tbody>
+</table></div>
+
+<blockquote>
+<p><strong>Правило комутації:</strong> Кабель <code>BMS-485</code> від COM-Box вставляється в будь-яке з двох паралельних гнізд з написом <strong>RS485</strong> головного блоку (Адреса <code>0x01</code>, крайній справа DIP 4 вгору). Між собою блоки з'єднуються стандартними прямими патч-кордами RJ45 із сусіднього вільного роз'єму <strong>RS485</strong> попереднього блоку в роз'єм <strong>RS485</strong> наступного за ланцюжковою топологією.</p>
+<p><strong>⚠️ Два різні «майстри» — не плутати (уточнення 22.10.2026):</strong>
+* <strong>«Головний блок» (Master) у цьому посібнику</strong> = блок з адресою <strong><code>0x01</code></strong>, у якого підключений кабель від COM-Box. Це лише фізична точка підключення — на дані в шині роль не впливає.
+* <strong>«Master BMS» у таблиці виробника Vision</strong> = адреса <strong><code>0x10</code> (16)</strong> — стан, коли <strong>усі 4 важелі ID опущені ВНИЗ</strong> (<code>0+0+0+0 = 0</code>, BMS додає 0x10). Це інший, виробничий, термін.
+* <strong>Усі 4 важелі ВГОРУ = ID 15 = <code>0x0F</code></strong> (живо перевірено 21.10.2026: пак на <code>0x0F</code> відповідає, <code>med ≈ 101 мс</code>, 0 помилок).
+* Слова <code>ON</code>/<code>OFF</code> у таблиці DIP виробника інвертовані за фізичними важелями: приклад №2 «ON ON OFF ON» фізично = <code>[ Вниз, Вниз, ВГОРУ, Вниз ]</code> = <code>0x02</code>.
+* Відповідають адреси <code>0x01</code>–<code>0x0F</code>; на <code>0x10</code> у живому ланцюзі (21–22.10) паки не відповідали — у паку не було конфігурації «усі ВНИЗ». Деталі: <code>DEYE_CAN_RS485_BASE.md</code>, розділ «Додано 22.10.2026».</p>
+</blockquote>
+<hr/>
+<h2 id="4-dip-com-box">4. Налаштування DIP-перемикачів на COM-Box</h2>
+<p>На бічній/лицьовій грані COM-Box розташований блок із 5 мікроперемикачів (DIP-перемикачі). Вони дозволяють налаштовувати ключові параметри системи без підключення комп'ютера.</p>
+<p>Перемикачі опитуються мікроконтролером постійно (кожні 250 мс). Змінювати положення можна «на гарячу», без зняття живлення.</p>
+<pre><code>       ┌──────────────────────────┐
+       │   ON                     │
+       │  ┌───┬───┬───┬───┬───┐   │
+       │  │   │   │   │   │   │   │
+       │  └───┴───┴───┴───┴───┘   │
+       │   1   2   3   4   5      │
+       │   OFF (за замовчуванням) │
+       └──────────────────────────┘
+</code></pre>
+<div class="table-card"><h3 id="_2">Таблиця конфігурації перемикачів</h3><table>
+<thead>
+<tr>
+<th style="text-align: left;">Перемикач</th>
+<th style="text-align: left;">Функція</th>
+<th style="text-align: left;">Стан <code>OFF</code> (Вимкнено, важіль униз)</th>
+<th style="text-align: left;">Стан <code>ON</code> (Увімкнено, важіль угору)</th>
+<th style="text-align: center;">Рекомендоване положення</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>DIP 1</strong></td>
+<td style="text-align: left;"><strong>Цільова напруга заряду (Профіль)</strong></td>
+<td style="text-align: left;"><strong>100% заряду (54.0 В)</strong><br/>Стандартний режим (типово)</td>
+<td style="text-align: left;"><strong>90% заряду (51.8 В)</strong><br/>Опція ощадливого режиму, тривалий ресурс LiFePO4</td>
+<td style="text-align: center;"><strong><code>OFF</code></strong> (стандарт)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DIP 2</strong></td>
+<td style="text-align: left;"><strong>Режим діагностичного порту <code>PCS-485</code></strong></td>
+<td style="text-align: left;"><strong>Пасивне дзеркало</strong><br/>Трансляція даних батареї для ПК/моніторингу</td>
+<td style="text-align: left;"><strong>Прозорий міст</strong><br/>⚠️ Лабораторний режим досліджень</td>
+<td style="text-align: center;"><strong><code>OFF</code></strong> (Суворо <code>OFF</code>!)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DIP 3</strong></td>
+<td style="text-align: left;"><strong>Швидке опитування батарей (Fast Polling)</strong></td>
+<td style="text-align: left;"><strong>Повне сканування 16 адрес</strong><br/>(Цикл ~6.4 с, перевіряються всі ID 0x01..0x10)</td>
+<td style="text-align: left;"><strong>Швидке опитування тільки активних АКБ</strong><br/>⚡ Запит кожні 400 мс (як у Deye); цикл 800 мс для 2 блоків</td>
+<td style="text-align: center;"><strong><code>ON</code></strong> (рекомендовано) або <code>OFF</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DIP 4</strong></td>
+<td style="text-align: left;"><strong>Резерв</strong></td>
+<td style="text-align: left;">Вільний</td>
+<td style="text-align: left;">Вільний</td>
+<td style="text-align: center;"><strong><code>OFF</code></strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DIP 5</strong></td>
+<td style="text-align: left;"><strong>Ліміт струму заряду на один блок</strong></td>
+<td style="text-align: left;"><strong>40 А на блок</strong><br/>(Ощадливий струм, ресурсний режим)</td>
+<td style="text-align: left;"><strong>50 А на блок</strong><br/>(Максимальний струм заряду Vision)</td>
+<td style="text-align: center;"><strong><code>OFF</code></strong> (або <code>ON</code> при дефіциті часу)</td>
+</tr>
+</tbody>
+</table></div>
+
+<h3 id="_3">Детальні роз'яснення щодо положень:</h3>
+<ul>
+<li><strong>DIP 1 = OFF (Стандартний режим 100% / 54.0 В):</strong> Типовий режим роботи. Якщо виникне дисбаланс комірок — вбудована автоматика COM-Box сама відкриє вікно балансування: утримає 54.0 В і обмежить струм заряду до 2 А на блок із зони ~90%, щоб комірки вирівнялися без ривка.</li>
+<li><strong>DIP 1 = ON (Опція 90% / 51.8 В):</strong> Вмикайте, коли хочете подовжити ресурс батареї. Напруга на елементі — 3.45 В: усуває паразитний нагрів комірок, деградацію електроліту; практично 92–95% реальної ємності без стресової зони. Автоматичне вирівнювання в цьому режимі вимкнено; м'який тейпер 2 А із зони ~90% працює сам.</li>
+<li><strong>DIP 2 (УВАГА):</strong> Завжди тримайте у положенні <strong>OFF</strong>. Режим <code>ON</code> вимикає внутрішній інтелект коробки та віддає батарею під пряме опитування сторонніх пристроїв (використовується виключно розробниками під час лабораторних випробувань).</li>
+<li><strong>DIP 3 = OFF (Повне сканування всіх 16 адрес):</strong> Базовий режим. COM-Box по черзі опитує всі можливі адреси від <code>0x01</code> до <code>0x10</code>. Час очікування відповіді кожної адреси — до 400 мс (забезпечує стабільну роботу навіть із найповільнішими контролерами BMS без втрати відповідей). Повний цикл опитування триває ~6.4 с.</li>
+<li><strong>DIP 3 = ON (Швидке опитування Fast Polling):</strong> Розумний швидкісний режим. COM-Box фіксує перелік батарей, які відповіли на момент увімкнення перемикача, і в подальшому опитує <strong>лише їх</strong> із запитом кожні 400 мс (як у інвертора Deye). Для типової системи з 2 батарей оновлення струмів, напруг та потужності скорочується з 6.4 с до 800 мс! Інвертор отримує найсвіжіші дані кожної секунди.</li>
+<li><strong>Як додати новий акумулятор:</strong> якщо ви підключили додатковий блок, COM-Box автоматично знайде його у фоновому режимі (раз на 45 секунд надсилається фоновий запит на неактивні адреси). Для негайного додавання достатньо пересмикнути важіль: перевести DIP 3 в <code>OFF</code> на 5–10 секунд, дочекатися виявлення нового блоку, і повернути в <code>ON</code>.</li>
+<li><strong>Безпека при відключенні:</strong> якщо один із блоків тимчасово не відповів через завади, алгоритм із 3 спроб фільтрує втрати без збою зв'язку. Якщо блок вимкнено остаточно — COM-Box автоматично зменшить дозволений зарядний/розрядний струм пропорційно до кількості працюючих блоків. Якщо зв'язок втрачено з усіма блоками одночасно — через 8 секунд вмикається захисне блокування інвертора (0 А).</li>
+<li><strong>DIP 5:</strong> Розраховує загальний струм заряду для інвертора:</li>
+<li>При 1 блоці: <code>OFF</code> = 40 А, <code>ON</code> = 50 А.</li>
+<li>При 2 блоках: <code>OFF</code> = 80 А, <code>ON</code> = 100 А.</li>
+<li>При 3 блоках: <code>OFF</code> = 120 А, <code>ON</code> = 150 А.</li>
+</ul>
+<hr/>
+<div class="diagram-card"><h2 id="5-led">5. Світлодіодна індикація (LED): Як читати стан коробки</h2><p>На верхній кришці COM-Box розташовані 4 світлодіоди з фірмовими виносними лініями шовкодруку (<em>2. Product Over View / 4. LED Message</em>):</p><pre><code>       ┌────────────────────────────────────────────────────────┐
+       │                     ВЕРХНЯ КРИШКА                      │
+       │                                                        │
+       │     ( 1 )        ( 2 )           ( 3 )       ( 4 )     │
+       │    PCS-485      PCS-CAN         BMS-485     Running    │
+       │    Connect      Connect         Connect                │
+       └────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+
+<div class="table-card"><h3 id="51">5.1. Зовнішні світлодіоди верхньої панелі</h3><table>
+<thead>
+<tr>
+<th style="text-align: center;">Індикатор (Поз.)</th>
+<th style="text-align: left;">Маркування на кришці</th>
+<th style="text-align: center;">Пін MCU</th>
+<th style="text-align: left;">Поведінка</th>
+<th style="text-align: left;">Значення та стан системи</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>LED 1</strong> (лівий)</td>
+<td style="text-align: left;"><strong>PCS-485 Connect</strong></td>
+<td style="text-align: center;">PC4</td>
+<td style="text-align: left;">Спалахує під час обміну</td>
+<td style="text-align: left;">Активність на діагностичному роз'ємі PCS-485 (підключено моніторинг або ПК).</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>LED 2</strong></td>
+<td style="text-align: left;"><strong>PCS-CAN Connect</strong></td>
+<td style="text-align: center;">PC5</td>
+<td style="text-align: left;">Ритмічні спалахи 1 раз/с (1 Гц)</td>
+<td style="text-align: left;"><strong>Йде трансляція CAN-телеметрії на інвертор Deye</strong>. Означає успішну генерацію 6 пакетів шини CAN.</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>LED 3</strong></td>
+<td style="text-align: left;"><strong>BMS-485 Connect</strong></td>
+<td style="text-align: center;">PB1</td>
+<td style="text-align: left;">Короткі періодичні спалахи</td>
+<td style="text-align: left;"><strong>Йде обмін з батареями Vision</strong>. Кожен спалах — запит/відповідь блоку (цикл опитування 3.2 с).</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>LED 4</strong> (правий)</td>
+<td style="text-align: left;"><strong>Running</strong></td>
+<td style="text-align: center;">PB0</td>
+<td style="text-align: left;"><strong>Світить постійно</strong></td>
+<td style="text-align: left;">Мікроконтролер запущений, прошивка працює в штатному режимі без збоїв.</td>
+</tr>
+</tbody>
+</table></div>
+
+<p><em>Примітка: Індикатор </em><em>LED2 (VDDA)</em><em> розташований на платі та постійно світить зеленим, сигналізуючи наявність стабільного апаратного живлення 3.3 В.</em></p>
+<h3 id="52-led1">5.2. Внутрішній діагностичний світлодіод LED1 (Стан заряду та балансування)</h3>
+<p>На платі пристрою (поруч із мікроконтролером та сервісною кнопкою) розташований індикатор <strong>LED1 (PC13)</strong>:
+* <strong>Не світить:</strong> Система працює у стандартному режимі 100% (54.0 В), сесія вирівнювання не активна.
+* <strong>Рівномірно блимає (~1 раз на секунду):</strong> <strong>Триває автоматична сесія вирівнювання (балансування)</strong>. Коробка виявила розбіжність комірок, утримує інвертор активним без переходу в Standby (Float Hold 51.6 В / 1.0 А на блок) і проводить делікатне вирівнювання до розкиду $\le$ 25 мВ.
+* <strong>Світить постійно:</strong> Увімкнено опцію ощадливого заряду 90% (перемикач DIP 1 стоїть у положенні <code>ON</code>). Служить нагадуванням: для стандартного режиму 54 В поверніть DIP 1 в <code>OFF</code>.</p>
+<hr/>
+<div class="diagram-card"><h2 id="6-deye">6. Налаштування гібридного інвертора Deye</h2><p>Щоб інвертор Deye перейшов під керування COM-Box, виконайте прості налаштування на сенсорному екрані інвертора:</p><pre><code>[Головний екран] ──► [Gear Icon (Налаштування)] ──► [Battery Setting]
+</code></pre></div>
+
+
+<h3 id="61-deye">6.1. Покрокові параметри в меню Deye:</h3>
+<ol>
+<li>Вкладка <strong>Battery Setting</strong>:</li>
+<li>Оберіть тип акумулятора: <strong><code>Lithium</code></strong>.</li>
+<li>У полі протоколу встановіть номер: <strong><code>00</code></strong> (це стандартний канонічний режим Pylontech CAN v2.0.6 на швидкості 500 кбіт/с).</li>
+<li>Параметри ємності:</li>
+<li><strong>Battery Capacity</strong>: вкажіть реальну сумарну ємність банку (наприклад, <strong><code>100 Ah</code></strong> для 1 блоку, <strong><code>200 Ah</code></strong> для 2 блоків, <strong><code>300 Ah</code></strong> для 3 блоків тощо).</li>
+<li>Ліміти струмів:</li>
+<li><strong>Max A Charge / Max A Discharge</strong>: інвертор автоматично отримає точні та безпечні ліміти струмів від COM-Box по шині CAN. Однак у меню інвертора рекомендується виставити значення, що відповідають вашому банку (наприклад, 40–50 А на кожен блок), як резервний апаратний бар'єр.</li>
+</ol>
+<h3 id="62">6.2. Як переконатися, що зв'язок встановлено успішно:</h3>
+<ul>
+<li>На головному екрані інвертора піктограма акумулятора повинна стати активною (відображається точний відсоток заряду <strong>SOC %</strong>, наприклад 85%).</li>
+<li>Зникне попередження або код помилки <strong><code>F20</code></strong> (BMS Communication Fault).</li>
+<li>Перейшовши на сторінку інформації про батарею (екран телеметрії Li-BMS в інверторі), ви побачите:</li>
+<li>Загальну напругу банку (В).</li>
+<li>Реальний струм (А). <em>Зверніть увагу: за стандартом Deye струм заряду відображається з мінусом, а струм розряду — з плюсом.</em></li>
+<li>Температуру найгарячішої точки.</li>
+<li>Дозволені ліміти максимального струму заряду (Charging Current Limit) та розряду.</li>
+</ul>
+<hr/>
+<h2 id="7-">7. Режими експлуатації, безпека та авто-балансування</h2>
+<h3 id="71-90-518-dip-1-on">7.1. Опція ощадливого режиму 90% (51.8 В, DIP 1 = ON)</h3>
+<p>Хімія LiFePO4 має пологу криву розряду. Заряджання до 51.8 В (3.45 В на комірку) дає практично 92–95% реальної доступної ємності, але повністю виключає стресову зону підвищеного тиску та перегріву комірок. Це гарантує максимальний ресурс експлуатації (понад 10 років або 4000–6000 циклів). Режим вмикається перемикачем DIP 1 (<code>ON</code>); у стандартному режиму (DIP 1 = <code>OFF</code>) верхня межа заряду — 54.0 В.</p>
+<h3 id="72">7.2. Робота вбудованого адаптивного вирівнювання (балансування)</h3>
+<p>У процесі тривалої експлуатації через різницю внутрішнього опору комірки можуть заряджатися нерівномірно. 
+Com-Box безперервно відстежує стан кожної комірки в системі (у стандартному режимі — DIP 1 = <code>OFF</code>):
+1. <strong>Виявлення дисбалансу:</strong> Якщо різниця між найсильнішою та найслабшою коміркою сягає $\ge$ 100 мВ (HIGH) — баланс-сесія призначається кожні 24 години; при розкиді 30…100 мВ (MED) — раз на 72 години (3 доби); при розкиді &lt; 30 мВ (OK) — профілактичний дозаряд раз на 30 діб.
+2. <strong>Вікно балансування:</strong> Сесія працює при стандартній верхній межі 54.0 В із повними порогами тейперу.
+3. <strong>Режим дозаряду мікрострумом (Trickle Charge):</strong> Як тільки батарея добирається до зони 90% (напруга найнижчої комірки сягає 3.40 В), COM-Box примусово обмежує запит струму заряду на рівні <strong>2 А на кожен блок</strong>.
+4. <strong>Режим утримання напруги (Float Hold) та захист від передчасного Standby інвертора:</strong>
+   * Коли максимальна комірка сягає <strong>3.56 В</strong>, напруга запиту CVL підтискається до <strong>51.6 В</strong> (3.44 В/комірку), а струм лімітується на <strong>1.0 А на блок</strong> (замість раптового відсікання в 0 А).
+   * У кадрі <code>0x35C</code> виставляються біти <code>0x88</code> (Bit 7 <strong>Charge Enable</strong> + Bit 3 <strong>Request Full Charge</strong> за Pylontech v1.2+), що зобов'язує інвертор Deye не вимикати перетворювач.
+   * У кадрі <code>0x355</code> значення SOC штучно обмежується на рівні <strong>98%</strong>, запобігаючи переходу інвертора в Standby за ознакою «100% заряду».
+   * Напруга на комірках стабільно утримується в активній зоні балансування (&gt; 3.40 В), даючи пасивним балансирам BMS 3–6 годин на безпечне зливання надлишку енергії. Аварійний захист від перенапруги (0 А) відсунуто до безпечних <strong>3.62 В</strong>.
+5. <strong>Успішне завершення:</strong> Коли розкид комірок падає до <strong>$\le$ 25 мВ</strong> (утримується 3 цикли поспіль), баланс-сесія завершується — інвертору дозволяється прийняти 100% SOC, а система продовжує стандартний режим 54.0 В. Внутрішній LED1 гасне. При відсутності прогресу (90 хв) або таймауті (8 год) призначається 12-годинний захисний кулдаун для охолодження резисторів BMS перед наступною спробою.</p>
+<h3 id="73">7.3. Поведінка під час відключень світла (Блекаут під час балансування)</h3>
+<p>Якщо мережа зникає саме в момент сесії вирівнювання і починається живлення будинку від батареї (фіксується струм розряду понад 1.5 А протягом 60 секунд), COM-Box <strong>негайно скидає баланс-сесію</strong>, повертаючи системі стандартний режим 54.0 В і розрядні ліміти.</p>
+<h3 id="74">7.4. Багаторівневий захист батарейного банку</h3>
+<ul>
+<li><strong>Превентивний захист від перерозряду (випередження апаратного розриву BMS):</strong></li>
+<li><strong>Рівень 1 (Soft Warning):</strong> Якщо будь-яка комірка просідає до <strong>$\le$ 2.90 В</strong> — струм розряду обмежується на 50% (<code>DCL /= 2</code>) для зняття просідання, а в CAN-кадрі <code>0x359</code> (байт 2) виставляється попереджувальний біт Cell UV.</li>
+<li><strong>Рівень 2 (Soft Cut-off):</strong> Якщо будь-яка комірка падає до <strong>$\le$ 2.75 В</strong> — струм розряду обнуляється (<code>DCL = 0</code>), прапорець <code>Discharge Enable</code> у <code>0x35C</code> скидається в 0, а в <code>0x359</code> (байт 0) активується аварійний біт Cell UV Protect. Інвертор Deye плавно зупиняє генерацію по шині CAN, зберігаючи буфер <strong>250 мВ</strong> до апаратного захисту BMS (2.50 В) та рятуючи силові MOSFET-ключі від дугового розриву під навантаженням 50–100 А.</li>
+<li><strong>Відновлення (Release):</strong> Дозвіл на розряд відновлюється автоматично лише після початку заряду, коли напруга комірок підніметься до <strong>$\ge$ 3.00 В</strong> (відповідає заводському параметру <code>Cell UV Release</code> BMS).</li>
+<li><strong>Захист від перекосу:</strong> При екстремальному розкиді понад 400 мВ струм розряду автоматично дротелюється вдвічі.</li>
+<li><strong>Захист від холоду:</strong> При температурі нижче <strong>+2 °C</strong> заряджання суворо блокується (<code>0 А</code>), розряд залишається доступним для забезпечення живлення споживачів.</li>
+</ul>
+<h3 id="75-soc">7.5. Точний розрахунок відсотка заряду (SOC) з напруги комірок</h3>
+<p>Заводський лічильник SOC в оригінальних акумуляторах Vision (регістр 0x18 BMS) має відомий апаратний дефект — він часто «зависає» на 100% навіть при суттєвому розряді батареї (наприклад, при напрузі комірок 3.42 В). 
+COM-Box повністю усуває цю проблему:
+* Шлюз ігнорує некоректний відсоток із BMS і <strong>самостійно обчислює справжній SOC</strong> на основі напруги найслабшої (найнижчої) комірки в системі.
+* Використовується прецизійна таблиця напруги розімкнутого кола (OCV) для хімії LiFePO4, відкалібрована безпосередньо під акумулятори Vision V-LFP48100:
+  * <strong>3.60 В</strong> $\to$ 100% (повний заряд, перехід у Float)
+  * <strong>3.40 В</strong> $\to$ 90% (початок активної зони вирівнювання)
+  * <strong>3.30 В</strong> $\to$ 50% (середня точка робочого плато, звірено за дампом 3297 мВ = 49%)
+  * <strong>3.285 В</strong> $\to$ 31% (відкалібровано за реальними фактами ємності АКБ 31 А·год)
+  * <strong>3.20 В</strong> $\to$ 10% (вихід із робочого плато)
+  * <strong>3.00 В</strong> $\to$ 5% (перехід до коліна глибокого розряду)
+  * <strong>$\le$ 2.90 В</strong> $\to$ 0% (початок зони захисту Soft Warning)
+* <strong>EMA-фільтрація</strong>: застосовано експоненційне згладжування (EMA $\alpha=1/8$), що усуває короткочасні просідання відсотка під час увімкнення потужних побутових приладів.
+* <strong>Чесний SOH (Здоров'я)</strong>: шлюз транслює в інвертор справжній заводський стан здоров'я батареї з регістру 0023 BMS (байти <code>[49..50]</code>).
+* Інвертор Deye завжди бачить чесний, актуальний залишок енергії, що унеможливлює раптове вимкнення інвертора по аварії батареї.</p>
+<hr/>
+<div class="diagram-card"><h2 id="8-">8. Покроковий чек-лист першого запуску</h2><p>Виконуйте монтаж та перший запуск суворо за наступними кроками:</p><pre><code>Крок 1 ──► Крок 2 ──► Крок 3 ──► Крок 4 ──► Крок 5 ──► Крок 6 ──► Крок 7
+Кабелі     Адреси     DIP-Box    Живлення   BMS LED    CAN до Deye Екран Deye
+</code></pre></div>
+
+
+<ul>
+<li>[ ] <strong>Крок 1. Перевірка кабелів:</strong> Перевірте кабелі мультиметром або кабель-тестером. Переконайтеся, що контакт <strong>Pin 1 (GND)</strong> надійно з'єднаний в обох роз'ємах (BMS та CAN).</li>
+<li>[ ] <strong>Крок 2. Адресація батарей:</strong> Виставте перемикач <strong>ID</strong> на першому блоці у положення <strong>DIP 4 = ON</strong> (крайній справа важіль вгору, решта донизу) — адреса <code>0x01</code>. На другому — <strong>DIP 3 = ON</strong> (другий справа вгору) — адреса <code>0x02</code>. На третьому — <strong>DIP 3 = ON</strong> та <strong>DIP 4 = ON</strong> (два крайніх справа вгору) — адреса <code>0x03</code> і т.д. З'єднайте батареї ланцюжком стандартними прямими патч-кордами через паралельні порти <strong>RS485</strong>.</li>
+<li>[ ] <strong>Крок 3. Налаштування COM-Box:</strong> Встановіть перемикачі на коробці: <strong>DIP 1 = OFF</strong> (54 В, стандарт), <strong>DIP 2 = OFF</strong> (дзеркало), <strong>DIP 3 = ON</strong> (швидке опитування активних блоків, рекомендовано) або <code>OFF</code> (повне сканування 16 адрес), <strong>DIP 4 = OFF</strong>, <strong>DIP 5 = OFF</strong> (40 А) або <code>ON</code> (50 А).</li>
+<li>[ ] <strong>Крок 4. Подача живлення:</strong> Увімкніть автомати постійного струму на акумуляторах. Підключіть живлення до клем <code>B+</code> та <code>B-</code> коробки. Переконайтеся, що світлодіоди <strong>LED2 (VDDA)</strong> та <strong>LED5 (Running)</strong> стабільно світяться зеленим.</li>
+<li>[ ] <strong>Крок 5. Перевірка зв'язку з батареями:</strong> Підключіть кабель <code>BMS-485</code> до першого блоку. Протягом кількох секунд світлодіод <strong>LED6 (BMS-485)</strong> повинен почати ритмічно спалахувати (запити блоків).</li>
+<li>[ ] <strong>Крок 6. Підключення до інвертора:</strong> Підключіть <strong>спеціальний крос-кабель CAN</strong> (сторона COM-Box: піни 8, 7, 1 ──► сторона Deye: піни 4, 5, 2/3) до гнізда <code>BMS</code> інвертора Deye. Переконайтеся, що світлодіод <strong>LED4 (PCS-CAN)</strong> на COM-Box рівномірно блимає з частотою 1 Гц (раз на секунду).</li>
+<li>[ ] <strong>Крок 7. Активація на інверторі:</strong> У меню інвертора оберіть <code>Lithium Mode 00</code>. Перевірте, що на екрані з'явився коректний відсоток SOC, напруга та зникла помилка F20. Систему успішно введено в роботу!</li>
+</ul>
+<hr/>
+<div class="table-card"><h2 id="9-troubleshooting">9. Пошук та усунення несправностей (Troubleshooting)</h2><table>
+<thead>
+<tr>
+<th style="text-align: left;">Симптом</th>
+<th style="text-align: left;">Можлива причина</th>
+<th style="text-align: left;">Що перевірити та як виправити</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>На інверторі помилка <code>F20</code> (втрата зв'язку з BMS)</strong></td>
+<td style="text-align: left;">1. <strong>Використано прямий кабель замість крос-кабелю:</strong> в інверторі Deye піни 1, 2 запаралелені з 7, 8 під RS-485, а шина CAN очікується на пінах 4 і 5!<br/>2. Переплутані піни CAN-H / CAN-L або обрив GND.<br/>3. Немає обміну з батареями (COM-Box перейшов у fail-closed).</td>
+<td style="text-align: left;">1. <strong>Терміново перевірте крос-кабель CAN:</strong> вилка COM-Box пін 8 (коричневий) ──► вилка Deye пін 4 (CAN-H); вилка COM-Box пін 7 (біло-коричневий) ──► вилка Deye пін 5 (CAN-L); вилка COM-Box пін 1 (біло-помаранчевий) ──► вилка Deye пін 3 (BMS-GND_485). Піни 1, 2, 7, 8 з боку Deye повинні бути порожніми!<br/>2. Перевірте блимання діода <strong>PCS-CAN Connect</strong> (LED 2) на COM-Box (повинен спалахувати раз на секунду).<br/>3. Перевірте, чи блимає <strong>BMS-485 Connect</strong> (LED 3): якщо коробка не бачить батарею більше 8 с, вона навмисно зупиняє CAN-зв'язок для захисту акумуляторів.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>BMS-485 Connect (LED 3) не блимає взагалі або блимає раз на 4 секунди без відповіді</strong></td>
+<td style="text-align: left;">1. Перший акумулятор не має адреси <code>0x01</code>.<br/>2. Переплутані лінії A і B на RS-485.<br/>3. Кабель вставлено не в той роз'єм на батареї.</td>
+<td style="text-align: left;">1. Переконайтеся, що на Master-блоці перемикач ID має положення <strong>DIP 4 = ON</strong> (крайній справа важіль вгору), а піни 1, 2, 3 — <code>OFF</code> (донизу), що відповідає адресі <code>0x01</code>.<br/>2. Перевірте розпіновку: Pin 5 = B (-), Pin 6 = A (+).<br/>3. Кабель повинен заходити в будь-яке з двох гнізд з написом <strong>RS485</strong> на батареї.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Інвертор бачить батарею, але не заряджає (струм заряду 0 А)</strong></td>
+<td style="text-align: left;">1. Спрацював захист від холоду (температура &lt; 2 °C).<br/>2. Аварійний захист комірки від перезаряду ($\ge$ 3.62 В). Під час звичайного вирівнювання струм не обнуляється, а підтримується на рівні 1.0 А (Float Hold).<br/>3. Батарея повністю заряджена (100% SOC після сходження розкиду).</td>
+<td style="text-align: left;">1. Перевірте температуру в приміщенні з АКБ.<br/>2. Перевірте напруги комірок: якщо комірка перевищила 3.62 В, заряд тимчасово вимикається для безпеки до зниження напруги нижче 3.57 В.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Інвертор раптово вимикає генерацію при розряді</strong></td>
+<td style="text-align: left;">Спрацював превентивний захист від глибокого перерозряду комірки ($\le$ 2.75 В).</td>
+<td style="text-align: left;">Перевірте напруги найслабших комірок на екрані інвертора або через діагностику. Необхідно терміново зарядити акумулятори.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Внутрішній світлодіод LED1 безперервно світиться</strong></td>
+<td style="text-align: left;">Перемикач DIP 1 випадково залишено в положенні <code>ON</code> (опція 90%).</td>
+<td style="text-align: left;">Переведіть перемикач DIP 1 на COM-Box у положення <code>OFF</code> (донизу) для повернення в стандартний режим 54 В.</td>
+</tr>
+</tbody>
+</table></div>
+
+<hr/>
+<h2 id="10-pdf" style="break-before: page; page-break-before: always;">10. Як зберегти або експортувати цю інструкцію у PDF</h2>
+<p>Ви можете легко перетворити цей документ на повноцінний PDF-файл для друку або передачі клієнту кількома способами:</p>
+<div class="diagram-card"><h3 id="1">Спосіб 1: Через автоматичний скрипт генерації (рекомендовано)</h3><p>У терміналі виконайте:</p><pre><code class="language-bash">python3 tools/export_manual_pdf.py
+</code></pre></div>
+
+
+<p>Скрипт автоматично перегенерує файли <code>USER_MANUAL.html</code> та <code>USER_MANUAL.pdf</code>.</p>
+<h3 id="2-google-chrome-apple-safari-ms-edge">Спосіб 2: Через будь-який веб-браузер (Google Chrome / Apple Safari / MS Edge)</h3>
+<ol>
+<li>Відкрийте файл <code>USER_MANUAL.html</code> у браузері.</li>
+<li>Натисніть <strong><code>Cmd + P</code></strong> (на macOS) або <strong><code>Ctrl + P</code></strong> (на Windows).</li>
+<li>Оберіть <strong>«Зберегти як PDF» (Save as PDF)</strong> з увімкненою галочкою <strong>«Фонова графіка»</strong>.</li>
+</ol>
+<h3 id="3-vs-code-cursor">Спосіб 3: Через розширення редактора (VS Code / Cursor)</h3>
+<ol>
+<li>Встановіть розширення <strong><code>Markdown PDF</code></strong> (автор <em>yzane</em>).</li>
+<li>Клацніть правою кнопкою на <code>USER_MANUAL.md</code> → <strong><code>Markdown PDF: Export (pdf)</code></strong>.</li>
+</ol>
+<hr/>
+<div class="diagram-card"><h2 id="11_1">11. Додаток: Коротка шпаргалка для друку (стікер на корпус)</h2><p><em>(Цю частину можна роздрукувати на самоклейці формату А6/А5 і наклеїти безпосередньо поруч із COM-Box)</em></p><pre><code>┌────────────────────────────────────────────────────────────────────────┐
+│                      COM-Box V1.3 — ШВИДКА ПАМ'ЯТКА                    │
+├────────────────────────────────────────────────────────────────────────┤
+│ 1. КАБЕЛІ ТА РОЗПІНОВКА:                                               │
+│    • BMS-485 (до АКБ, прямий): Pin 1 = GND | Pin 5 = B (-) | Pin 6 = A(+)│
+│    • КРОС-КАБЕЛЬ CAN (COM-Box ↔ Deye):                                 │
+│      COM-Box Pin 8 (CAN-H) ────────► Deye Pin 4 (CAN-H)                │
+│      COM-Box Pin 7 (CAN-L) ────────► Deye Pin 5 (CAN-L)                │
+│      COM-Box Pin 1 (GND)   ────────► Deye Pin 3 (BMS-GND_485)          │
+│      ⚠️ В Deye піни 1,2 запаралелені з 7,8 під RS-485!                 │
+│      Прямий патч-корд 1-в-1 між COM-Box та Deye НЕ ПРАЦЮВАТИМЕ!        │
+├────────────────────────────────────────────────────────────────────────┤
+│ 2. ПЕРЕМИКАЧІ НА COM-BOX (DIP 1..5 на торці B):                        │
+│    • DIP 1: OFF = 100% (54.0 В, стандарт) | ON = 90% (51.8 В, опція)  │
+│    • DIP 2: OFF = Дзеркало (НОРМА)       | ON = Міст (ЗАБОРОНЕНО)      │
+│    • DIP 3: ON = Fast Polling (800 мс)   | OFF = Скан 16 адрес (6.4 с) │
+│    • DIP 4: OFF (Резерв)                 |                             │
+│    • DIP 5: OFF = 40 А на блок           | ON = 50 А на блок           │
+├────────────────────────────────────────────────────────────────────────┤
+│ 3. СВІТЛОДІОДИ (ВЕРХНЯ КРИШКА):                                        │
+│    • (1) PCS-485 Connect: Спалахи = Активність діагностики / ПК        │
+│    • (2) PCS-CAN Connect: Спалахи 1 Гц = Передача на інвертор Deye     │
+│    • (3) BMS-485 Connect: Спалахи = Запити до батарей Vision           │
+│    • (4) Running:         Світить постійно = Нормальна робота системи  │
+│    • Внутрішній LED1:     Вимк = 54 В | Блимає = Авто-баланс | 51,8 В  │
+├────────────────────────────────────────────────────────────────────────┤
+│ 4. НАЛАШТУВАННЯ DEYE:                                                  │
+│    Battery Setting ──► Lithium ──► Mode 00 (Pylontech CAN, 500 kbps)   │
+├────────────────────────────────────────────────────────────────────────┤
+│ 5. АДРЕСАЦІЯ АКБ VISION (4-DIP "ID" на батареї, важіль ВГОРУ = ON):    │
+│    • Розряди СПРАВА НАЛІВО: DIP 4 = +1 | DIP 3 = +2 | DIP 2 = +4      │
+│    • Блок 1 (Master): DIP 4 вгору (крайній справа) ──► Адреса 0x01     │
+│    • Блок 2 (Slave1): DIP 3 вгору (другий справа)  ──► Адреса 0x02     │
+│    • Блок 3 (Slave2): DIP 3 та DIP 4 вгору         ──► Адреса 0x03     │
+└────────────────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+
+</body>
+</html>
