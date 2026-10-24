@@ -109,10 +109,12 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 #define CELL_PHYSICAL_OV_CONFIRM_MV 3600
 #define CELL_PHYSICAL_OV_WARN_CONFIRM_MV 3550
 
-// Vision V-LFP48100 cell protection thresholds (HMI ground truth: Warn 2800 mV, Protect 2500 mV, Release 3000 mV):
-#define CELL_UV_WARN_MV 2800
-#define CELL_DISCHARGE_STOP_MV 2650
-#define CELL_DISCHARGE_REENABLE_MV 3000
+// Vision V-LFP48100 cell protection thresholds with proactive inverter cut-off:
+// BMS hardware thresholds (BMS_TOOLS): Warn 2800 mV, Protect 2500 mV, Release 3000 mV.
+// COM-Box operates proactively ahead of BMS to prevent hard contactor cuts under load:
+#define CELL_UV_WARN_MV 2900            // Soft Warning: 50% DCL + 0x359 Warning Cell UV (proactive)
+#define CELL_DISCHARGE_STOP_MV 2750     // Soft Cut-off: DCL = 0 + 0x359 Protect Cell UV (250 mV before BMS 2500 mV)
+#define CELL_DISCHARGE_REENABLE_MV 3000 // Release: restore discharge when recharged to 3000 mV (matches BMS)
 #define CELL_MAX_DELTA_MV 400
 
 // ===== SOC з напруги комірок (P1.1, 22.10.2026) =====
@@ -772,10 +774,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
   uint16_t raw_voltage = (uart_rx_buffer[3] << 8) | uart_rx_buffer[4];
   int16_t raw_current = (int16_t)((uart_rx_buffer[5] << 8) | uart_rx_buffer[6]);
   // P1.1 (22.10.2026): офсети за PDF V01.01 — SOC = рег 0024, SOH = рег 0023.
-  // Раніше читались рег 21 (Cap Remaining) і 22 (MaxCharge) — маскувалось
-  // 100 А·ч. SOC тут лише для UV-гейтів (він мертвий у Vision, див. P1.1
-  // у IMPROVEMENTS_TODO); CAN-SOC рахується з напруги комірок.
-  uint16_t raw_soc = (uart_rx_buffer[51] << 8) | uart_rx_buffer[52];
+  // Кулонометр Vision (рег 24) ненадійний/зависає; CAN-SOC (0x355) та UV-захист (0x359)
+  // базуються виключно на фізичних вимірах напруги комірок.
   uint16_t raw_soh = (uart_rx_buffer[49] << 8) | uart_rx_buffer[50];
 
   for (uint8_t cell = 0; cell < 15; cell++) {
@@ -835,7 +835,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // so that activating the 90% software taper profile never generates false emergency cell OV alarms:
   if ((reg_protect & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-  if ((reg_protect & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 5))
+  // Cell UV Protect (0x359 b0): triggers proactively at <= 2750 mV (ahead of BMS 2500 mV)
+  // or if confirmed by BMS hardware alarm:
+  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV ||
+      ((reg_protect & 0x0008) && agg_min_cell_mv <= CELL_UV_WARN_MV))
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
   if ((reg_protect & 0x0001) && raw_voltage >= 5450)
     sweep_protect_b0 |= CAN_PROT_PACK_OV;
@@ -858,7 +861,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
   if ((reg_warning & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
     sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
-  if ((reg_warning & 0x0008) && (agg_min_cell_mv <= CELL_UV_WARN_MV || (raw_soc & 0xFF) <= 10))
+  // Cell UV Warning (0x359 b2): proactive warning <= 2900 mV (ahead of BMS 2800 mV)
+  // or if confirmed by BMS warning:
+  if (agg_min_cell_mv <= CELL_UV_WARN_MV ||
+      ((reg_warning & 0x0008) && agg_min_cell_mv <= CELL_UV_WARN_MV))
     sweep_alarm_b2 |= CAN_PROT_CELL_UV;
   if ((reg_warning & 0x0001) && raw_voltage >= 5400)
     sweep_alarm_b2 |= CAN_PROT_PACK_OV;
@@ -969,7 +975,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     return 0;
   }
 
-  // Cell voltage cut-off: hard cut <= 2650 mV, re-enable >= 3000 mV (Vision HMI Release)
+  // Cell voltage cut-off: soft cut <= 2750 mV (ahead of BMS 2500 mV), re-enable >= 3000 mV (Vision HMI Release)
   if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
     discharge_cell_uv_inhibit = true;
   } else if (discharge_cell_uv_inhibit) {
@@ -982,7 +988,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     return 0;
   }
 
-  // Soft cut / Cell UV warning (<= 2800 mV): derate discharge current to 50%
+  // Soft cut / Cell UV warning (<= 2900 mV): derate discharge current to 50%
   if (agg_min_cell_mv <= CELL_UV_WARN_MV) {
     max_current_x10 /= 2;
   }
