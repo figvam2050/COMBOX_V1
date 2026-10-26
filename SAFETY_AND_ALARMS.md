@@ -254,3 +254,4 @@ $$\text{SOC}_{new} = \frac{7 \cdot \text{SOC}_{ema} + \text{SOC}_{raw}}{8} \quad
 * Інженерний довідник розбору апаратних аварійних бітів: [`ERRORS_REFERENCE.md`](ERRORS_REFERENCE.md).
 * Правила монтажу, виготовлення кабелів та налаштування інвертора: [`USER_MANUAL.md`](USER_MANUAL.md).
 * Головний опис кодової бази та налаштувань перемикачів: [`README.md`](README.md).
+* Реєстр відкритих інженерних питань та пропозицій розширення безпеки: [`UNRESOLVED_PROPOSALS.md`](UNRESOLVED_PROPOSALS.md).
