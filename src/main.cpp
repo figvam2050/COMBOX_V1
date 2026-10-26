@@ -205,7 +205,7 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> abort session
-#define BAL_OUTAGE_AGG_N 19        // ~60 s at one aggregate per 3.2 s (full poll cycle)
+#define BAL_OUTAGE_AGG_N 19        // ~120 s in 6.4 s sweep (or ~15 s in Fast Polling 2-pack mode)
 #define BAL_EXIT_STREAK 3          // consecutive aggregates with spread <= exit
 #define BAL_TEMP_MIN_C 0.0f
 #define BAL_TEMP_MAX_C 45.0f
