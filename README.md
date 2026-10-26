@@ -99,6 +99,7 @@
 | | [`WHAT_NOT_TO_DO.md`](WHAT_NOT_TO_DO.md) | **12 інженерних табу**: антипатерни, заборона RTOS, заборона 16S, захист від апаратних пасток |
 | **Еталони знань** | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | Канонічна база протоколів Deye CAN, Modbus-розклад інвертора, мапа регістрів BMS Vision та HMI-меню |
 | | [`PORT_MAPPING.md`](PORT_MAPPING.md) | Фізичні піни MCU, продзвонювання кіл плати V1.3 (LED, DIP, UART, трансивери) з рівнями достовірності |
+| | [`SAFETY_AND_ALARMS.md`](SAFETY_AND_ALARMS.md) | Архітектура безпеки, аварійні стани та реакції COM-Box: пороги UV/OV/OT/UT, 0x359, матриця дій |
 | | [`ERRORS_REFERENCE.md`](ERRORS_REFERENCE.md) | Довідник кодів помилок: мапінг регістрів BMS 25..28 у біти CAN 0x359/0x35C, розбір Boot Latch |
 | **Утиліти та дослідження** | [`original_firmware/ORIGINAL_FIRMWARE.md`](original_firmware/ORIGINAL_FIRMWARE.md) | Повний реверс-інжиніринг заводської прошивки Felicity Solar G5RC (1400+ рядків) |
 | | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32 (режим ACK) та Arduino Nano для тестування COM-Box без інвертора |
@@ -329,6 +330,8 @@ python3 tools/rs485_sniff.py --selftest                   # синтетичні
 | `0x359` | 8 | байти 0–1 = захист (OV, UV, OT, UT, OCC, OCD, System Error), байти 2–3 = попередження (Warning) з Boot Latch фільтром, **байт 4 = кількість пакетів (з 3-miss дебаунсом)**, байти 5–6 = `'P' 'N'`, байт 7 = 0 |
 | `0x35C` | 2 | динамічні дозволи: біт 7 charge enable, біт 6 discharge enable (`0xC0` норма, `0x80`/`0x40` при відсічці, `0x00` при таймауті/аварії) |
 | `0x35E` | 8 | `'P' 'Y' 'L' 'O' 'N' 0 0 0` (ASCII `PYLON`) |
+
+> ℹ️ **Архітектура безпеки та реакції на аварії:** Повний інженерний опис розкодування регістрів 25..28, бітів `0x359`, порогових значень та захисних реакцій COM-Box викладено в [`SAFETY_AND_ALARMS.md`](SAFETY_AND_ALARMS.md).
 
 ### Як рахується SOC у кадрі `0x355` (P1.1, 22.10.2026)
 
