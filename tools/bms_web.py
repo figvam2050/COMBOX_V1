@@ -74,6 +74,75 @@ ERROR_BITS = [
 ]
 
 
+def find_usb_rs485_port() -> tuple:
+    """Auto-detects USB-to-RS485/UART converter port across Windows, macOS, and Linux.
+    Returns (port_device, description) or (None, reason)."""
+    if serial is None:
+        return None, "pySerial not installed"
+    try:
+        from serial.tools import list_ports
+        ports = list(list_ports.comports())
+    except Exception as e:
+        return None, str(e)
+
+    if not ports:
+        return None, "жодного COM-порту не знайдено (перевірте USB-перехідник)"
+
+    # Known USB-UART chip VIDs (FTDI, WCH CH340, SiLabs CP210x, Prolific)
+    KNOWN_VIDS = {
+        0x0403: "FTDI",
+        0x1A86: "CH340/CH341",
+        0x10C4: "CP210x",
+        0x067B: "PL2303",
+    }
+
+    candidates = []
+    for p in ports:
+        desc = (p.description or "").lower()
+        mfg = (getattr(p, "manufacturer", "") or "").lower()
+        vid = getattr(p, "vid", None)
+        hwid = (getattr(p, "hwid", "") or "").lower()
+        dev = p.device
+
+        # Skip virtual/built-in debug/bluetooth ports on macOS
+        if any(ign in dev.lower() for ign in ("bluetooth", "debug-console", "wlan-debug")):
+            continue
+
+        is_usb = (
+            vid in KNOWN_VIDS
+            or any(k in desc for k in ("ftdi", "ft232", "ch340", "ch341", "cp210", "prolific", "usb-serial", "usb serial", "uart", "rs485", "rs-485"))
+            or any(k in mfg for k in ("ftdi", "wch", "silicon labs", "prolific"))
+            or "usb" in hwid
+            or "usbserial" in dev.lower()
+            or "ttyusb" in dev.lower()
+            or "ttyacm" in dev.lower()
+        )
+        if is_usb:
+            chip = KNOWN_VIDS.get(vid) or p.description
+            candidates.append((dev, f"{p.description} [{chip}]" if chip != p.description else p.description))
+
+    if len(candidates) == 1:
+        return candidates[0]
+    elif len(candidates) > 1:
+        # Prefer FTDI if present among multiple adapters
+        for dev, desc in candidates:
+            if "ftdi" in desc.lower() or "ft232" in desc.lower():
+                return dev, f"{desc} (обрано FTDI)"
+        return candidates[0][0], f"{candidates[0][1]} (перший з {len(candidates)} знайдених)"
+
+    # Windows fallback: if there is a single COM port that isn't COM1 (COM1 is usually a motherboard header)
+    win_coms = [p for p in ports if not p.device.startswith("/dev/") and p.device.upper() != "COM1"]
+    if len(win_coms) == 1:
+        return win_coms[0].device, win_coms[0].description
+
+    # Single non-debug port fallback
+    non_dbg = [p for p in ports if not any(ign in p.device.lower() for ign in ("bluetooth", "debug-console", "wlan-debug"))]
+    if len(non_dbg) == 1:
+        return non_dbg[0].device, non_dbg[0].description
+
+    return None, f"доступні порти: {', '.join(p.device for p in ports)}"
+
+
 def modbus_crc16(data: bytes) -> int:
     crc = 0xFFFF
     for b in data:
@@ -1416,6 +1485,30 @@ def selftest() -> int:
     assert summary["cell_delta_mv"] == (3495 - 3450), f"bank delta: {summary['cell_delta_mv']}"
     assert summary["any_balancing"] is True, "any balancing must be true"
 
+    # --- Cross-platform port auto-detection tests ---
+    from collections import namedtuple
+    from unittest.mock import patch
+    FakePort = namedtuple('FakePort', ['device', 'description', 'manufacturer', 'vid', 'pid', 'hwid'])
+
+    # Test Windows FTDI COM port detection
+    with patch('serial.tools.list_ports.comports', return_value=[FakePort('COM3', 'USB Serial Port (COM3)', 'FTDI', 0x0403, 0x6001, 'USB VID:PID=0403:6001')]):
+        p_dev, p_desc = find_usb_rs485_port()
+        assert p_dev == 'COM3' and 'FTDI' in p_desc, f"Windows FTDI auto-detect: {p_dev}, {p_desc}"
+
+    # Test Windows CH340 COM port detection
+    with patch('serial.tools.list_ports.comports', return_value=[FakePort('COM5', 'USB-SERIAL CH340 (COM5)', 'wch.cn', 0x1A86, 0x7523, 'USB VID:PID=1A86:7523')]):
+        p_dev, p_desc = find_usb_rs485_port()
+        assert p_dev == 'COM5' and 'CH340' in p_desc, f"Windows CH340 auto-detect: {p_dev}, {p_desc}"
+
+    # Test macOS filtering virtual ports & detecting FTDI
+    with patch('serial.tools.list_ports.comports', return_value=[
+        FakePort('/dev/cu.debug-console', 'n/a', None, None, None, 'n/a'),
+        FakePort('/dev/cu.Bluetooth-Incoming-Port', 'n/a', None, None, None, 'n/a'),
+        FakePort('/dev/cu.usbserial-A5069RR4', 'FT232R USB UART', 'FTDI', 0x0403, 0x6001, 'USB VID:PID=0403:6001')
+    ]):
+        p_dev, p_desc = find_usb_rs485_port()
+        assert p_dev == '/dev/cu.usbserial-A5069RR4', f"macOS FTDI auto-detect: {p_dev}"
+
     print("selftest OK")
     return 0 if ok else 1
 
@@ -1423,7 +1516,8 @@ def selftest() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", default=DEFAULT_PORT)
+    ap.add_argument("--port", default=None,
+                    help="serial port (e.g. COM3 on Windows, /dev/cu.usbserial-... on macOS). If omitted, auto-detected.")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     ap.add_argument("--addr", type=parse_hex_addr, default=DEFAULT_ADDR,
                     help="initial battery tab address (e.g. 0x01)")
@@ -1443,13 +1537,33 @@ def main() -> int:
             print(p.device, p.description)
         return 0
 
-    bus = BmsBus(args.port, args.baud, initial_addr=args.addr, mock=args.mock, passive=args.passive)
+    port = args.port
+    if not args.mock and not port:
+        auto_port, desc = find_usb_rs485_port()
+        if auto_port:
+            port = auto_port
+            print(f"[Автовизначення] Знайдено адаптер RS485: {port} ({desc})")
+        elif os.path.exists(DEFAULT_PORT):
+            port = DEFAULT_PORT
+            print(f"[Порт] Використовуємо дефолтний: {port}")
+        else:
+            print("Помилка: не вдалося автоматично визначити COM-порт адаптера RS485.")
+            print(f"Статус пошуку: {desc}")
+            print("\nБудь ласка, вкажіть порт явно або перевірте USB-підключення:")
+            print("  Windows:  python tools/bms_web.py --port COM3")
+            print("  macOS:    python3 tools/bms_web.py --port /dev/cu.usbserial-XXXX")
+            print("  Список доступних портів: python3 tools/bms_web.py --list")
+            return 1
+    elif not port:
+        port = "MOCK"
+
+    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=args.passive)
     threading.Thread(target=bus.loop, daemon=True).start()
     Handler.bus = bus
     srv = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
 
     mode_label = "MOCK MULTI-PACK" if args.mock else (
-        f"{args.port} @ {args.baud} " + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
+        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
     print(f"BMS Web Monitor: http://127.0.0.1:{args.http}  [{mode_label}]")
     print("Multi-pack scanning: 0x01..0x10 enabled. Press Ctrl-C to stop.")
     try:
