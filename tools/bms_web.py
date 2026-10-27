@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.0: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.1: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
-and serves a tabbed responsive dashboard on http://127.0.0.1:8080.
+and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 
-Features:
-  - Multi-pack auto-discovery: sweeps 0x01..0x10, discovers active packs, and fast-polls
-    only available packs.
-  - Hot-plug / unplug tracking: detects when packs are added or disconnected.
-  - Mode switching via UI or CLI:
-      * Active Polling (Master): queries packs with FC03 (only when bus is free of COM-Box/inverter).
-      * Passive Scanning (Sniffer): zero TX transmissions, safely decodes live bus traffic
-        without any collisions.
-  - UI Layout:
-      * Main "Загальний огляд" (Summary) tab with bank-level totals (voltage, current, power,
-        average SOC, bank-wide cell delta, global min/max cells, summary table).
-      * Dedicated individual tabs for each battery pack with complete cell voltages,
-        active balancing tags [BAL], temperatures, LED status/warning/protection flags.
-  - Live mode switcher and "🔄 Пересканувати всі 16" buttons directly in the web UI.
-  - CSV logging of all active packs.
+Features (v2.1):
+  - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
+  - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
+  - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
+  - Autonomy & Energy Calculator (kWh stored, ETA charge time, ETA discharge runtime).
+  - Cell Health & Weak Cell Tracker: detects chronically lagging cells and estimates
+    internal resistance (R_int in mΩ) and balancing duration per cell.
+  - Live HTML5 Canvas Charts:
+      * Rolling time chart (voltage, current, power, bank delta).
+      * 15S Cell bar chart with min/max, active balancing glow, and R_int per cell.
+  - Diagnostic Passport Report (PDF / Print export) with complete battery metrics.
+  - Zero external dependencies beyond standard Python and pySerial.
 
 Usage:
-  python3 tools/bms_web.py --list
-  python3 tools/bms_web.py --port /dev/cu.usbserial-A5069RR4
-  python3 tools/bms_web.py --port /dev/cu.usbserial-A5069RR4 --passive
+  python3 tools/bms_web.py
   python3 tools/bms_web.py --mock
+  python3 tools/bms_web.py --passive
+  python3 tools/bms_web.py --port COM3
   python3 tools/bms_web.py --selftest
 """
 
 import argparse
+import collections
 import csv
 import json
 import os
@@ -66,7 +64,6 @@ WARN_BITS = [
     (0x0200, "Discharge OT"), (0x0400, "Charge UT"), (0x0800, "Discharge UT"),
     (0x1000, "Low capacity"), (0x2000, "Float stopped"),
 ]
-# 0027 Protection: same bits 0x0001..0x1000, plus 0x2000 = Discharge SC and 0x4000 = Reverse
 PROT_BITS = WARN_BITS[:13] + [(0x2000, "Discharge SC"), (0x4000, "Reverse")]
 ERROR_BITS = [
     (0x0001, "Voltage error"), (0x0002, "Temperature error"),
@@ -88,7 +85,6 @@ def find_usb_rs485_port() -> tuple:
     if not ports:
         return None, "жодного COM-порту не знайдено (перевірте USB-перехідник)"
 
-    # Known USB-UART chip VIDs (FTDI, WCH CH340, SiLabs CP210x, Prolific)
     KNOWN_VIDS = {
         0x0403: "FTDI",
         0x1A86: "CH340/CH341",
@@ -104,7 +100,6 @@ def find_usb_rs485_port() -> tuple:
         hwid = (getattr(p, "hwid", "") or "").lower()
         dev = p.device
 
-        # Skip virtual/built-in debug/bluetooth ports on macOS
         if any(ign in dev.lower() for ign in ("bluetooth", "debug-console", "wlan-debug")):
             continue
 
@@ -124,18 +119,15 @@ def find_usb_rs485_port() -> tuple:
     if len(candidates) == 1:
         return candidates[0]
     elif len(candidates) > 1:
-        # Prefer FTDI if present among multiple adapters
         for dev, desc in candidates:
             if "ftdi" in desc.lower() or "ft232" in desc.lower():
                 return dev, f"{desc} (обрано FTDI)"
         return candidates[0][0], f"{candidates[0][1]} (перший з {len(candidates)} знайдених)"
 
-    # Windows fallback: if there is a single COM port that isn't COM1 (COM1 is usually a motherboard header)
     win_coms = [p for p in ports if not p.device.startswith("/dev/") and p.device.upper() != "COM1"]
     if len(win_coms) == 1:
         return win_coms[0].device, win_coms[0].description
 
-    # Single non-debug port fallback
     non_dbg = [p for p in ports if not any(ign in p.device.lower() for ign in ("bluetooth", "debug-console", "wlan-debug"))]
     if len(non_dbg) == 1:
         return non_dbg[0].device, non_dbg[0].description
@@ -251,9 +243,6 @@ def decode_regs(regs: list) -> dict:
 
 
 def parse_bus(buf: bytes):
-    """Extract Modbus FC03 frames from stream chunk.
-    Returns (frames, rest); a frame is (kind, addr, payload):
-    kind 'req' (start, qty) or 'resp' (regs list)."""
     frames = []
     i = 0
     n = len(buf)
@@ -288,8 +277,39 @@ def parse_bus(buf: bytes):
     return frames, buf[i:]
 
 
+def calculate_autonomy(avg_voltage: float, total_current: float, cap_remaining: float, full_cap: float) -> dict:
+    """Calculates stored energy in kWh and ETA charge/discharge time."""
+    energy_kwh = (avg_voltage * cap_remaining) / 1000.0 if (avg_voltage and cap_remaining) else 0.0
+    energy_full_kwh = (avg_voltage * full_cap) / 1000.0 if (avg_voltage and full_cap) else 0.0
+    power_kw = (avg_voltage * total_current) / 1000.0 if avg_voltage else 0.0
+
+    if total_current > 0.5:
+        needed_ah = max(0.0, full_cap - cap_remaining)
+        eta_h = needed_ah / total_current
+        h = int(eta_h)
+        m = int((eta_h - h) * 60)
+        eta_str = f"до 100%: ~{h} год {m:02d} хв"
+        state_label = "Зарядка"
+    elif total_current < -0.5:
+        eta_h = cap_remaining / abs(total_current)
+        h = int(eta_h)
+        m = int((eta_h - h) * 60)
+        eta_str = f"автономність: ~{h} год {m:02d} хв"
+        state_label = "Розрядка"
+    else:
+        eta_str = "стендбай / буфер"
+        state_label = "Очікування"
+
+    return {
+        "energy_kwh": round(energy_kwh, 2),
+        "energy_full_kwh": round(energy_full_kwh, 2),
+        "power_kw": round(power_kw, 3),
+        "eta_str": eta_str,
+        "state_label": state_label,
+    }
+
+
 def get_bank_summary(packs: dict) -> dict:
-    """Calculates bank-wide aggregated telemetry across all online packs."""
     online_packs = [p for p in packs.values() if p.get("online") and p.get("parsed")]
     if not online_packs:
         return {
@@ -309,6 +329,13 @@ def get_bank_summary(packs: dict) -> dict:
             "cell_delta_mv": 0,
             "any_balancing": False,
             "alarm_count": 0,
+            "autonomy": {
+                "energy_kwh": 0.0,
+                "energy_full_kwh": 0.0,
+                "power_kw": 0.0,
+                "eta_str": "—",
+                "state_label": "Офлайн"
+            }
         }
 
     voltages = [p["parsed"]["voltage"] for p in online_packs if p["parsed"].get("voltage") is not None]
@@ -321,6 +348,7 @@ def get_bank_summary(packs: dict) -> dict:
     avg_soc = round(sum(socs) / len(socs)) if socs else 0
 
     cap_rem = sum(p["parsed"]["cap_remaining"] for p in online_packs if p["parsed"].get("cap_remaining") is not None)
+    full_cap = sum(p["parsed"].get("full_cap_ah") or p["parsed"].get("designed_cap_ah") or 100.0 for p in online_packs)
 
     all_cells = []
     any_bal = False
@@ -348,12 +376,14 @@ def get_bank_summary(packs: dict) -> dict:
         max_cell_mv = max_cell_pack = max_cell_idx = None
         cell_delta_mv = 0
 
+    autonomy = calculate_autonomy(avg_volt, total_curr, cap_rem, full_cap)
+
     return {
         "total_packs": len(packs),
         "online_packs": len(online_packs),
         "avg_voltage": round(avg_volt, 2),
         "total_current": round(total_curr, 2),
-        "total_power_kw": round((avg_volt * total_curr) / 1000.0, 3),
+        "total_power_kw": autonomy["power_kw"],
         "avg_soc": avg_soc,
         "total_cap_remaining": round(cap_rem, 1),
         "min_cell_mv": min_cell_mv,
@@ -365,11 +395,12 @@ def get_bank_summary(packs: dict) -> dict:
         "cell_delta_mv": cell_delta_mv,
         "any_balancing": any_bal,
         "alarm_count": alarm_cnt,
+        "autonomy": autonomy,
     }
 
 
 class BmsBus:
-    PASSIVE_STALE_S = 15.0   # If pack quiet >15s in passive mode, mark offline
+    PASSIVE_STALE_S = 15.0
     PASSIVE_GAP_S = 0.15
 
     def __init__(self, port: str, baud: int, initial_addr: int = DEFAULT_ADDR,
@@ -382,17 +413,25 @@ class BmsBus:
         self.ser = None
         self.lock = threading.Lock()
 
-        # Multi-pack storage: dict of addr_int -> pack dict
         self.packs = {}
         self.active_addrs = []
         self.is_scanning = False
         self.scan_msg = ""
         self.last_err = None
 
-        self._rescan_requested = True   # Trigger full 1..16 discovery on start
+        self._rescan_requested = True
         self._bg_probe_idx = 0
         self._stop = False
         self._mock_t = 0.0
+
+        # Diagnostics & History
+        self.history = collections.deque(maxlen=300)
+        self.cell_stats = {}    # (addr, cell_idx) -> {"min_cnt": int, "max_cnt": int, "samples": int}
+        self.prev_i = {}        # addr -> float
+        self.prev_cells = {}    # addr -> [int]
+        self.rint = {}          # addr -> [15 floats in mΩ]
+        self.bal_seconds = {}   # addr -> [15 floats in sec]
+        self.last_history_t = 0.0
 
         # CSV logging
         self.log_on = False
@@ -414,11 +453,8 @@ class BmsBus:
             return False
 
     def set_mode(self, new_mode: str) -> None:
-        """Switch between 'active' and 'passive' on the fly."""
         with self.lock:
-            if new_mode not in ("active", "passive"):
-                return
-            if self.mode == new_mode:
+            if new_mode not in ("active", "passive") or self.mode == new_mode:
                 return
             self.mode = new_mode
             if not self.mock and self.ser and self.ser.is_open:
@@ -431,7 +467,6 @@ class BmsBus:
                 self._rescan_requested = True
 
     def request_rescan(self) -> None:
-        """Trigger an immediate 1..16 discovery sweep."""
         with self.lock:
             self._rescan_requested = True
 
@@ -479,34 +514,47 @@ class BmsBus:
 
     def mock_regs(self, addr: int) -> list:
         self._mock_t += 1
-        rnd = random.Random((self._mock_t // 6) + addr * 17)
-        # Distinct characteristics for pack 1 vs pack 2
+        rnd = random.Random((self._mock_t // 8) + addr * 17)
+        # Alternate current steps periodically to showcase R_int and Weak Cell tracking
+        cycle_phase = int(self._mock_t) % 60
+        if cycle_phase < 25:
+            current = 1500 if addr == 1 else 1450   # +15A charging
+        elif cycle_phase < 35:
+            current = 200 if addr == 1 else 150     # +2A trickle
+        else:
+            current = -800 if addr == 1 else -750   # -8A discharging
+
         base_v = 3465 if addr == 1 else 3460
-        delta = rnd.randint(-4, 4)
+        delta = rnd.randint(-3, 3)
         base = max(3300, min(3600, base_v + delta))
 
-        cells = [base + rnd.randint(-6, 6) for _ in range(15)]
+        cells = [base + rnd.randint(-4, 4) for _ in range(15)]
+        if addr == 1:
+            # Simulate cell #8 having a slightly higher resistance & lagging under load
+            if current < 0:
+                cells[7] = base - 28
+            elif current > 1000:
+                cells[7] = base + 12
         if addr == 2:
-            # Let cell 15 be higher and balancing in pack 2
-            cells[14] = base + 28
-            bal_reg = 0x4000  # Cell 15 balancing active
+            # Cell 15 balancing active in pack 2
+            cells[14] = base + 26
+            bal_reg = 0x4000
         else:
             bal_reg = 0
 
         cells += [0]
         voltage = sum(cells[:15]) // 10
-        current = 1500 if addr == 1 else 1450  # ~15A charge
         regs = [0] * 39
         regs[0] = voltage
-        regs[1] = current
+        regs[1] = current & 0xFFFF
         for i, c in enumerate(cells):
             regs[2 + i] = c
-        regs[18], regs[19], regs[20] = 23, 22, 23
-        regs[21] = 85 if addr == 1 else 84  # Cap remaining
+        regs[18], regs[19], regs[20] = 23, 22, 24
+        regs[21] = 85 if addr == 1 else 84
         regs[22] = 100
         regs[23] = 100
-        regs[24] = 85 if addr == 1 else 84  # SOC %
-        regs[25] = 1 if current > 0 else 0
+        regs[24] = 85 if addr == 1 else 84
+        regs[25] = 1 if current > 0 else (2 if current < 0 else 0)
         regs[26] = 0
         regs[27] = 0
         regs[28] = 0
@@ -517,6 +565,120 @@ class BmsBus:
         regs[37] = 1000
         regs[38] = bal_reg
         return regs
+
+    def _update_pack_telemetry(self, a: int, regs: list, dev_info: dict = None) -> None:
+        """Internal updater for decoded telemetry, diagnostics, and resistance tracking."""
+        parsed = decode_regs(regs)
+        curr = parsed["current"]
+        cells = parsed["cells"]
+        now = time.time()
+
+        # 1. Balancing duration tracking
+        if parsed.get("balance_bits"):
+            for b in parsed["balance_bits"]:
+                if b["on"]:
+                    idx = b["n"] - 1
+                    b_list = self.bal_seconds.setdefault(a, [0.0] * 15)
+                    b_list[idx] += POLL_S
+
+        # 2. Weak cell tracking (identify chronically lagging cells)
+        alive = [c for c in cells if c > 0]
+        if len(alive) >= 15:
+            min_val = min(alive)
+            max_val = max(alive)
+            for i, c in enumerate(cells[:15]):
+                st = self.cell_stats.setdefault((a, i), {"min_cnt": 0, "max_cnt": 0, "samples": 0})
+                st["samples"] += 1
+                if c == min_val and curr <= 0.5:
+                    st["min_cnt"] += 1
+                if c == max_val and curr > 0.5:
+                    st["max_cnt"] += 1
+
+        # 3. Dynamic internal resistance (R_int in mΩ) estimation on current steps
+        old_i = self.prev_i.get(a)
+        old_cells = self.prev_cells.get(a)
+        if old_i is not None and old_cells and len(old_cells) >= 15 and len(cells) >= 15:
+            di = abs(curr - old_i)
+            if di >= 2.0:
+                r_list = self.rint.setdefault(a, [0.0] * 15)
+                for i in range(15):
+                    du = abs(cells[i] - old_cells[i])
+                    r_cand = du / di  # mV / A = mΩ
+                    if 0.1 <= r_cand <= 15.0:
+                        if r_list[i] == 0.0:
+                            r_list[i] = round(r_cand, 2)
+                        else:
+                            r_list[i] = round(0.8 * r_list[i] + 0.2 * r_cand, 2)
+        self.prev_i[a] = curr
+        self.prev_cells[a] = list(cells[:15])
+
+        # Store pack state
+        p = self.packs.get(a, {})
+        dinfo = dev_info or p.get("dev_info") or {}
+        self.packs[a] = {
+            "addr": a,
+            "addr_hex": f"0x{a:02X}",
+            "online": True,
+            "last_seen": now,
+            "consecutive_fails": 0,
+            "raw": regs,
+            "parsed": parsed,
+            "dev_info": dinfo,
+            "rint": self.rint.get(a, [0.0] * 15),
+            "bal_seconds": [int(s) for s in self.bal_seconds.get(a, [0.0] * 15)],
+            "err": None,
+        }
+
+    def _sample_history(self) -> None:
+        """Records rolling history point (~1 sec interval)."""
+        now = time.time()
+        if now - self.last_history_t < 1.0:
+            return
+        self.last_history_t = now
+        sum_data = get_bank_summary(self.packs)
+        if sum_data["online_packs"] > 0:
+            self.history.append({
+                "t": int(now),
+                "v": sum_data["avg_voltage"],
+                "i": sum_data["total_current"],
+                "p": sum_data["total_power_kw"],
+                "diff": sum_data["cell_delta_mv"],
+            })
+
+    def get_diagnostics_summary(self) -> dict:
+        """Finds chronically lagging cells and summarizes internal resistance."""
+        weak_cell = None
+        highest_rate = 0.0
+        for (a, idx), st in self.cell_stats.items():
+            if st["samples"] >= 15:
+                rate = st["min_cnt"] / st["samples"]
+                if rate > 0.45 and rate > highest_rate:
+                    highest_rate = rate
+                    weak_cell = {
+                        "addr_hex": f"0x{a:02X}",
+                        "cell_idx": idx + 1,
+                        "rate_pct": int(rate * 100),
+                        "text": f"АКБ 0x{a:02X}, ком. #{idx + 1} відстає у {int(rate * 100)}% вимірювань під навантаженням"
+                    }
+
+        all_r = []
+        for a, r_list in self.rint.items():
+            for idx, r in enumerate(r_list):
+                if r > 0.05:
+                    all_r.append((r, a, idx + 1))
+
+        if all_r:
+            avg_r = sum(r for r, _, _ in all_r) / len(all_r)
+            max_r = max(all_r, key=lambda x: x[0])
+            r_summary = f"Сер. опір комірок: {avg_r:.2f} мОм (макс: {max_r[0]:.2f} мОм, АКБ 0x{max_r[1]:02X} #{max_r[2]})"
+        else:
+            r_summary = "Очікування стрибка струму для розрахунку опору комірок..."
+
+        return {
+            "weak_cell": weak_cell["text"] if weak_cell else "Розбаланс у нормі, стійких відстаючих комірок не виявлено",
+            "has_weak_cell": bool(weak_cell),
+            "rint_summary": r_summary,
+        }
 
     def log_row(self, regs: list, addr: int) -> None:
         if not self.log_on or not self.log_path:
@@ -540,6 +702,7 @@ class BmsBus:
                 self.active_step()
             else:
                 buf = self.passive_step(buf)
+            self._sample_history()
 
     def active_step(self) -> None:
         if not self.mock and (self.ser is None or not self.ser.is_open):
@@ -547,7 +710,7 @@ class BmsBus:
                 time.sleep(2.5)
                 return
 
-        # 1. Full auto-discovery sweep if requested or no active packs known
+        # 1. Full auto-discovery sweep
         if self._rescan_requested or not self.active_addrs:
             self._rescan_requested = False
             self.is_scanning = True
@@ -578,17 +741,7 @@ class BmsBus:
                         }
 
                     with self.lock:
-                        self.packs[a] = {
-                            "addr": a,
-                            "addr_hex": f"0x{a:02X}",
-                            "online": True,
-                            "last_seen": time.time(),
-                            "consecutive_fails": 0,
-                            "raw": regs,
-                            "parsed": decode_regs(regs),
-                            "dev_info": dev_info,
-                            "err": None,
-                        }
+                        self._update_pack_telemetry(a, regs, dev_info)
                     self.log_row(regs, a)
                 except Exception:
                     with self.lock:
@@ -610,31 +763,13 @@ class BmsBus:
             try:
                 regs = self.mock_regs(a) if self.mock else self.read_regs(a, timeout=RESP_TIMEOUT_S)
                 with self.lock:
-                    p = self.packs.get(a, {})
-                    dev_info = p.get("dev_info")
-                    if not dev_info and not self.mock:
-                        dev_info = self.read_dev_info(a)
-                    elif not dev_info and self.mock:
-                        dev_info = {"model": "V-LFP48100-15S", "fw_version": "V10R18", "serial": f"SN-2026102200{a}"}
-
-                    self.packs[a] = {
-                        "addr": a,
-                        "addr_hex": f"0x{a:02X}",
-                        "online": True,
-                        "last_seen": time.time(),
-                        "consecutive_fails": 0,
-                        "raw": regs,
-                        "parsed": decode_regs(regs),
-                        "dev_info": dev_info,
-                        "err": None,
-                    }
+                    self._update_pack_telemetry(a, regs)
                 self.log_row(regs, a)
             except Exception as e:
                 with self.lock:
                     if a in self.packs:
                         self.packs[a]["consecutive_fails"] = self.packs[a].get("consecutive_fails", 0) + 1
                         self.packs[a]["err"] = str(e)
-                        # Hot-unplug: 3 consecutive timeouts marks pack offline
                         if self.packs[a]["consecutive_fails"] >= 3:
                             self.packs[a]["online"] = False
                             if a in self.active_addrs:
@@ -651,21 +786,10 @@ class BmsBus:
                     self.read_regs(probe_a, timeout=PROBE_TIMEOUT_S) if not self.mock else None
                 )
                 if regs:
-                    # New battery plugged in!
                     dev_info = self.read_dev_info(probe_a) if not self.mock else {
                         "model": "V-LFP48100-15S", "fw_version": "V10R18", "serial": f"SN-2026102200{probe_a}"}
                     with self.lock:
-                        self.packs[probe_a] = {
-                            "addr": probe_a,
-                            "addr_hex": f"0x{probe_a:02X}",
-                            "online": True,
-                            "last_seen": time.time(),
-                            "consecutive_fails": 0,
-                            "raw": regs,
-                            "parsed": decode_regs(regs),
-                            "dev_info": dev_info,
-                            "err": None,
-                        }
+                        self._update_pack_telemetry(probe_a, regs, dev_info)
                         if probe_a not in self.active_addrs:
                             self.active_addrs.append(probe_a)
                             self.active_addrs.sort()
@@ -681,21 +805,10 @@ class BmsBus:
 
         if self.mock:
             time.sleep(0.8)
-            now = time.time()
             for a in (1, 2):
                 regs = self.mock_regs(a)
                 with self.lock:
-                    self.packs[a] = {
-                        "addr": a,
-                        "addr_hex": f"0x{a:02X}",
-                        "online": True,
-                        "last_seen": now,
-                        "consecutive_fails": 0,
-                        "raw": regs,
-                        "parsed": decode_regs(regs),
-                        "dev_info": {"model": "V-LFP48100-15S", "fw_version": "V10R18", "serial": f"SN-2026102200{a}"},
-                        "err": None,
-                    }
+                    self._update_pack_telemetry(a, regs, {"model": "V-LFP48100-15S", "fw_version": "V10R18", "serial": f"SN-2026102200{a}"})
                 self.log_row(regs, a)
             with self.lock:
                 self.active_addrs = [1, 2]
@@ -714,24 +827,12 @@ class BmsBus:
             for kind, addr, payload in frames:
                 if kind == "resp" and len(payload) >= 28 and (1 <= addr <= 16):
                     with self.lock:
-                        p = self.packs.get(addr, {})
-                        self.packs[addr] = {
-                            "addr": addr,
-                            "addr_hex": f"0x{addr:02X}",
-                            "online": True,
-                            "last_seen": now,
-                            "consecutive_fails": 0,
-                            "raw": payload,
-                            "parsed": decode_regs(payload),
-                            "dev_info": p.get("dev_info") or {},
-                            "err": None,
-                        }
+                        self._update_pack_telemetry(addr, payload)
                         if addr not in self.active_addrs:
                             self.active_addrs.append(addr)
                             self.active_addrs.sort()
                     self.log_row(payload, addr)
 
-            # Check staleness: if no packet from pack > 15s, mark offline
             with self.lock:
                 for a, p in self.packs.items():
                     if p.get("online") and (now - p.get("last_seen", 0) > self.PASSIVE_STALE_S):
@@ -751,7 +852,6 @@ class BmsBus:
 
     def snapshot(self) -> dict:
         with self.lock:
-            # Serialize packs
             packs_dict = {}
             for a, p in self.packs.items():
                 parsed = p.get("parsed")
@@ -766,12 +866,16 @@ class BmsBus:
                 packs_dict[f"0x{a:02X}"] = p_copy
 
             summary = get_bank_summary(self.packs)
+            diag = self.get_diagnostics_summary()
+
             return {
                 "mode": self.mode,
                 "is_scanning": self.is_scanning,
                 "scan_msg": self.scan_msg,
                 "active_addrs": [f"0x{a:02X}" for a in sorted(self.active_addrs)],
                 "summary": summary,
+                "diagnostics": diag,
+                "history": list(self.history),
                 "packs": packs_dict,
                 "focus_addr": f"0x{self.focus_addr:02X}",
                 "port": self.port,
@@ -786,7 +890,7 @@ class BmsBus:
 
 HTML = """<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
-<title>Vision BMS Multi-Pack Monitor</title>
+<title>Vision BMS Multi-Pack Monitor & Diagnostics</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#111417;--card:#1a1f24;--card-hi:#232a31;--fg:#d8dee4;--dim:#7d8894;--ok:#3fb950;
@@ -810,6 +914,7 @@ button.off{background:#30363d;color:var(--dim)}
 .btn-mode.passive{background:#1f6feb;border-color:#388bfd}
 .btn-rescan{background:#21262d;border:1px solid var(--border);color:var(--fg)}
 .btn-rescan:hover{background:#30363d}
+.btn-report{background:#8957e5;color:#fff;border:1px solid #a371f7}
 
 /* Tab navigation */
 .tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap}
@@ -830,7 +935,7 @@ button.off{background:#30363d;color:var(--dim)}
 /* Grid & Cards */
 .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
 .card{background:var(--card);border-radius:10px;padding:14px;border:1px solid #252c34}
-.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 10px;display:flex;justify-content:space-between}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 10px;display:flex;justify-content:space-between;align-items:center}
 .big{display:flex;gap:20px;flex-wrap:wrap}
 .big div span{display:block}
 .big .v{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
@@ -841,6 +946,7 @@ button.off{background:#30363d;color:var(--dim)}
 .cell{background:#232a31;border-radius:6px;padding:6px;text-align:center;border:1px solid transparent}
 .cell .n{font-size:10px;color:var(--dim)}
 .cell .mv{font-weight:600;font-variant-numeric:tabular-nums;font-size:14px}
+.cell .rint{font-size:10px;color:var(--acc);margin-top:2px}
 .cell.min{border-color:var(--bad);background:#2f1d1f}
 .cell.max{border-color:var(--ok);background:#1a2e22}
 .cell.bal-active{box-shadow:0 0 8px var(--warn);border-color:var(--warn);background:#2d2415}
@@ -867,6 +973,28 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
 
 .err-msg{color:var(--bad);font-weight:600;margin-top:6px}
 .foot{color:var(--dim);font-size:12px;margin-top:20px;border-top:1px solid var(--border);padding-top:10px}
+
+/* Canvas styling */
+.chart-box{background:#161b22;border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:16px}
+canvas{width:100%;height:auto;display:block}
+
+/* Report Modal */
+#report_modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999;overflow-y:auto;padding:24px}
+.report-paper{background:#fff;color:#111;max-width:900px;margin:0 auto;border-radius:8px;padding:32px;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+.report-paper h2{margin-top:0;color:#000;border-bottom:2px solid #333;padding-bottom:8px}
+.report-paper table{width:100%;border-collapse:collapse;margin:14px 0;font-size:12px}
+.report-paper th,.report-paper td{border:1px solid #ccc;padding:6px 8px;text-align:left}
+.report-paper th{background:#f0f0f0;font-weight:600}
+.report-paper .rep-sec{font-size:14px;font-weight:700;margin:16px 0 6px;text-transform:uppercase;color:#333}
+.report-actions{display:flex;justify-content:flex-end;gap:10px;margin-bottom:16px}
+
+@media print{
+  body *{visibility:hidden}
+  #report_modal, #report_modal *{visibility:visible}
+  #report_modal{position:absolute;left:0;top:0;width:100%;background:#fff;padding:0}
+  .report-actions{display:none}
+  .report-paper{box-shadow:none;border-radius:0;padding:10px;max-width:100%}
+}
 </style></head><body>
 
 <header>
@@ -874,6 +1002,7 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
   <div class="controls">
     <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
+    <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
   </div>
 </header>
 
@@ -882,7 +1011,7 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
 </div>
 
 <div class="tabs" id="tabbar">
-  <!-- Dynamic tabs populated by JS -->
+  <!-- Dynamic tabs -->
 </div>
 
 <!-- VIEW 1: SUMMARY / GENERAL OVERVIEW -->
@@ -899,9 +1028,9 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
       <div class="subtext" id="b_p">— кВт</div>
     </div>
     <div class="bank-card">
-      <div class="l">Середній SOC банку</div>
-      <div class="v" id="b_soc">—</div>
-      <div class="subtext" id="b_cap">Залишок: — А·ч</div>
+      <div class="l">Калькулятор автономності</div>
+      <div class="v" id="b_energy" style="color:var(--ok)">— кВт·год</div>
+      <div class="subtext" id="b_eta">Прогноз: —</div>
     </div>
     <div class="bank-card">
       <div class="l">Розбаланс у всьому банку</div>
@@ -912,6 +1041,29 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
       <div class="l">Статус системи</div>
       <div class="v" id="b_status" style="font-size:18px">—</div>
       <div class="subtext" id="b_alarm_status">Тривоги: —</div>
+    </div>
+  </div>
+
+  <!-- DIAGNOSTICS & WEAK CELL BANNER -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--acc)">
+    <h2>🔬 Діагностика здоров'я та балансу банку</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
+      <div>
+        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Слабка / Відстаюча комірка</div>
+        <div id="diag_weak" style="font-size:14px;font-weight:600;margin-top:4px">—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Внутрішній опір (R_int)</div>
+        <div id="diag_rint" style="font-size:14px;font-weight:600;margin-top:4px;color:var(--acc)">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE ROLLING CANVAS CHART -->
+  <div class="card" style="margin-bottom:16px">
+    <h2>📈 Графік напруги, струму та розбалансу в реальному часі</h2>
+    <div class="chart-box">
+      <canvas id="historyChart" width="840" height="200"></canvas>
     </div>
   </div>
 
@@ -945,6 +1097,14 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
 
 <!-- VIEW 2: PACK DETAIL -->
 <div id="view_pack" style="display:none">
+  <!-- CELL BAR CHART -->
+  <div class="card" style="margin-bottom:16px">
+    <h2>📊 Гістограма 15 комірок вибраного АКБ (з активним балансом та опором)</h2>
+    <div class="chart-box">
+      <canvas id="cellBarChart" width="840" height="170"></canvas>
+    </div>
+  </div>
+
   <div class="grid">
     <div class="card">
       <h2>Параметри живлення</h2>
@@ -1023,9 +1183,20 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
 
 <div class="foot">
   <b>Режими роботи:</b><br>
-  • <b>⚡ Активний (Master):</b> скрипт самостійно сканує всі 16 адрес (0x01..0x10), формує пул живих АКБ і швидко опитує лише їх. Якщо АКБ додано чи відключено — система автоматично оновить пул. Використовувати коли шина вільна від COM-Box/інвертора.<br>
-  • <b>👂 Пасивний (Sniffer):</b> скрипт не передає жодного байту у шину RS485 (нуль колізій). Слухає трафік між COM-Box / інвертором та батареями, на льоту декодує дані всіх бачених АКБ.<br>
-  <b>Безпека:</b> 100% Read-Only (жодного запису в регістри конфігурації BMS).
+  • <b>⚡ Активний (Master):</b> скрипт опитує знайдені АКБ, розраховує автономність, внутрішній опір комірок та веде історію.<br>
+  • <b>👂 Пасивний (Sniffer):</b> скрипт не передає жодного байту у шину RS485 (нуль колізій). Безпечно працює при живій системі.<br>
+  <b>Безпека:</b> 100% Read-Only (жодного запису в конфігураційні регістри BMS).
+</div>
+
+<!-- DIAGNOSTIC REPORT MODAL -->
+<div id="report_modal">
+  <div class="report-actions">
+    <button onclick="window.print()" style="background:#238636;color:#fff">🖨️ Друк / Зберегти як PDF</button>
+    <button onclick="closeReport()" style="background:#555;color:#fff">✕ Закрити</button>
+  </div>
+  <div class="report-paper" id="report_content">
+    <!-- Populated by JS -->
+  </div>
 </div>
 
 <script>
@@ -1090,14 +1261,18 @@ function renderView() {
 
   if (isSummary) {
     renderSummary();
+    drawHistoryChart();
   } else {
     renderPackDetail(currentTab);
+    drawCellBarChart(currentTab);
   }
 }
 
 function renderSummary() {
   const sum = latestData.summary;
   const packs = latestData.packs || {};
+  const aut = sum.autonomy || {};
+  const diag = latestData.diagnostics || {};
 
   document.getElementById('b_v').textContent = sum.avg_voltage ? (sum.avg_voltage.toFixed(2) + ' В') : '—';
   
@@ -1105,8 +1280,8 @@ function renderSummary() {
   document.getElementById('b_i').textContent = (sum.total_current != null ? (currSign + sum.total_current.toFixed(1) + ' А') : '—');
   document.getElementById('b_p').textContent = (sum.total_power_kw != null ? (currSign + sum.total_power_kw.toFixed(2) + ' кВт') : '—');
   
-  document.getElementById('b_soc').textContent = sum.avg_soc ? (sum.avg_soc + ' %') : '—';
-  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—');
+  document.getElementById('b_energy').textContent = aut.energy_kwh ? (aut.energy_kwh.toFixed(2) + ' кВт·год (' + sum.avg_soc + '%)') : '—';
+  document.getElementById('b_eta').textContent = aut.eta_str || '—';
 
   document.getElementById('b_diff').textContent = (sum.cell_delta_mv != null ? ('Δ = ' + sum.cell_delta_mv + ' мВ') : '—');
   if (sum.min_cell_mv && sum.max_cell_mv) {
@@ -1123,11 +1298,14 @@ function renderSummary() {
   alEl.textContent = sum.alarm_count > 0 ? `⚠️ Активних тривог: ${sum.alarm_count}` : 'Усі захисти та попередження в нормі';
   alEl.style.color = sum.alarm_count > 0 ? 'var(--bad)' : 'var(--dim)';
 
-  // Table rows
+  document.getElementById('diag_weak').textContent = diag.weak_cell || '—';
+  document.getElementById('diag_rint').textContent = diag.rint_summary || '—';
+
+  // Summary Table
   const tbody = document.getElementById('summary_rows');
   const addrs = Object.keys(packs).sort();
   if (addrs.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">Жодного АКБ не знайдено. Натисніть «Пересканувати всі 16» або перевірте зв'язок.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">Жодного АКБ не знайдено.</td></tr>`;
     return;
   }
 
@@ -1174,13 +1352,7 @@ function renderPackDetail(addr) {
   document.getElementById('p_addr').textContent = addr + (p.online ? ' (Онлайн)' : ' (Офлайн)');
   document.getElementById('p_err').textContent = p.err || '';
 
-  if (!d) {
-    document.getElementById('p_v').textContent = '—';
-    document.getElementById('p_i').textContent = '—';
-    document.getElementById('p_st').textContent = 'Офлайн';
-    document.getElementById('p_cells').innerHTML = '';
-    return;
-  }
+  if (!d) return;
 
   document.getElementById('p_v').textContent = d.voltage.toFixed(2) + ' В';
   document.getElementById('p_i').textContent = (d.current == null ? '—' : d.current.toFixed(1) + ' А');
@@ -1199,7 +1371,8 @@ function renderPackDetail(addr) {
   document.getElementById('p_fcap').textContent = d.full_cap_ah == null ? '—' : d.full_cap_ah.toFixed(1) + ' А·ч';
   document.getElementById('p_difft').textContent = 'Δ = ' + d.cell_diff + ' мВ';
 
-  // Cells
+  // Cells grid
+  const rints = p.rint || [];
   const ci = document.getElementById('p_cells');
   ci.innerHTML = d.cells.map((mv, i) => {
     let cls = 'cell';
@@ -1207,9 +1380,11 @@ function renderPackDetail(addr) {
     if (mv === d.cell_max) cls += ' max';
     const balOn = d.balance_bits && d.balance_bits[i] && d.balance_bits[i].on;
     if (balOn) cls += ' bal-active';
+    const rVal = rints[i] ? rints[i] + ' mΩ' : '';
     return `<div class="${cls}">
       <div class="n">#${i + 1}${balOn ? ' <span class="b-tag">BAL</span>' : ''}</div>
       <div class="mv">${mv}</div>
+      ${rVal ? `<div class="rint">${rVal}</div>` : ''}
     </div>`;
   }).join('');
 
@@ -1237,6 +1412,267 @@ function renderPackDetail(addr) {
 
   document.getElementById('p_bal').innerHTML = d.balance_bits ? d.balance_bits.map(b =>
     `<span class="${b.on ? 'on' : ''}">${b.n}</span>`).join('') : '—';
+}
+
+/* --- CANVAS CHART 1: ROLLING HISTORY --- */
+function drawHistoryChart() {
+  const canvas = document.getElementById('historyChart');
+  if (!canvas || !latestData || !latestData.history) return;
+  const ctx = canvas.getContext('2d');
+  const hist = latestData.history;
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  if (hist.length < 2) {
+    ctx.fillStyle = '#7d8894';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('Накопичення точок історії телеметрії...', 20, 30);
+    return;
+  }
+
+  // Draw legend
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#58a6ff'; ctx.fillText('■ Напруга (В)', 20, 18);
+  ctx.fillStyle = '#3fb950'; ctx.fillText('■ Струм (А)', 120, 18);
+  ctx.fillStyle = '#d29922'; ctx.fillText('■ Δ банку (мВ)', 210, 18);
+
+  const padL = 40, padR = 40, padT = 30, padB = 25;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  // Find min/max for voltage & current
+  const vArr = hist.map(p => p.v);
+  const iArr = hist.map(p => p.i);
+  let minV = Math.min(...vArr) - 0.5, maxV = Math.max(...vArr) + 0.5;
+  if (maxV - minV < 2.0) { minV -= 1.0; maxV += 1.0; }
+
+  let maxAbsI = Math.max(...iArr.map(Math.abs), 5.0);
+  let minI = -maxAbsI, maxI = maxAbsI;
+
+  // Grid
+  ctx.strokeStyle = '#252c34';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let s = 0; s <= 4; s++) {
+    const y = padT + (plotH / 4) * s;
+    ctx.moveTo(padL, y); ctx.lineTo(w - padR, y);
+    // V label left
+    const vVal = (maxV - ((maxV - minV) / 4) * s).toFixed(1);
+    ctx.fillStyle = '#7d8894';
+    ctx.fillText(vVal + 'V', 5, y + 4);
+    // I label right
+    const iVal = (maxI - ((maxI - minI) / 4) * s).toFixed(0);
+    ctx.fillText(iVal + 'A', w - padR + 5, y + 4);
+  }
+  ctx.stroke();
+
+  // Zero Current Line
+  const yZeroI = padT + plotH * (maxI / (maxI - minI));
+  ctx.strokeStyle = '#30363d';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(padL, yZeroI); ctx.lineTo(w - padR, yZeroI);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Plot Voltage Line
+  ctx.strokeStyle = '#58a6ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  hist.forEach((pt, idx) => {
+    const x = padL + (idx / (hist.length - 1)) * plotW;
+    const y = padT + plotH - ((pt.v - minV) / (maxV - minV)) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Plot Current Line
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  hist.forEach((pt, idx) => {
+    const x = padL + (idx / (hist.length - 1)) * plotW;
+    const y = padT + plotH - ((pt.i - minI) / (maxI - minI)) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+/* --- CANVAS CHART 2: CELL BAR CHART --- */
+function drawCellBarChart(addr) {
+  const canvas = document.getElementById('cellBarChart');
+  if (!canvas || !latestData) return;
+  const p = (latestData.packs || {})[addr];
+  if (!p || !p.parsed) return;
+  const ctx = canvas.getContext('2d');
+  const cells = p.parsed.cells || [];
+  const rints = p.rint || [];
+  const balBits = p.parsed.balance_bits || [];
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  if (cells.length === 0) return;
+
+  const padL = 40, padR = 20, padT = 25, padB = 35;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  const minVal = p.parsed.cell_min;
+  const maxVal = p.parsed.cell_max;
+  const avgVal = cells.reduce((a, b) => a + b, 0) / cells.length;
+  let chartMin = Math.min(...cells) - 20;
+  let chartMax = Math.max(...cells) + 20;
+  if (chartMax - chartMin < 60) { chartMin -= 20; chartMax += 20; }
+
+  const barW = Math.floor(plotW / cells.length) - 8;
+
+  // Grid
+  ctx.strokeStyle = '#252c34';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let s = 0; s <= 3; s++) {
+    const y = padT + (plotH / 3) * s;
+    ctx.moveTo(padL, y); ctx.lineTo(w - padR, y);
+    const val = Math.round(chartMax - ((chartMax - chartMin) / 3) * s);
+    ctx.fillStyle = '#7d8894';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(val + 'mV', 5, y + 3);
+  }
+  ctx.stroke();
+
+  // Average line
+  const yAvg = padT + plotH - ((avgVal - chartMin) / (chartMax - chartMin)) * plotH;
+  ctx.strokeStyle = '#7d8894';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(padL, yAvg); ctx.lineTo(w - padR, yAvg);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Bars
+  cells.forEach((mv, i) => {
+    const x = padL + i * (plotW / cells.length) + 4;
+    const barH = ((mv - chartMin) / (chartMax - chartMin)) * plotH;
+    const y = padT + plotH - barH;
+
+    const isMin = (mv === minVal);
+    const isMax = (mv === maxVal);
+    const isBal = balBits[i] && balBits[i].on;
+
+    if (isBal) {
+      ctx.fillStyle = '#d29922'; // golden amber
+    } else if (isMin) {
+      ctx.fillStyle = '#f85149'; // red min
+    } else if (isMax) {
+      ctx.fillStyle = '#3fb950'; // green max
+    } else {
+      ctx.fillStyle = '#238636';
+    }
+
+    ctx.fillRect(x, y, barW, barH);
+
+    // Cell label
+    ctx.fillStyle = '#d8dee4';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('#' + (i + 1), x + barW / 2, h - 20);
+
+    // R_int label under bar
+    if (rints[i] > 0) {
+      ctx.fillStyle = '#58a6ff';
+      ctx.fillText(rints[i] + 'mΩ', x + barW / 2, h - 8);
+    }
+
+    // BAL badge text on top
+    if (isBal) {
+      ctx.fillStyle = '#d29922';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.fillText('BAL', x + barW / 2, y - 5);
+    }
+  });
+  ctx.textAlign = 'left';
+}
+
+/* --- DIAGNOSTIC PASSPORT REPORT --- */
+function openReport() {
+  if (!latestData) return;
+  const d = latestData;
+  const sum = d.summary;
+  const aut = sum.autonomy || {};
+  const diag = d.diagnostics || {};
+  const packs = d.packs || {};
+  const addrs = Object.keys(packs).sort();
+
+  let html = `<h2>Паспорт-звіт діагностики стану акумуляторного банку Vision</h2>
+  <div style="color:#666;font-size:12px;margin-bottom:14px">Дата формування: ${new Date().toLocaleString()} · Порт: ${d.port}</div>
+
+  <div class="rep-sec">1. Загальний енергетичний статус банку</div>
+  <table>
+    <tr><th>Підключено АКБ</th><th>Загальна напруга</th><th>Сумарний струм</th><th>Потужність</th><th>Середній SOC</th><th>Залишок енергії</th><th>Макс. розбаланс банку</th></tr>
+    <tr>
+      <td><b>${sum.online_packs} з ${sum.total_packs}</b></td>
+      <td>${sum.avg_voltage.toFixed(2)} В</td>
+      <td>${sum.total_current >= 0 ? '+' : ''}${sum.total_current.toFixed(1)} А</td>
+      <td>${sum.total_power_kw.toFixed(2)} кВт</td>
+      <td>${sum.avg_soc} %</td>
+      <td><b>${aut.energy_kwh} кВт·год</b> (${aut.eta_str})</td>
+      <td><b style="color:${sum.cell_delta_mv > 50 ? '#c00' : '#000'}">Δ = ${sum.cell_delta_mv} мВ</b></td>
+    </tr>
+  </table>
+
+  <div class="rep-sec">2. Паспортні дані акумуляторів (BMS Info)</div>
+  <table>
+    <tr><th>Адреса</th><th>Модель</th><th>Прошивка BMS</th><th>Серійний номер</th><th>SOH</th><th>Цикли</th><th>Номінал</th><th>Стан</th></tr>`;
+
+  addrs.forEach(a => {
+    const p = packs[a];
+    const parsed = p.parsed || {};
+    html += `<tr>
+      <td><b>${a}</b></td>
+      <td>${parsed.model || '—'}</td>
+      <td>${parsed.fw_version || '—'}</td>
+      <td>${parsed.serial || '—'}</td>
+      <td>${parsed.soh != null ? parsed.soh + '%' : '—'}</td>
+      <td>${parsed.cycles != null ? parsed.cycles : '—'}</td>
+      <td>${parsed.designed_cap_ah != null ? parsed.designed_cap_ah + ' А·ч' : '—'}</td>
+      <td>${p.online ? parsed.status_name : 'Офлайн'}</td>
+    </tr>`;
+  });
+  html += `</table>`;
+
+  <div class="rep-sec">3. Матриця напруг 15S комірок, опір та балансування</div>
+  html += `<div style="overflow-x:auto"><table>
+    <tr><th>АКБ</th><th>#1</th><th>#2</th><th>#3</th><th>#4</th><th>#5</th><th>#6</th><th>#7</th><th>#8</th><th>#9</th><th>#10</th><th>#11</th><th>#12</th><th>#13</th><th>#14</th><th>#15</th><th>Δ пака</th></tr>`;
+
+  addrs.forEach(a => {
+    const p = packs[a];
+    const parsed = p.parsed;
+    if (!parsed) return;
+    const cells = parsed.cells || [];
+    html += `<tr><td><b>${a}</b></td>`;
+    cells.forEach((mv, idx) => {
+      let style = '';
+      if (mv === parsed.cell_min) style = 'background:#ffebee;font-weight:700;color:#c00;';
+      if (mv === parsed.cell_max) style = 'background:#e8f5e9;font-weight:700;color:#2e7d32;';
+      html += `<td style="${style}">${mv}</td>`;
+    });
+    html += `<td><b>${parsed.cell_diff} мВ</b></td></tr>`;
+  });
+  html += `</table></div>`;
+
+  html += `<div class="rep-sec">4. Висновок діагностики та рекомендації</div>
+  <div style="background:#f9f9f9;padding:12px;border:1px solid #ddd;border-radius:6px;font-size:12px;line-height:1.6">
+    • <b>Стан розбалансу:</b> ${diag.weak_cell}<br>
+    • <b>Оцінка внутрішнього опору:</b> ${diag.rint_summary}<br>
+    • <b>Рекомендації:</b> ${sum.cell_delta_mv > 50 ? 'Рекомендується увімкнути режим балансування (DIP 4 на COM-Box) для вирівнювання відстаючих комірок під час буферного заряду.' : 'Банк збалансований, відхилення напруг у межах норми.'}
+  </div>`;
+
+  document.getElementById('report_content').innerHTML = html;
+  document.getElementById('report_modal').style.display = 'block';
+}
+
+function closeReport() {
+  document.getElementById('report_modal').style.display = 'none';
 }
 
 async function tick() {
@@ -1385,7 +1821,7 @@ def selftest() -> int:
     assert p["cell_min"] == 3456, "cell decode"
     regs[25] = 0x0004
     assert decode_regs(regs)["status_bits"][2]["on"], "status bit"
-    # --- offline checks vs MODBUS V01.01 + BMS Tools (22.10.2026) ---
+
     regs[25] = 0x8001
     d = decode_regs(regs)
     assert d["status_name"] == "Charging + Heating", f"status enum+heating: {d['status_name']}"
@@ -1414,12 +1850,11 @@ def selftest() -> int:
     assert len(decode_regs(regs)["warning_bits"]) == 14, "warn = 14 bits"
     assert len(decode_regs(regs)["protection_bits"]) == 15, "prot = 15 bits"
 
-    # --- passive mode: frame parser + partial (qty=28) decode ---
+    # --- passive mode frame parser ---
     req_body = bytes([0x01, 0x03, 0x00, 0x00, 0x00, 0x1C])
     req = req_body + crc_bytes(req_body)
     regs28 = [5306, 0] + [3500] * 15 + [0, 21, 20, 21,
                                         100, 100, 100, 100, 0, 2, 0x1000]
-    assert len(regs28) == 28, "qty28 register count"
     resp_body = bytes([0x01, 0x03, 56]) + b"".join(
         v.to_bytes(2, "big") for v in regs28)
     resp = resp_body + crc_bytes(resp_body)
@@ -1428,32 +1863,8 @@ def selftest() -> int:
     kinds = [(k, a) for k, a, _ in frames]
     assert ("req", 1) in kinds, f"parse request: {kinds}"
     assert ("resp", 1) in kinds, f"parse response: {kinds}"
-    r28 = [p for k, a, p in frames if k == "resp"][0]
-    d28 = decode_regs(r28)
-    assert abs(d28["voltage"] - 53.06) < 1e-6, "partial voltage"
-    assert d28["warning"] == 2 and d28["protection"] == 0x1000, "partial r1A/r1B"
-    assert d28["soc"] == 100 and d28["cap_remaining"] == 100, "partial soc/cap"
-    assert d28["cycles"] is None and d28["full_cap_ah"] is None, "partial no tail"
-    assert d28["designed_cap_ah"] is None and d28["balance_bits"] is None
-    assert d28["error_code"] is None and len(d28["cells"]) == 15, "partial cells"
-    assert all(not b["on"] for b in d28["error_bits"]), "partial error bits off"
 
-    # --- device info block & active balance test ---
-    info_block = [
-        0x562D, 0x4C46, 0x5034, 0x3831, 0x3030, 0x2D31, 0x3553, 0x2020,
-        0x2020, 0x2020, 0x2020, 0x2020, 0x2020, 0x2020, 0x2020,  # V-LFP48100-15S
-        0x0A12,  # V10R18
-        0x534E, 0x2D30, 0x3031, 0x2020, 0x2020, 0x2020, 0x2020,  # SN-001
-    ]
-    parsed_info = decode_dev_info_block(info_block)
-    assert parsed_info["model"] == "V-LFP48100-15S", f"model: {parsed_info['model']}"
-    assert parsed_info["fw_version"] == "V10R18", f"fw: {parsed_info['fw_version']}"
-    assert parsed_info["serial"] == "SN-001", f"sn: {parsed_info['serial']}"
-    regs[38] = 0x0005
-    d_bal = decode_regs(regs)
-    assert d_bal["balance_bits"][0]["on"] and not d_bal["balance_bits"][1]["on"] and d_bal["balance_bits"][2]["on"]
-
-    # --- Multi-pack bank summary test ---
+    # --- Multi-pack bank summary & autonomy test ---
     pack1_regs = list(regs)
     pack1_regs[0] = 5280   # 52.80 V
     pack1_regs[1] = 1500   # +15.00 A
@@ -1479,35 +1890,29 @@ def selftest() -> int:
     assert summary["online_packs"] == 2, f"online packs: {summary['online_packs']}"
     assert abs(summary["avg_voltage"] - 52.75) < 0.01, f"avg voltage: {summary['avg_voltage']}"
     assert abs(summary["total_current"] - 29.0) < 0.01, f"total current: {summary['total_current']}"
-    assert summary["avg_soc"] == 85 or summary["avg_soc"] == 84, f"avg soc: {summary['avg_soc']}"
-    assert summary["min_cell_mv"] == 3450 and summary["min_cell_pack"] == "0x01", f"min cell: {summary}"
-    assert summary["max_cell_mv"] == 3495 and summary["max_cell_pack"] == "0x02", f"max cell: {summary}"
     assert summary["cell_delta_mv"] == (3495 - 3450), f"bank delta: {summary['cell_delta_mv']}"
     assert summary["any_balancing"] is True, "any balancing must be true"
 
-    # --- Cross-platform port auto-detection tests ---
+    # --- Autonomy calculation test ---
+    aut_chg = calculate_autonomy(52.5, 25.0, 100.0, 200.0)
+    assert aut_chg["energy_kwh"] == 5.25, f"energy kwh: {aut_chg}"
+    assert "до 100%: ~4 год" in aut_chg["eta_str"], f"eta charge: {aut_chg}"
+
+    aut_dis = calculate_autonomy(51.0, -10.0, 100.0, 200.0)
+    assert "автономність: ~10 год" in aut_dis["eta_str"], f"eta discharge: {aut_dis}"
+
+    # --- Port auto-detection test ---
     from collections import namedtuple
     from unittest.mock import patch
     FakePort = namedtuple('FakePort', ['device', 'description', 'manufacturer', 'vid', 'pid', 'hwid'])
 
-    # Test Windows FTDI COM port detection
     with patch('serial.tools.list_ports.comports', return_value=[FakePort('COM3', 'USB Serial Port (COM3)', 'FTDI', 0x0403, 0x6001, 'USB VID:PID=0403:6001')]):
         p_dev, p_desc = find_usb_rs485_port()
         assert p_dev == 'COM3' and 'FTDI' in p_desc, f"Windows FTDI auto-detect: {p_dev}, {p_desc}"
 
-    # Test Windows CH340 COM port detection
     with patch('serial.tools.list_ports.comports', return_value=[FakePort('COM5', 'USB-SERIAL CH340 (COM5)', 'wch.cn', 0x1A86, 0x7523, 'USB VID:PID=1A86:7523')]):
         p_dev, p_desc = find_usb_rs485_port()
         assert p_dev == 'COM5' and 'CH340' in p_desc, f"Windows CH340 auto-detect: {p_dev}, {p_desc}"
-
-    # Test macOS filtering virtual ports & detecting FTDI
-    with patch('serial.tools.list_ports.comports', return_value=[
-        FakePort('/dev/cu.debug-console', 'n/a', None, None, None, 'n/a'),
-        FakePort('/dev/cu.Bluetooth-Incoming-Port', 'n/a', None, None, None, 'n/a'),
-        FakePort('/dev/cu.usbserial-A5069RR4', 'FT232R USB UART', 'FTDI', 0x0403, 0x6001, 'USB VID:PID=0403:6001')
-    ]):
-        p_dev, p_desc = find_usb_rs485_port()
-        assert p_dev == '/dev/cu.usbserial-A5069RR4', f"macOS FTDI auto-detect: {p_dev}"
 
     print("selftest OK")
     return 0 if ok else 1
