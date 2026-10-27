@@ -37,6 +37,8 @@ desktop.ini
 *.orig
 *.tmp
 *.log
+* old.*
+*old.*
 
 # --- Python ---
 __pycache__/
