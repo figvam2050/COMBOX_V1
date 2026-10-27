@@ -1017,20 +1017,34 @@ canvas{width:100%;height:auto;display:block}
 
 /* Report Modal */
 #report_modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999;overflow-y:auto;padding:24px}
-.report-paper{background:#fff;color:#111;max-width:900px;margin:0 auto;border-radius:8px;padding:32px;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
-.report-paper h2{margin-top:0;color:#000;border-bottom:2px solid #333;padding-bottom:8px}
-.report-paper table{width:100%;border-collapse:collapse;margin:14px 0;font-size:12px}
+.report-paper{background:#fff;color:#111;max-width:960px;margin:0 auto;border-radius:8px;padding:28px 32px;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+.report-paper h2{margin-top:0;color:#000;border-bottom:2px solid #333;padding-bottom:8px;font-size:20px}
+.report-paper table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12px}
 .report-paper th,.report-paper td{border:1px solid #ccc;padding:6px 8px;text-align:left}
 .report-paper th{background:#f0f0f0;font-weight:600}
-.report-paper .rep-sec{font-size:14px;font-weight:700;margin:16px 0 6px;text-transform:uppercase;color:#333}
+.report-paper .rep-sec{font-size:13px;font-weight:700;margin:16px 0 6px;text-transform:uppercase;color:#333;letter-spacing:0.5px}
 .report-actions{display:flex;justify-content:flex-end;gap:10px;margin-bottom:16px}
 
+.report-paper .rep-cells-table{width:100%;table-layout:fixed;border-collapse:collapse;margin:8px 0;font-size:11px}
+.report-paper .rep-cells-table th, .report-paper .rep-cells-table td{border:1px solid #ccc;padding:4px 1px;text-align:center;word-break:keep-all}
+.report-paper .rep-cells-table th:first-child, .report-paper .rep-cells-table td:first-child{width:46px;font-weight:700}
+.report-paper .rep-cells-table th:last-child, .report-paper .rep-cells-table td:last-child{width:56px;font-weight:700}
+
 @media print{
-  body *{visibility:hidden}
-  #report_modal, #report_modal *{visibility:visible}
-  #report_modal{position:absolute;left:0;top:0;width:100%;background:#fff;padding:0}
-  .report-actions{display:none}
-  .report-paper{box-shadow:none;border-radius:0;padding:10px;max-width:100%}
+  @page{size:A4 portrait;margin:8mm 8mm 8mm 8mm}
+  html, body{background:#fff !important;color:#000 !important;height:auto !important;min-height:0 !important;margin:0 !important;padding:0 !important}
+  body > *{display:none !important}
+  body > #report_modal{display:block !important;position:static !important;width:100% !important;height:auto !important;min-height:0 !important;background:#fff !important;padding:0 !important;margin:0 !important;overflow:visible !important}
+  .report-actions{display:none !important}
+  .report-paper{box-shadow:none !important;border-radius:0 !important;padding:0 !important;margin:0 !important;max-width:100% !important;width:100% !important}
+  .report-paper h2{font-size:16px !important;margin:0 0 2px 0 !important;padding-bottom:4px !important}
+  .report-paper .rep-sec{font-size:11px !important;margin:8px 0 3px !important}
+  .report-paper table{font-size:10px !important;margin:4px 0 !important;width:100% !important}
+  .report-paper th, .report-paper td{padding:3px 4px !important}
+  .report-paper .rep-cells-table{font-size:8.5px !important;margin:4px 0 !important}
+  .report-paper .rep-cells-table th, .report-paper .rep-cells-table td{padding:2px 1px !important}
+  .report-paper .rep-cells-table th:first-child, .report-paper .rep-cells-table td:first-child{width:38px !important}
+  .report-paper .rep-cells-table th:last-child, .report-paper .rep-cells-table td:last-child{width:48px !important}
 }
 </style></head><body>
 
@@ -1765,7 +1779,7 @@ function openReport() {
   });
   html += `</table>
   <div class="rep-sec">3. Матриця напруг 15S комірок, опір та балансування</div>
-  <div style="overflow-x:auto"><table>
+  <div style="overflow-x:auto"><table class="rep-cells-table">
     <tr><th>АКБ</th><th>#1</th><th>#2</th><th>#3</th><th>#4</th><th>#5</th><th>#6</th><th>#7</th><th>#8</th><th>#9</th><th>#10</th><th>#11</th><th>#12</th><th>#13</th><th>#14</th><th>#15</th><th>Δ пака</th></tr>`;
 
   addrs.forEach(a => {
