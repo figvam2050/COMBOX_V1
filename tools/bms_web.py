@@ -188,6 +188,36 @@ def decode_dev_info_block(regs: list) -> dict:
     return {"model": model, "fw_version": fw, "serial": serial_no}
 
 
+# 15S LiFePO4 OCV-таблиця калібрована під Vision V-LFP48100 (ізоморфно до src/main.cpp)
+LFP_OCV_TABLE = [
+    (3600, 100.0),
+    (3450, 95.0),
+    (3400, 90.0),
+    (3340, 75.0),
+    (3320, 60.0),
+    (3300, 50.0),
+    (3285, 31.0),
+    (3250, 20.0),
+    (3200, 10.0),
+    (3000, 5.0),
+    (2900, 0.0),
+]
+
+
+def soc_from_cell_mv(mv: int) -> float:
+    if mv >= LFP_OCV_TABLE[0][0]:
+        return 100.0
+    if mv <= LFP_OCV_TABLE[-1][0]:
+        return 0.0
+    for i in range(1, len(LFP_OCV_TABLE)):
+        if mv >= LFP_OCV_TABLE[i][0]:
+            mv_hi, soc_hi = LFP_OCV_TABLE[i - 1]
+            mv_lo, soc_lo = LFP_OCV_TABLE[i]
+            frac = (mv - mv_lo) / (mv_hi - mv_lo)
+            return round(soc_lo + frac * (soc_hi - soc_lo), 1)
+    return 0.0
+
+
 def decode_regs(regs: list) -> dict:
     n = len(regs)
 
@@ -203,12 +233,14 @@ def decode_regs(regs: list) -> dict:
     state = next((name for v, name in STATUS_STATES if low == v),
                  "Standby" if low == 0 else f"Unknown({low:#04x})")
     info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
+    min_c = min(alive)
+    real_soc = soc_from_cell_mv(min_c) if min_c > 0 else None
     return {
         "voltage": regs[0] / 100.0 if n > 0 else 0.0,
         "current": s16(regs[1]) / 100.0 if n > 1 else 0.0,
         "cells": cells,
         "cell_num": cell_num,
-        "cell_min": min(alive),
+        "cell_min": min_c,
         "cell_max": max(alive),
         "cell_diff": max(alive) - min(alive),
         "temp_pcb": s16(r(18, 0)),
@@ -218,6 +250,7 @@ def decode_regs(regs: list) -> dict:
         "max_charge_a": r(22),
         "soh": r(23),
         "soc": r(24),
+        "real_soc": real_soc,
         "status": status,
         "status_name": state + (" + Heating" if status & 0x8000 else ""),
         "status_bits": ([{"name": name, "on": low == v} for v, name in STATUS_STATES]
@@ -347,6 +380,9 @@ def get_bank_summary(packs: dict) -> dict:
     socs = [p["parsed"]["soc"] for p in online_packs if p["parsed"].get("soc") is not None]
     avg_soc = round(sum(socs) / len(socs)) if socs else 0
 
+    real_socs = [p["parsed"]["real_soc"] for p in online_packs if p["parsed"].get("real_soc") is not None]
+    avg_real_soc = round(sum(real_socs) / len(real_socs), 1) if real_socs else None
+
     cap_rem = sum(p["parsed"]["cap_remaining"] for p in online_packs if p["parsed"].get("cap_remaining") is not None)
     full_cap = sum(p["parsed"].get("full_cap_ah") or p["parsed"].get("designed_cap_ah") or 100.0 for p in online_packs)
 
@@ -385,6 +421,7 @@ def get_bank_summary(packs: dict) -> dict:
         "total_current": round(total_curr, 2),
         "total_power_kw": autonomy["power_kw"],
         "avg_soc": avg_soc,
+        "avg_real_soc": avg_real_soc,
         "total_cap_remaining": round(cap_rem, 1),
         "min_cell_mv": min_cell_mv,
         "min_cell_pack": min_cell_pack,
@@ -1157,7 +1194,8 @@ canvas{width:100%;height:auto;display:block}
         <tr><td>Модель АКБ</td><td id="p_model">—</td></tr>
         <tr><td>Прошивка BMS</td><td id="p_fw">—</td></tr>
         <tr><td>Серійний номер</td><td id="p_sn">—</td></tr>
-        <tr><td>SOC / Cap Remaining</td><td id="p_soc">—</td></tr>
+        <tr><td>Реальний SOC (OCV)</td><td id="p_real_soc">—</td></tr>
+        <tr><td>Заводський SOC (BMS)</td><td id="p_soc">—</td></tr>
         <tr><td>SOH / Max charge</td><td id="p_soh">—</td></tr>
         <tr><td>Кількість циклів</td><td id="p_cyc">—</td></tr>
         <tr><td>Номінал</td><td id="p_cap">—</td></tr>
@@ -1321,8 +1359,10 @@ function renderSummary() {
   document.getElementById('b_i').textContent = (sum.total_current != null ? (currSign + sum.total_current.toFixed(1) + ' А') : '—');
   document.getElementById('b_p').textContent = (sum.total_power_kw != null ? (currSign + sum.total_power_kw.toFixed(2) + ' кВт') : '—');
   
-  document.getElementById('b_soc').textContent = sum.avg_soc ? (sum.avg_soc + ' %') : '—';
-  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—');
+  const realSocStr = sum.avg_real_soc != null ? (sum.avg_real_soc.toFixed(1) + ' %') : (sum.avg_soc ? (sum.avg_soc + ' %') : '—');
+  document.getElementById('b_soc').textContent = realSocStr;
+  const bmsNote = (sum.avg_soc != null && sum.avg_real_soc != null) ? ` · BMS: ${sum.avg_soc}%` : '';
+  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—') + bmsNote;
 
   document.getElementById('b_diff').textContent = (sum.cell_delta_mv != null ? ('Δ = ' + sum.cell_delta_mv + ' мВ') : '—');
   if (sum.min_cell_mv && sum.max_cell_mv) {
@@ -1369,7 +1409,7 @@ function renderSummary() {
       <td><span class="pill ${stClass}">${d.status_name}</span></td>
       <td><b>${d.voltage.toFixed(2)} В</b></td>
       <td>${currStr}</td>
-      <td>${d.soc != null ? d.soc + ' %' : '—'}</td>
+      <td><b>${d.real_soc != null ? d.real_soc.toFixed(1) + '%' : (d.soc != null ? d.soc + '%' : '—')}</b>${d.soc != null && d.real_soc != null ? ` <span style="color:var(--dim);font-size:11px" title="Заводський BMS SOC">(${d.soc}%)</span>` : ''}</td>
       <td style="color:var(--bad)">${d.cell_min} мВ</td>
       <td style="color:var(--ok)">${d.cell_max} мВ</td>
       <td><b>${d.cell_diff} мВ</b></td>
@@ -1446,7 +1486,9 @@ function renderPackDetail(addr) {
   document.getElementById('p_model').textContent = d.model || '—';
   document.getElementById('p_fw').textContent = d.fw_version || '—';
   document.getElementById('p_sn').textContent = d.serial || '—';
-  document.getElementById('p_soc').textContent = (d.soc == null ? '—' : d.soc + ' %') + ' / ' + (d.cap_remaining == null ? '—' : d.cap_remaining + ' А·ч');
+  const rSoc = d.real_soc != null ? `${d.real_soc.toFixed(1)} % <span style="font-size:11px;color:var(--dim)">(по мін. ком. ${d.cell_min} мВ)</span>` : '—';
+  document.getElementById('p_real_soc').innerHTML = `<b>${rSoc}</b>`;
+  document.getElementById('p_soc').textContent = (d.soc == null ? '—' : d.soc + ' %') + ' / ' + (d.cap_remaining == null ? '—' : d.cap_remaining + ' А·ч') + ' (заводський регістр 0024)';
   document.getElementById('p_soh').textContent = (d.soh == null ? '—' : d.soh + ' %') + ' / ' + (d.max_charge_a == null ? '—' : d.max_charge_a + ' А');
   document.getElementById('p_cyc').textContent = d.cycles == null ? '—' : d.cycles;
   document.getElementById('p_cap').textContent = (d.designed_cap_ah == null ? '—' : d.designed_cap_ah + ' А·ч') + ' · ' + d.cell_num + 'S';
@@ -1690,13 +1732,13 @@ function openReport() {
 
   <div class="rep-sec">1. Загальний енергетичний статус банку</div>
   <table>
-    <tr><th>Підключено АКБ</th><th>Загальна напруга</th><th>Сумарний струм</th><th>Потужність</th><th>Середній SOC</th><th>Залишок енергії</th><th>Макс. розбаланс банку</th></tr>
+    <tr><th>Підключено АКБ</th><th>Загальна напруга</th><th>Сумарний струм</th><th>Потужність</th><th>Середній SOC (OCV)</th><th>Залишок енергії</th><th>Макс. розбаланс банку</th></tr>
     <tr>
       <td><b>${sum.online_packs} з ${sum.total_packs}</b></td>
       <td>${sum.avg_voltage.toFixed(2)} В</td>
       <td>${sum.total_current >= 0 ? '+' : ''}${sum.total_current.toFixed(1)} А</td>
       <td>${sum.total_power_kw.toFixed(2)} кВт</td>
-      <td>${sum.avg_soc} %</td>
+      <td><b>${sum.avg_real_soc != null ? sum.avg_real_soc.toFixed(1) + ' %' : (sum.avg_soc + ' %')}</b>${sum.avg_soc != null && sum.avg_real_soc != null ? ` <span style="font-size:11px;color:#666">(${sum.avg_soc}% BMS)</span>` : ''}</td>
       <td><b>${aut.energy_kwh} кВт·год</b> (${aut.eta_str})</td>
       <td><b style="color:${sum.cell_delta_mv > 50 ? '#c00' : '#000'}">Δ = ${sum.cell_delta_mv} мВ</b></td>
     </tr>
@@ -1704,7 +1746,7 @@ function openReport() {
 
   <div class="rep-sec">2. Паспортні дані акумуляторів (BMS Info)</div>
   <table>
-    <tr><th>Адреса</th><th>Модель</th><th>Прошивка BMS</th><th>Серійний номер</th><th>SOH</th><th>Цикли</th><th>Номінал</th><th>Стан</th></tr>`;
+    <tr><th>Адреса</th><th>Модель</th><th>Прошивка BMS</th><th>Серійний номер</th><th>SOC (OCV / BMS)</th><th>SOH</th><th>Цикли</th><th>Номінал</th><th>Стан</th></tr>`;
 
   addrs.forEach(a => {
     const p = packs[a];
@@ -1714,6 +1756,7 @@ function openReport() {
       <td>${parsed.model || '—'}</td>
       <td>${parsed.fw_version || '—'}</td>
       <td>${parsed.serial || '—'}</td>
+      <td><b>${parsed.real_soc != null ? parsed.real_soc.toFixed(1) + '%' : '—'}</b> / <span style="color:#666">${parsed.soc != null ? parsed.soc + '%' : '—'}</span></td>
       <td>${parsed.soh != null ? parsed.soh + '%' : '—'}</td>
       <td>${parsed.cycles != null ? parsed.cycles : '—'}</td>
       <td>${parsed.designed_cap_ah != null ? parsed.designed_cap_ah + ' А·ч' : '—'}</td>
