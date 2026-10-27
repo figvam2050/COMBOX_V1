@@ -97,6 +97,29 @@ def bits_of(value: int, table) -> list:
     return [{"name": name, "on": bool(value & mask)} for mask, name in table]
 
 
+def decode_ascii_regs(regs_slice: list) -> str:
+    chars = []
+    for reg in regs_slice:
+        chars.append(chr((reg >> 8) & 0xFF))
+        chars.append(chr(reg & 0xFF))
+    return "".join(c for c in chars if 32 <= ord(c) <= 126).strip()
+
+
+def decode_fw_version(reg: int) -> str:
+    hi = (reg >> 8) & 0xFF
+    lo = reg & 0xFF
+    if hi > 0 or lo > 0:
+        return f"V{hi:02d}R{lo:02d}"
+    return f"0x{reg:04X}"
+
+
+def decode_dev_info_block(regs: list) -> dict:
+    model = decode_ascii_regs(regs[0:15]) if len(regs) >= 15 else None
+    fw = decode_fw_version(regs[15]) if len(regs) >= 16 else None
+    serial_no = decode_ascii_regs(regs[16:23]) if len(regs) >= 23 else None
+    return {"model": model, "fw_version": fw, "serial": serial_no}
+
+
 def decode_regs(regs: list) -> dict:
     n = len(regs)
 
@@ -111,6 +134,7 @@ def decode_regs(regs: list) -> dict:
     low = status & 0x00FF
     state = next((name for v, name in STATUS_STATES if low == v),
                  "Standby" if low == 0 else f"Unknown({low:#04x})")
+    info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
     return {
         "voltage": regs[0] / 100.0,
         "current": s16(regs[1]) / 100.0,
@@ -144,6 +168,9 @@ def decode_regs(regs: list) -> dict:
         "balance_bits": ([{"n": i + 1, "on": bool(r(38, 0) & (1 << i))}
                           for i in range(cell_num)] if n > 38 else None),
         "designed_cap_ah": (regs[37] / 10.0) if n > 37 else None,
+        "model": info.get("model"),
+        "fw_version": info.get("fw_version"),
+        "serial": info.get("serial"),
     }
 
 
@@ -207,6 +234,7 @@ class BmsBus:
         self._mock_t = 0.0
         self._mock_v = 3452
         self._stop = False
+        self.dev_info = {}
 
     def open(self) -> bool:
         if self.mock:
@@ -240,7 +268,35 @@ class BmsBus:
         data = frame[3:3 + bytecount]
         return [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
 
+    def read_dev_info(self) -> dict:
+        try:
+            req = bytes([self.addr, 0x03, 0x00, 0x69, 0x00, 0x17]) + crc_bytes(
+                bytes([self.addr, 0x03, 0x00, 0x69, 0x00, 0x17]))
+            self.ser.reset_input_buffer()
+            self.ser.write(req)
+            hdr = self.ser.read(3)
+            if len(hdr) < 3 or hdr[0] != self.addr or hdr[1] != 0x03:
+                return {}
+            bytecount = hdr[2]
+            rest = self.ser.read(bytecount + 2)
+            if len(rest) < bytecount + 2:
+                return {}
+            frame = hdr + rest
+            if crc_bytes(frame[:-2]) != frame[-2:]:
+                return {}
+            data = frame[3:3 + bytecount]
+            regs = [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
+            return decode_dev_info_block(regs)
+        except Exception:
+            return {}
+
     def mock_regs(self) -> list:
+        if not self.dev_info:
+            self.dev_info = {
+                "model": "V-LFP48100-15S",
+                "fw_version": "V10R18",
+                "serial": "SN-20261022001",
+            }
         self._mock_t += 1
         rnd = random.Random(self._mock_t // 10)
         self._mock_v += rnd.choice([-1, 0, 0, 1])
@@ -295,6 +351,8 @@ class BmsBus:
                     time.sleep(3.0)
                     continue
             try:
+                if not self.mock and not self.dev_info:
+                    self.dev_info = self.read_dev_info()
                 regs = self.mock_regs() if self.mock else self.read_regs()
                 with self.lock:
                     self.state = {
@@ -385,7 +443,14 @@ class BmsBus:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return dict(self.state)
+            st = dict(self.state)
+            if st.get("parsed") and self.dev_info:
+                p = dict(st["parsed"])
+                for k, v in self.dev_info.items():
+                    if not p.get(k):
+                        p[k] = v
+                st["parsed"] = p
+            return st
 
 
 HTML = """<!doctype html>
@@ -415,6 +480,8 @@ h1{font-size:18px;margin:0 0 4px}
 .cell .mv{font-weight:600;font-variant-numeric:tabular-nums}
 .cell.min{outline:1px solid var(--bad)}
 .cell.max{outline:1px solid var(--ok)}
+.cell.bal-active{box-shadow:0 0 8px var(--warn);border:1px solid var(--warn);background:#2d2415}
+.b-tag{background:var(--warn);color:#111417;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:700;margin-left:4px}
 .leds{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
 .led{display:flex;align-items:center;gap:8px;color:var(--dim)}
 .led i{width:12px;height:12px;border-radius:50%;background:#30363d;display:inline-block;flex:none}
@@ -442,6 +509,9 @@ table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-al
 <div><span class="l">Стан</span><span class="v"><span class="pill" id="st">—</span></span></div>
 </div><div class="err" id="err"></div>
 <table class="kv" style="margin-top:10px">
+<tr><td>Модель</td><td id="bmsmodel">—</td></tr>
+<tr><td>Прошивка BMS</td><td id="bmsfw">—</td></tr>
+<tr><td>Серійний номер</td><td id="bmssn">—</td></tr>
 <tr><td>SOC / Cap Remaining</td><td id="soc">—</td></tr>
 <tr><td>SOH / Max charge</td><td id="soh">—</td></tr>
 <tr><td>Цикли</td><td id="cyc">—</td></tr>
@@ -487,6 +557,9 @@ async function tick(){
   const st=document.getElementById('st');
   st.textContent=p.status_name;
   st.className='pill '+(p.status_bits[2].on?'bad':'ok');
+  document.getElementById('bmsmodel').textContent=p.model||'—';
+  document.getElementById('bmsfw').textContent=p.fw_version||'—';
+  document.getElementById('bmssn').textContent=p.serial||'—';
   document.getElementById('soc').textContent=(p.soc==null?'—':p.soc+' %')+' / '+(p.cap_remaining==null?'—':p.cap_remaining+' А·ч');
   document.getElementById('soh').textContent=(p.soh==null?'—':p.soh+' %')+' / '+(p.max_charge_a==null?'—':p.max_charge_a+' А');
   document.getElementById('cyc').textContent=p.cycles==null?'—':p.cycles;
@@ -497,7 +570,9 @@ async function tick(){
   ci.innerHTML=p.cells.map((mv,i)=>{
    let cls='cell';
    if(mv===p.cell_min)cls+=' min'; if(mv===p.cell_max)cls+=' max';
-   return `<div class="${cls}"><div class="n">#${i+1}</div><div class="mv">${mv}</div></div>`}).join('');
+   const balOn = p.balance_bits && p.balance_bits[i] && p.balance_bits[i].on;
+   if(balOn) cls += ' bal-active';
+   return `<div class="${cls}"><div class="n">#${i+1}${balOn?' <span class="b-tag">BAL</span>':''}</div><div class="mv">${mv}</div></div>`}).join('');
   document.getElementById('t0').textContent=(p.temp_pcb==null?'—':p.temp_pcb+' °C');
   document.getElementById('t1').textContent=(p.temp_avg==null?'—':p.temp_avg+' °C');
   document.getElementById('t2').textContent=(p.temp_max==null?'—':p.temp_max+' °C');
@@ -638,6 +713,20 @@ def selftest() -> int:
     assert d28["designed_cap_ah"] is None and d28["balance_bits"] is None
     assert d28["error_code"] is None and len(d28["cells"]) == 15, "partial cells"
     assert all(not b["on"] for b in d28["error_bits"]), "partial error bits off"
+    # --- device info block & active balance test ---
+    info_block = [
+        0x562D, 0x4C46, 0x5034, 0x3831, 0x3030, 0x2D31, 0x3553, 0x2020,
+        0x2020, 0x2020, 0x2020, 0x2020, 0x2020, 0x2020, 0x2020,  # V-LFP48100-15S
+        0x0A12,  # V10R18
+        0x534E, 0x2D30, 0x3031, 0x2020, 0x2020, 0x2020, 0x2020,  # SN-001
+    ]
+    parsed_info = decode_dev_info_block(info_block)
+    assert parsed_info["model"] == "V-LFP48100-15S", f"model: {parsed_info['model']}"
+    assert parsed_info["fw_version"] == "V10R18", f"fw: {parsed_info['fw_version']}"
+    assert parsed_info["serial"] == "SN-001", f"sn: {parsed_info['serial']}"
+    regs[38] = 0x0005
+    d_bal = decode_regs(regs)
+    assert d_bal["balance_bits"][0]["on"] and not d_bal["balance_bits"][1]["on"] and d_bal["balance_bits"][2]["on"]
     print("selftest OK")
     return 0 if ok else 1
 

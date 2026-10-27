@@ -102,6 +102,10 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // DIP3 (SW3, weight 4, PB14): fast polling mode (active packs only)
 // OFF = full scan across all 16 addresses, ON = fast polling latched active packs.
 #define DIP_FAST_POLL_MASK 0x04
+// DIP4 (SW4, weight 8, PB15): forced balancing mode (27.10.2026)
+// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 51.6V,
+// 1.0-2.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
+#define DIP_FORCED_BALANCE_MASK 0x08
 #define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
@@ -187,7 +191,7 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 30       // regular spread bucket (30..100 mV): retry in 72 h
-#define BAL_SPREAD_EXIT_MV 25      // session success target (spread <= 25 mV)
+#define BAL_SPREAD_EXIT_MV 35      // session success target (spread <= 35 mV, matches BMS 40 mV comparator)
 #define BAL_TREND_DELTA_MV_12H 5   // 5 mV over 12 h == 10 mV/24 h -> HIGH
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_MED_MS (72UL * 3600UL * 1000UL)
@@ -314,6 +318,7 @@ static uint32_t agg_soh_sum = 0;
 static float agg_temp_max = -1000.0f;
 static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
+static uint8_t agg_charge_capable_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static uint16_t agg_min_cell_mv = 0xFFFF;
 static bool charge_cell_ov_inhibit = false;
@@ -360,6 +365,7 @@ static bool bal_float_hold = false;
 static uint16_t bms_balance_mask = 0;
 static uint16_t sweep_balance_mask = 0;
 static bool bal_manual_prev = false;
+static bool bal_forced_prev = false;
 static uint32_t bal_last_success_ms = 0;
 static uint32_t bal_cooldown_until_ms = 0;
 static uint32_t bal_session_start_ms = 0;
@@ -379,6 +385,17 @@ static uint32_t last_bg_probe_ms = 0;
 static uint8_t bg_probe_candidate = 0;
 static bool bg_probe_in_flight = false;
 static uint8_t current_addr_index = 0;
+
+// Non-blocking RS-485 BMS polling FSM state
+enum {
+  BMS_FSM_IDLE = 0,
+  BMS_FSM_WAIT_RESP
+};
+static uint8_t bms_fsm_state = BMS_FSM_IDLE;
+static uint32_t bms_fsm_query_ms = 0;
+static uint32_t bms_fsm_last_byte_ms = 0;
+static uint32_t last_bms_start = 0;
+static uint32_t last_bms_finish = 0;
 
 static uint8_t dip_applied_code = 0xFF;
 static uint8_t dip_last_code = 0;
@@ -490,6 +507,7 @@ static void rs485_flush_rx(void) {
 
 static void watchdog_feed(void);
 static bool bms_parse_response(uint8_t expected_addr);
+static void bms_advance_poll_address(uint32_t now);
 static void bms_aggregate_data(void);
 static void agg_reset(void);
 
@@ -730,30 +748,100 @@ static void bms_send_query(uint8_t addr_index) {
   }
 }
 
-static uint16_t bms_receive_response(void) {
-  uart_rx_index = 0;
-  uint32_t start_ms = millis();
-  uint32_t wait_start = start_ms;
-  while (millis() - wait_start < BMS_TIMEOUT_MS) {
-    pcs_poll_service(millis()); // mirror drain / inverter RX while we wait
-    if (millis() - start_ms >= 700)
-      break; // жорсткий дедлайн від першого байта (запас під повільні BMS)
-    if (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
-      uint8_t byte = usart_data_receive(USART0);
-      pcs_mirror_push(byte); // no-op in bridge mode
+// Non-blocking RS-485 BMS polling FSM step (mirror mode only; DIP2 bridge mode handles own)
+static void bms_poll_step(uint32_t now) {
+  if (pcs_bridge_mode) {
+    if (bms_fsm_state != BMS_FSM_IDLE) {
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      bms_fsm_state = BMS_FSM_IDLE;
+    }
+    return;
+  }
+
+  switch (bms_fsm_state) {
+  case BMS_FSM_IDLE: {
+    if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS) {
+      last_bms_start = now;
+      bms_send_query(current_addr_index);
+      bms_fsm_query_ms = now;
+      bms_fsm_last_byte_ms = now;
+      bms_fsm_state = BMS_FSM_WAIT_RESP;
+    }
+    break;
+  }
+
+  case BMS_FSM_WAIT_RESP: {
+    while (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
+      uint8_t byte = (uint8_t)usart_data_receive(USART0);
+      pcs_mirror_push(byte);
       if (uart_rx_index < sizeof(uart_rx_buffer)) {
         uart_rx_buffer[uart_rx_index++] = byte;
       } else {
         uart_rx_index = 0; // overflow
       }
-      if (uart_rx_index >= BMS_RESPONSE_LEN)
-        break; // кадр повний
-      wait_start = millis();
+      bms_fsm_last_byte_ms = now;
     }
+
+    // Complete expected response (83 bytes = 0x4E data bytes + 5)
+    if (uart_rx_index >= BMS_RESPONSE_LEN) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      if (bms_parse_response(current_addr_index + 1)) {
+        last_bms_response_ms = now;
+        if (fast_poll_enabled && bg_probe_in_flight) {
+          fast_poll_mask |= (1 << current_addr_index);
+          pack_ever_seen_mask |= (1 << current_addr_index);
+        }
+      }
+      bms_advance_poll_address(now);
+      last_bms_finish = now;
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
+    }
+
+    // Partial response followed by inter-byte gap (e.g. 61 B Deye inverter window)
+    if (uart_rx_index >= 5 && (now - bms_fsm_last_byte_ms) >= PCS_GAP_MS) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      if (bms_parse_response(current_addr_index + 1)) {
+        last_bms_response_ms = now;
+        if (fast_poll_enabled && bg_probe_in_flight) {
+          fast_poll_mask |= (1 << current_addr_index);
+          pack_ever_seen_mask |= (1 << current_addr_index);
+        }
+      }
+      bms_advance_poll_address(now);
+      last_bms_finish = now;
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
+    }
+
+    // BMS did not start answering within timeout (400 ms)
+    if (uart_rx_index == 0 && (now - bms_fsm_query_ms) >= BMS_TIMEOUT_MS) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      bms_advance_poll_address(now);
+      last_bms_finish = now;
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
+    }
+
+    // Hard cap from query start (700 ms)
+    if ((now - bms_fsm_query_ms) >= 700) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      bms_advance_poll_address(now);
+      last_bms_finish = now;
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
+    }
+    break;
   }
-  rs485_clear_errors();
-  gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN); // poll finished
-  return uart_rx_index;
+
+  default:
+    bms_fsm_state = BMS_FSM_IDLE;
+    break;
+  }
 }
 
 static bool bms_parse_response(uint8_t expected_addr) {
@@ -891,6 +979,18 @@ static bool bms_parse_response(uint8_t expected_addr) {
   bool dup = (sweep_seen_mask & (1 << (expected_addr - 1))) != 0;
   sweep_seen_mask |= (1 << (expected_addr - 1));
 
+  // Exclude pack from charge capability if active charge protection/faults latched:
+  // 0x0001 (Pack OV), 0x0002 (Cell OV), 0x0010 (Charge OC), 0x0100 (Charge OT),
+  // 0x0400 (Charge UT), 0x1000 (Low cap / Standby latch: charge MOSFET open), 0x2000 (Hardware/SC error).
+  // Also check per-pack cell max voltage >= 3600 mV or temp limits.
+  bool pack_charge_ok = true;
+  if (reg_protect & 0x3513)
+    pack_charge_ok = false;
+  if (pack_t_min < TEMP_CHARGE_MIN_C || pack_t_max > TEMP_CHARGE_MAX_C)
+    pack_charge_ok = false;
+  if (reg_error != 0 || (reg_status & 0x0004))
+    pack_charge_ok = false;
+
   // Feed the sums once per address per sweep: in bridge mode the inverter may
   // repeat an address and would bias the averages toward it. Cells/temps and
   // the |= latches above stay idempotent, so only the sums are gated.
@@ -899,6 +999,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
     agg_current_sum += raw_current / 100.0f;
     agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
     agg_count++;
+    if (pack_charge_ok)
+      agg_charge_capable_count++;
   }
 
   return true;
@@ -1057,6 +1159,7 @@ static bool balance_trend_high(void) {
 
 static void balance_update(uint8_t packs) {
   bool manual = (dip_applied_code & DIP_PROFILE_CODE_90) != 0;
+  bool forced = (dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0;
   uint32_t now = millis();
   bool have_cells = (agg_max_cell_mv != 0) && (agg_min_cell_mv != 0xFFFF) &&
                     (agg_max_cell_mv >= agg_min_cell_mv);
@@ -1066,19 +1169,56 @@ static void balance_update(uint8_t packs) {
   if (have_cells)
     balance_hist_push(spread, now);
 
+  // DIP4 Forced Balancing (PB15 / SW4):
+  // When DIP4 is ON, immediately engage forced balance session bypassing
+  // all auto timers, intervals, and cooldowns.
+  // Hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 1.0..2.0 A/pack,
+  // request full charge via CAN 0x35C bit 3.
+  if (forced && !bal_forced_prev) {
+    bal_forced_prev = true;
+    bal_session_active = true;
+    bal_session_start_ms = now;
+    bal_exit_streak = 0;
+    bal_outage_agg = 0;
+    bal_best_spread_mv = 0xFFFF;
+    bal_last_improve_ms = now;
+    bal_float_hold = true;
+    bal_trickle = true;
+  } else if (!forced && bal_forced_prev) {
+    bal_forced_prev = false;
+    balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
+  }
+
   // DIP1 transitions: switching the 51.8 V option ON aborts an active
-  // session; leaving the option returns to standard 54 V behind a cooldown
+  // auto session (unless forced by DIP4); leaving the option returns to standard 54 V behind a cooldown
   // so an auto session cannot re-trigger instantly.
-  if (manual && !bal_manual_prev) {
-    bal_session_active = false;
-    bal_manual_prev = true;
-  } else if (!manual && bal_manual_prev) {
-    bal_session_active = false;
-    bal_manual_prev = false;
-    bal_cooldown_until_ms = now + BAL_COOLDOWN_TRY_MS;
+  if (!forced) {
+    if (manual && !bal_manual_prev) {
+      bal_session_active = false;
+      bal_manual_prev = true;
+    } else if (!manual && bal_manual_prev) {
+      bal_session_active = false;
+      bal_manual_prev = false;
+      bal_cooldown_until_ms = now + BAL_COOLDOWN_TRY_MS;
+    }
   }
 
   if (bal_session_active) {
+    if (forced) {
+      bal_float_hold = true;
+      bal_trickle = true;
+      calc_taper_start_mv = CELL_TAPER_START_MV;
+      calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
+      calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+      if (spread <= BAL_SPREAD_EXIT_MV) {
+        if (bal_exit_streak < 255)
+          bal_exit_streak++;
+      } else {
+        bal_exit_streak = 0;
+      }
+      return;
+    }
+
     // Sustained discharge (~60 s) = grid outage or heavy load -> abort.
     if (bms_current > BAL_OUTAGE_I_MIN_A) {
       if (bal_outage_agg < 255)
@@ -1202,11 +1342,22 @@ static void balance_update(uint8_t packs) {
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 }
 
-// LED1 (PC13): solid = 51.8 V option (DIP1 ON), slow blink = auto session,
-// off = standard 54 V without session. Called from the main loop.
+// LED1 (PC13): solid = 51.8 V option (DIP1 ON), slow blink = balance session
+// (auto or DIP4 forced), off = standard 54 V without session. Called from the main loop.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
+  if (dip_applied_code & DIP_FORCED_BALANCE_MASK) {
+    if ((now - last_toggle) >= 500) {
+      last_toggle = now;
+      on = !on;
+      if (on)
+        gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+      else
+        gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+    }
+    return;
+  }
   if (dip_applied_code & DIP_PROFILE_CODE_90) {
     gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
     on = true;
@@ -1234,6 +1385,7 @@ static void agg_reset(void) {
   agg_temp_max = -1000.0f;
   agg_temp_min = 1000.0f;
   agg_count = 0;
+  agg_charge_capable_count = 0;
   agg_max_cell_mv = 0;
   agg_min_cell_mv = 0xFFFF;
 }
@@ -1301,7 +1453,16 @@ static void bms_aggregate_data(void) {
   } else {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
-  charge_current_limit = calculate_charge_limit(effective_packs);
+
+  // Passive Dynamic CCL: count only packs whose charge path is open and capable.
+  // If 1 of 2 packs has charge MOSFET off/standby, CCL scales to 1 pack (40A/50A)
+  // so the remaining pack is never overloaded with double current (1C).
+  // Fail-closed: if 0 packs capable, charge_current_limit = 0.
+  uint8_t charge_packs = agg_charge_capable_count;
+  if (charge_packs > effective_packs)
+    charge_packs = effective_packs;
+
+  charge_current_limit = calculate_charge_limit(charge_packs);
   discharge_current_limit = calculate_discharge_limit(effective_packs);
 
   // Set data valid now that fresh aggregated values are computed
@@ -1642,7 +1803,7 @@ int main(void) {
   can_init_500k();
   watchdog_init();
 
-  uint32_t last_bms_start = 0, last_bms_finish = 0, last_can = 0, last_dip_poll = 0;
+  uint32_t last_can = 0, last_dip_poll = 0;
 
   while (1) {
     watchdog_feed();
@@ -1654,23 +1815,9 @@ int main(void) {
       pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
       balance_led_tick(now);
     }
-    // Own BMS polls only in mirror mode — DIP2 ON is a pure bridge (no own
-    // commands on the battery line at all).
-    // Polling cadence: 400 ms per query (matches Deye inverter) with min 20 ms bus silence.
-    if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS && !pcs_bridge_mode) {
-      last_bms_start = now;
-      bms_send_query(current_addr_index);
-      bms_receive_response();
-      if (bms_parse_response(current_addr_index + 1)) {
-        last_bms_response_ms = millis();
-        if (fast_poll_enabled && bg_probe_in_flight) {
-          fast_poll_mask |= (1 << current_addr_index);
-          pack_ever_seen_mask |= (1 << current_addr_index);
-        }
-      }
-      bms_advance_poll_address(millis());
-      last_bms_finish = millis();
-    }
+
+    // Non-blocking RS-485 BMS polling step (mirror mode only; DIP2 bridge mode handles own)
+    bms_poll_step(now);
 
     // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
     // same traffic (parse happens inside the step; aggregates close per sweep).
