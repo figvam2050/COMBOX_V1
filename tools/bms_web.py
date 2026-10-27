@@ -1028,9 +1028,9 @@ canvas{width:100%;height:auto;display:block}
       <div class="subtext" id="b_p">— кВт</div>
     </div>
     <div class="bank-card">
-      <div class="l">Калькулятор автономності</div>
-      <div class="v" id="b_energy" style="color:var(--ok)">— кВт·год</div>
-      <div class="subtext" id="b_eta">Прогноз: —</div>
+      <div class="l">Середній SOC банку</div>
+      <div class="v" id="b_soc">—</div>
+      <div class="subtext" id="b_cap">Залишок: — А·ч</div>
     </div>
     <div class="bank-card">
       <div class="l">Розбаланс у всьому банку</div>
@@ -1041,29 +1041,6 @@ canvas{width:100%;height:auto;display:block}
       <div class="l">Статус системи</div>
       <div class="v" id="b_status" style="font-size:18px">—</div>
       <div class="subtext" id="b_alarm_status">Тривоги: —</div>
-    </div>
-  </div>
-
-  <!-- DIAGNOSTICS & WEAK CELL BANNER -->
-  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--acc)">
-    <h2>🔬 Діагностика здоров'я та балансу банку</h2>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
-      <div>
-        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Слабка / Відстаюча комірка</div>
-        <div id="diag_weak" style="font-size:14px;font-weight:600;margin-top:4px">—</div>
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Внутрішній опір (R_int)</div>
-        <div id="diag_rint" style="font-size:14px;font-weight:600;margin-top:4px;color:var(--acc)">—</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- LIVE ROLLING CANVAS CHART -->
-  <div class="card" style="margin-bottom:16px">
-    <h2>📈 Графік напруги, струму та розбалансу в реальному часі</h2>
-    <div class="chart-box">
-      <canvas id="historyChart" width="840" height="200"></canvas>
     </div>
   </div>
 
@@ -1089,6 +1066,67 @@ canvas{width:100%;height:auto;display:block}
         </thead>
         <tbody id="summary_rows">
           <tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">Очікування сканування шини...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- VIEW 2: CHARTS & DEEP DIAGNOSTICS TAB -->
+<div id="view_charts" style="display:none">
+  <!-- AUTONOMY BANNER -->
+  <div class="bank-grid" style="margin-bottom:16px">
+    <div class="bank-card" style="border-left:4px solid var(--ok)">
+      <div class="l">Запас енергії в банку</div>
+      <div class="v" id="c_energy" style="color:var(--ok)">— кВт·год</div>
+      <div class="subtext">Розраховано з урахуванням поточної ємності</div>
+    </div>
+    <div class="bank-card" style="border-left:4px solid var(--acc)">
+      <div class="l">Прогноз часу (ETA)</div>
+      <div class="v" id="c_eta" style="font-size:20px;color:var(--fg)">—</div>
+      <div class="subtext" id="c_state">Режим: —</div>
+    </div>
+  </div>
+
+  <!-- LIVE ROLLING CANVAS CHART -->
+  <div class="card" style="margin-bottom:16px">
+    <h2>📈 Графік напруги, струму та розбалансу в реальному часі (останні 5-10 хв)</h2>
+    <div class="chart-box">
+      <canvas id="historyChart" width="840" height="220"></canvas>
+    </div>
+  </div>
+
+  <!-- DIAGNOSTICS & WEAK CELL BANNER -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--acc)">
+    <h2>🔬 Діагностика здоров'я та аналітика комірок</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
+      <div>
+        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Слабка / Відстаюча комірка</div>
+        <div id="diag_weak" style="font-size:14px;font-weight:600;margin-top:4px">—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Внутрішній опір (R_int)</div>
+        <div id="diag_rint" style="font-size:14px;font-weight:600;margin-top:4px;color:var(--acc)">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DIAGNOSTIC RESISTANCE & BALANCING TABLE -->
+  <div class="card" style="margin-bottom:16px">
+    <h2>Зведена аналітика опору та часу балансування по кожному АКБ</h2>
+    <div style="overflow-x:auto">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>АКБ</th>
+            <th>Сер. опір (мОм)</th>
+            <th>Макс. опір (мОм)</th>
+            <th>Статус балансування</th>
+            <th>Сумарний час балансування</th>
+          </tr>
+        </thead>
+        <tbody id="diag_rows">
+          <tr><td colspan="5" style="text-align:center;color:var(--dim);padding:14px">Очікування даних...</td></tr>
         </tbody>
       </table>
     </div>
@@ -1222,7 +1260,10 @@ function renderTabs() {
   const addrs = Object.keys(packs).sort();
 
   let html = `<button class="tab-btn ${currentTab==='summary'?'active':''}" onclick="selectTab('summary')">
-    📊 Загальний огляд банку <span class="tab-badge">${latestData.summary.online_packs} АКБ</span>
+    📊 Загальний огляд <span class="tab-badge">${latestData.summary.online_packs} АКБ</span>
+  </button>
+  <button class="tab-btn ${currentTab==='charts'?'active':''}" onclick="selectTab('charts')">
+    📈 Графіки та Діагностика
   </button>`;
 
   addrs.forEach(addr => {
@@ -1255,12 +1296,14 @@ function renderTabs() {
 
 function renderView() {
   if (!latestData) return;
-  const isSummary = (currentTab === 'summary');
-  document.getElementById('view_summary').style.display = isSummary ? 'block' : 'none';
-  document.getElementById('view_pack').style.display = isSummary ? 'none' : 'block';
+  document.getElementById('view_summary').style.display = (currentTab === 'summary') ? 'block' : 'none';
+  document.getElementById('view_charts').style.display = (currentTab === 'charts') ? 'block' : 'none';
+  document.getElementById('view_pack').style.display = (currentTab !== 'summary' && currentTab !== 'charts') ? 'block' : 'none';
 
-  if (isSummary) {
+  if (currentTab === 'summary') {
     renderSummary();
+  } else if (currentTab === 'charts') {
+    renderChartsView();
     drawHistoryChart();
   } else {
     renderPackDetail(currentTab);
@@ -1271,8 +1314,6 @@ function renderView() {
 function renderSummary() {
   const sum = latestData.summary;
   const packs = latestData.packs || {};
-  const aut = sum.autonomy || {};
-  const diag = latestData.diagnostics || {};
 
   document.getElementById('b_v').textContent = sum.avg_voltage ? (sum.avg_voltage.toFixed(2) + ' В') : '—';
   
@@ -1280,8 +1321,8 @@ function renderSummary() {
   document.getElementById('b_i').textContent = (sum.total_current != null ? (currSign + sum.total_current.toFixed(1) + ' А') : '—');
   document.getElementById('b_p').textContent = (sum.total_power_kw != null ? (currSign + sum.total_power_kw.toFixed(2) + ' кВт') : '—');
   
-  document.getElementById('b_energy').textContent = aut.energy_kwh ? (aut.energy_kwh.toFixed(2) + ' кВт·год (' + sum.avg_soc + '%)') : '—';
-  document.getElementById('b_eta').textContent = aut.eta_str || '—';
+  document.getElementById('b_soc').textContent = sum.avg_soc ? (sum.avg_soc + ' %') : '—';
+  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—');
 
   document.getElementById('b_diff').textContent = (sum.cell_delta_mv != null ? ('Δ = ' + sum.cell_delta_mv + ' мВ') : '—');
   if (sum.min_cell_mv && sum.max_cell_mv) {
@@ -1297,9 +1338,51 @@ function renderSummary() {
   const alEl = document.getElementById('b_alarm_status');
   alEl.textContent = sum.alarm_count > 0 ? `⚠️ Активних тривог: ${sum.alarm_count}` : 'Усі захисти та попередження в нормі';
   alEl.style.color = sum.alarm_count > 0 ? 'var(--bad)' : 'var(--dim)';
+}
+
+function renderChartsView() {
+  const sum = latestData.summary || {};
+  const aut = sum.autonomy || {};
+  const diag = latestData.diagnostics || {};
+  const packs = latestData.packs || {};
+
+  document.getElementById('c_energy').textContent = aut.energy_kwh != null ? (aut.energy_kwh.toFixed(2) + ' кВт·год (' + sum.avg_soc + '%)') : '—';
+  document.getElementById('c_eta').textContent = aut.eta_str || '—';
+  const cSign = sum.total_current >= 0 ? '+' : '';
+  const pSign = sum.total_power_kw >= 0 ? '+' : '';
+  document.getElementById('c_state').textContent = 'Режим: ' + (aut.state_label || '—') + (sum.total_current != null ? (' (' + cSign + sum.total_current.toFixed(1) + ' А / ' + pSign + sum.total_power_kw.toFixed(2) + ' кВт)') : '');
 
   document.getElementById('diag_weak').textContent = diag.weak_cell || '—';
   document.getElementById('diag_rint').textContent = diag.rint_summary || '—';
+
+  const tbody = document.getElementById('diag_rows');
+  if (!tbody) return;
+  const addrs = Object.keys(packs).sort();
+  if (addrs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--dim);padding:14px">Немає підключених АКБ</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = addrs.map(addr => {
+    const p = packs[addr];
+    const rints = p.rint || [];
+    const balSecs = p.bal_seconds || [];
+    const onR = rints.filter(r => r > 0.05);
+    const avgR = onR.length ? (onR.reduce((a, b) => a + b, 0) / onR.length).toFixed(2) + ' мОм' : '—';
+    const maxR = onR.length ? Math.max(...onR).toFixed(2) + ' мОм' : '—';
+    const totalBalS = balSecs.reduce((a, b) => a + b, 0);
+    const balStr = totalBalS > 0 ? (totalBalS > 60 ? Math.floor(totalBalS / 60) + ' хв ' + (totalBalS % 60) + ' с' : totalBalS + ' с') : '0 с';
+    const isBalNow = p.parsed && p.parsed.balance_bits && p.parsed.balance_bits.some(b => b.on);
+
+    return `<tr>
+      <td><b>${addr}</b></td>
+      <td style="color:var(--acc)">${avgR}</td>
+      <td style="color:var(--acc)">${maxR}</td>
+      <td>${isBalNow ? '<span class="b-tag">АКТИВНЕ ЗАРАЗ</span>' : '<span style="color:var(--dim)">Неактивне</span>'}</td>
+      <td>${balStr}</td>
+    </tr>`;
+  }).join('');
+}
 
   // Summary Table
   const tbody = document.getElementById('summary_rows');
