@@ -25,6 +25,8 @@
 #define BMS_POLL_PERIOD_MS 400     // 400 ms per query: matches Deye inverter polling cadence
 #define BMS_POLL_GAP_MS 20         // 20 ms minimum bus quiet gap between RS485 transactions
 #define BMS_DEFAULT_TIMEOUT_MS 8000 // 8 s fail-closed: covers full 16-addr sweep (16 * 400 ms = 6.4 s)
+#define BMS_SEARCH_TIMEOUT_MS 80      // 80 ms: if line is silent for 80 ms during boot search, address is empty
+#define BMS_SEARCH_RESPONSE_LEN 51    // 1 + 1 + 1 + 46 (model, FW, SN) + 2 CRC = 51 B
 
 const uint8_t BMS_QUERY_TABLE[16][8] = {
     {0x01, 0x03, 0x00, 0x00, 0x00, 0x27, 0x05, 0xD0},
@@ -44,7 +46,27 @@ const uint8_t BMS_QUERY_TABLE[16][8] = {
     {0x0F, 0x03, 0x00, 0x00, 0x00, 0x27, 0x04, 0xFE},
     {0x10, 0x03, 0x00, 0x00, 0x00, 0x27, 0x06, 0x91}};
 
-static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
+// Modbus Function 0x03, Start 0x0069, Quantity 0x0017 (23 regs) for boot Plug & Play autosearch
+const uint8_t BMS_SEARCH_QUERY_TABLE[16][8] = {
+    {0x01, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0xD8}, // 0x01
+    {0x02, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0xEB}, // 0x02
+    {0x03, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0x3A}, // 0x03
+    {0x04, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0x8D}, // 0x04
+    {0x05, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0x5C}, // 0x05
+    {0x06, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0x6F}, // 0x06
+    {0x07, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0xBE}, // 0x07
+    {0x08, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0x41}, // 0x08
+    {0x09, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0x90}, // 0x09
+    {0x0A, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0xA3}, // 0x0A
+    {0x0B, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0x72}, // 0x0B
+    {0x0C, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0xC5}, // 0x0C
+    {0x0D, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0x14}, // 0x0D
+    {0x0E, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD5, 0x27}, // 0x0E
+    {0x0F, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD4, 0xF6}, // 0x0F
+    {0x10, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD6, 0x99}  // 0x10
+};
+
+static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
   uint16_t crc = 0xFFFF;
   for (uint16_t i = 0; i < len; i++) {
     crc ^= data[i];
@@ -99,9 +121,10 @@ static uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
 // DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
 // OFF = 40 A, ON = 50 A. Orthogonal to the SW1 voltage profile.
 #define DIP_CHARGE_CURRENT_50A 0x10
-// DIP3 (SW3, weight 4, PB14): fast polling mode (active packs only)
-// OFF = full scan across all 16 addresses, ON = fast polling latched active packs.
-#define DIP_FAST_POLL_MASK 0x04
+// DIP3 (SW3, weight 4, PB14):
+// OFF = Smart Plug & Play autosearch (default, fast polling active packs, 800 ms cycle for 2 packs);
+// ON = Forced full 16-address scan (6.4 s legacy/diagnostic mode).
+#define DIP_FORCE_FULL_SCAN_MASK 0x04
 // DIP4 (SW4, weight 8, PB15): forced balancing mode (27.10.2026)
 // OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 51.6V,
 // 1.0-2.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
@@ -379,7 +402,7 @@ static uint8_t bal_hist_n = 0;
 static uint32_t bal_last_hist_ms = 0;
 
 // Fast polling state (DIP3 / SW3)
-static bool fast_poll_enabled = false;
+static bool fast_poll_enabled = true; // default: Smart Plug & Play active (DIP3 OFF)
 static uint16_t fast_poll_mask = 0;
 static uint32_t last_bg_probe_ms = 0;
 static uint8_t bg_probe_candidate = 0;
@@ -388,14 +411,19 @@ static uint8_t current_addr_index = 0;
 
 // Non-blocking RS-485 BMS polling FSM state
 enum {
-  BMS_FSM_IDLE = 0,
+  BMS_FSM_BOOT_SEARCH_SEND = 0,
+  BMS_FSM_BOOT_SEARCH_WAIT,
+  BMS_FSM_IDLE,
   BMS_FSM_WAIT_RESP
 };
-static uint8_t bms_fsm_state = BMS_FSM_IDLE;
+static uint8_t bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
 static uint32_t bms_fsm_query_ms = 0;
 static uint32_t bms_fsm_last_byte_ms = 0;
 static uint32_t last_bms_start = 0;
 static uint32_t last_bms_finish = 0;
+static uint8_t search_addr_index = 0;
+static uint16_t search_found_mask = 0;
+static uint32_t last_search_retry_ms = 0;
 
 static uint8_t dip_applied_code = 0xFF;
 static uint8_t dip_last_code = 0;
@@ -748,6 +776,16 @@ static void bms_send_query(uint8_t addr_index) {
   }
 }
 
+static void bms_send_search_query(uint8_t addr_index) {
+  rs485_flush_rx();
+  uart_rx_index = 0;
+  gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN); // poll in flight
+  for (uint8_t i = 0; i < 8; i++) {
+    rs485_send_byte(BMS_SEARCH_QUERY_TABLE[addr_index][i]);
+    pcs_mirror_push(BMS_SEARCH_QUERY_TABLE[addr_index][i]); // no-op in bridge mode
+  }
+}
+
 // Non-blocking RS-485 BMS polling FSM step (mirror mode only; DIP2 bridge mode handles own)
 static void bms_poll_step(uint32_t now) {
   if (pcs_bridge_mode) {
@@ -759,6 +797,104 @@ static void bms_poll_step(uint32_t now) {
   }
 
   switch (bms_fsm_state) {
+  case BMS_FSM_BOOT_SEARCH_SEND: {
+    // If DIP3 is ON (force full scan), skip fast boot discovery
+    if (!fast_poll_enabled) {
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
+    }
+    if (search_addr_index >= 16) {
+      if (search_found_mask != 0) {
+        pack_ever_seen_mask |= search_found_mask;
+        fast_poll_mask = search_found_mask;
+        for (uint8_t i = 0; i < 16; i++) {
+          if (fast_poll_mask & (1 << i)) {
+            current_addr_index = i;
+            break;
+          }
+        }
+        last_bms_finish = now;
+        bms_fsm_state = BMS_FSM_IDLE;
+        break;
+      } else {
+        // No packs answered yet (e.g. battery still turned off). Retry search after 2 s backoff.
+        if (now - last_search_retry_ms >= 2000) {
+          last_search_retry_ms = now;
+          search_addr_index = 0;
+        }
+        break;
+      }
+    }
+    bms_send_search_query(search_addr_index);
+    bms_fsm_query_ms = now;
+    bms_fsm_last_byte_ms = now;
+    bms_fsm_state = BMS_FSM_BOOT_SEARCH_WAIT;
+    break;
+  }
+
+  case BMS_FSM_BOOT_SEARCH_WAIT: {
+    while (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
+      uint8_t byte = (uint8_t)usart_data_receive(USART0);
+      pcs_mirror_push(byte);
+      if (uart_rx_index < sizeof(uart_rx_buffer)) {
+        uart_rx_buffer[uart_rx_index++] = byte;
+      } else {
+        uart_rx_index = 0;
+      }
+      bms_fsm_last_byte_ms = now;
+    }
+
+    // Full 51-byte Search Device response (addr + 0x03 + 0x2E + 46 data + 2 CRC)
+    if (uart_rx_index >= BMS_SEARCH_RESPONSE_LEN) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      if (uart_rx_buffer[0] == (search_addr_index + 1) &&
+          uart_rx_buffer[1] == 0x03 &&
+          uart_rx_buffer[2] == 0x2E &&
+          modbus_crc16(uart_rx_buffer, BMS_SEARCH_RESPONSE_LEN) == 0) {
+        search_found_mask |= (1 << search_addr_index);
+      }
+      search_addr_index++;
+      bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
+      break;
+    }
+
+    // Partial response with inter-byte silence (>= 20 ms)
+    if (uart_rx_index >= 5 && (now - bms_fsm_last_byte_ms) >= PCS_GAP_MS) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      uint16_t exp_len = (uint16_t)(5 + uart_rx_buffer[2]);
+      if (uart_rx_buffer[0] == (search_addr_index + 1) &&
+          uart_rx_buffer[1] == 0x03 &&
+          uart_rx_index >= exp_len &&
+          modbus_crc16(uart_rx_buffer, exp_len) == 0) {
+        search_found_mask |= (1 << search_addr_index);
+      }
+      search_addr_index++;
+      bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
+      break;
+    }
+
+    // Silent empty address: no byte received within 80 ms -> fast skip!
+    if (uart_rx_index == 0 && (now - bms_fsm_query_ms) >= BMS_SEARCH_TIMEOUT_MS) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      search_addr_index++;
+      bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
+      break;
+    }
+
+    // Safety timeout for search (150 ms)
+    if ((now - bms_fsm_query_ms) >= 150) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      search_addr_index++;
+      bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
+      break;
+    }
+    break;
+  }
+
   case BMS_FSM_IDLE: {
     if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS) {
       last_bms_start = now;
@@ -1642,7 +1778,10 @@ static void watchdog_init(void) {
 static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
 static void fast_poll_mode_apply(uint8_t code) {
-  bool enabled = (code & DIP_FAST_POLL_MASK) != 0;
+  // Option 1: DIP3 ON (lever UP) = Forced full 16-address scan (legacy/service override)
+  // DIP3 OFF (lever DOWN, default) = Smart Plug & Play fast polling of discovered packs
+  bool force_full_scan = (code & DIP_FORCE_FULL_SCAN_MASK) != 0;
+  bool enabled = !force_full_scan;
   if (enabled == fast_poll_enabled)
     return;
   fast_poll_enabled = enabled;
@@ -1650,6 +1789,8 @@ static void fast_poll_mode_apply(uint8_t code) {
     uint16_t mask = pack_ever_seen_mask;
     if (mask == 0)
       mask = sweep_seen_mask;
+    if (mask == 0)
+      mask = search_found_mask;
     fast_poll_mask = mask;
     last_bg_probe_ms = millis();
     bg_probe_candidate = 0;
@@ -1765,7 +1906,7 @@ static void dip_charge_profile_apply(uint8_t code) {
   charge_voltage_limit = profile_charge_voltage_limit;
   dip_applied_code = code;
   pcs_mode_apply(code);       // DIP2: mirror (OFF) vs inverter bridge (ON)
-  fast_poll_mode_apply(code); // DIP3: full scan (OFF) vs fast polling (ON)
+  fast_poll_mode_apply(code); // DIP3: Plug & Play fast poll (OFF) vs force full scan (ON)
 }
 
 static void dip_charge_profile_init(void) {
