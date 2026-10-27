@@ -255,3 +255,4 @@ $$\text{SOC}_{new} = \frac{7 \cdot \text{SOC}_{ema} + \text{SOC}_{raw}}{8} \quad
 * Правила монтажу, виготовлення кабелів та налаштування інвертора: [`USER_MANUAL.md`](USER_MANUAL.md).
 * Головний опис кодової бази та налаштувань перемикачів: [`README.md`](README.md).
 * Реєстр відкритих інженерних питань та пропозицій розширення безпеки: [`UNRESOLVED_PROPOSALS.md`](UNRESOLVED_PROPOSALS.md).
+* Розширений протокол Modbus RTU, карта регістрів 0..135 та команди BMS_TOOLS: [`VISION_BMS_EXTENDED_PROTOCOL.md`](VISION_BMS_EXTENDED_PROTOCOL.md).

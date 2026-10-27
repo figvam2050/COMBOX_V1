@@ -47,7 +47,8 @@
 - **§8 і §9** — що вже перевірено, що лишилося невідомим;
 - [`SAFETY_AND_ALARMS.md`](SAFETY_AND_ALARMS.md) — повний опис аварійних сигналів, бітів та реакцій коробки;
 - [`IMPROVEMENTS_TODO.md`](IMPROVEMENTS_TODO.md) — план робіт і чек-лист польових тестів;
-- [`UNRESOLVED_PROPOSALS.md`](UNRESOLVED_PROPOSALS.md) — реєстр невирішених питань та пропозицій щодо покращення прошивки.
+- [`UNRESOLVED_PROPOSALS.md`](UNRESOLVED_PROPOSALS.md) — реєстр невирішених питань та пропозицій щодо покращення прошивки;
+- [`VISION_BMS_EXTENDED_PROTOCOL.md`](VISION_BMS_EXTENDED_PROTOCOL.md) — аналіз розширеного протоколу Modbus RTU, карти регістрів 0..135 та команд BMS_TOOLS.
 
 ---
 
