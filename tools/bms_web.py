@@ -1030,6 +1030,18 @@ canvas{width:100%;height:auto;display:block}
 .report-paper .rep-cells-table th:first-child, .report-paper .rep-cells-table td:first-child{width:46px;font-weight:700}
 .report-paper .rep-cells-table th:last-child, .report-paper .rep-cells-table td:last-child{width:56px;font-weight:700}
 
+/* Modals (Inverter, Alarm Help) */
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999;overflow-y:auto;padding:24px}
+.modal-box{background:#161b22;border:1px solid var(--border);color:var(--fg);max-width:800px;margin:30px auto;border-radius:12px;padding:24px 28px;box-shadow:0 12px 40px rgba(0,0,0,0.7)}
+.modal-close-btn{background:#30363d;color:#fff;border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600}
+.modal-close-btn:hover{background:#3c444d}
+.btn-inverter{background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer}
+.btn-inverter:hover{background:#388bfd}
+
+/* Offline Log Viewer styles */
+.drop-zone{border:2px dashed var(--border);border-radius:10px;padding:36px;text-align:center;cursor:pointer;background:#0d1117;transition:all 0.2s}
+.drop-zone:hover, .drop-zone.dragover{border-color:var(--acc);background:#161b22}
+
 @media print{
   @page{size:A4 portrait;margin:8mm 8mm 8mm 8mm}
   html, body{background:#fff !important;color:#000 !important;height:auto !important;min-height:0 !important;margin:0 !important;padding:0 !important}
@@ -1053,6 +1065,7 @@ canvas{width:100%;height:auto;display:block}
   <div class="controls">
     <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
+    <button class="btn-inverter" onclick="openInverterModal()">⚙️ Уставки інвертора</button>
     <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
   </div>
 </header>
@@ -1262,6 +1275,64 @@ canvas{width:100%;height:auto;display:block}
   </div>
 </div>
 
+<!-- VIEW 4: OFFLINE CSV LOG VIEWER -->
+<div id="view_logviewer" style="display:none">
+  <div class="card">
+    <h2>📂 Офлайн-аналізатор записаних CSV-логів</h2>
+    <div style="color:var(--dim);font-size:13px;margin-bottom:14px">
+      Завантажте збережений файл <code>bms_monitor_*.csv</code> для детального аналізу внутрішнього опору R_int, динаміки напруг та балансування.
+    </div>
+
+    <div id="drop_zone" class="drop-zone" onclick="document.getElementById('csv_file_input').click()">
+      <div style="font-size:32px;margin-bottom:8px">📥</div>
+      <div style="font-size:15px;font-weight:600;margin-bottom:4px">Перетягніть сюди файл .csv або натисніть для вибору</div>
+      <div style="font-size:12px;color:var(--dim)">Працює повністю у браузері, конфіденційно, без відправки на сервер</div>
+      <input type="file" id="csv_file_input" accept=".csv" style="display:none" onchange="handleCsvFile(this.files[0])">
+    </div>
+
+    <div id="log_results" style="display:none;margin-top:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+        <h3 id="log_file_title" style="margin:0;font-size:16px;color:var(--acc)"></h3>
+        <button onclick="resetLogViewer()" style="background:#30363d;color:#fff;border:1px solid var(--border);padding:4px 12px;border-radius:6px;cursor:pointer">✕ Закрити аналіз</button>
+      </div>
+
+      <!-- Stats Grid -->
+      <div class="bank-grid" id="log_stats_grid" style="margin-bottom:16px"></div>
+
+      <!-- Log Chart -->
+      <div class="chart-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <b>📈 Графік напруги та струму за весь сеанс</b>
+          <div style="font-size:12px;color:var(--dim)">Напруга банку (зелена) та струм (блакитна)</div>
+        </div>
+        <canvas id="logChart" width="900" height="260"></canvas>
+      </div>
+
+      <!-- Cell Analysis Table -->
+      <div class="card" style="background:#161b22;padding:0;overflow-x:auto">
+        <div style="padding:14px 16px;border-bottom:1px solid var(--border);font-weight:700">
+          🔋 Аналіз стану кожної комірки (15S) за весь період логу
+        </div>
+        <table class="tbl" id="log_cells_table">
+          <thead>
+            <tr>
+              <th>АКБ</th>
+              <th>Комірка</th>
+              <th>Min (мВ)</th>
+              <th>Max (мВ)</th>
+              <th>Δ розмах (мВ)</th>
+              <th>Опір R_int (мОм)</th>
+              <th>Балансувань (BAL)</th>
+              <th>Оцінка здоров'я</th>
+            </tr>
+          </thead>
+          <tbody id="log_cells_tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- COMMON: CSV LOGGING CARD -->
 <div class="card" style="margin-top:16px">
   <h2>Запис CSV-лога</h2>
@@ -1276,6 +1347,16 @@ canvas{width:100%;height:auto;display:block}
   • <b>⚡ Активний (Master):</b> скрипт опитує знайдені АКБ, розраховує автономність, внутрішній опір комірок та веде історію.<br>
   • <b>👂 Пасивний (Sniffer):</b> скрипт не передає жодного байту у шину RS485 (нуль колізій). Безпечно працює при живій системі.<br>
   <b>Безпека:</b> 100% Read-Only (жодного запису в конфігураційні регістри BMS).
+</div>
+
+<!-- INVERTER SETTINGS MODAL -->
+<div id="inverter_modal" class="modal-overlay">
+  <div class="modal-box" id="inverter_modal_content"></div>
+</div>
+
+<!-- ALARM & PROTECTION HELPER MODAL -->
+<div id="alarm_modal" class="modal-overlay">
+  <div class="modal-box" id="alarm_modal_content"></div>
 </div>
 
 <!-- DIAGNOSTIC REPORT MODAL -->
@@ -1293,10 +1374,251 @@ canvas{width:100%;height:auto;display:block}
 let currentTab = 'summary';
 let logOn = false;
 let latestData = null;
+let logAnalysisData = null;
+
+const ALARM_HELP_DB = {
+  // Statuses
+  "Charging": {
+    cat: "Status (0025)",
+    title: "Йде заряд (Charging)",
+    level: "ok",
+    levelName: "Штатний режим",
+    desc: "Акумулятор отримує енергію від інвертора або зарядного пристрою (струм > 0 А). Силовий зарядний ключ відкритий.",
+    action: "Штатний режим. Контролюйте напругу комірок наприкінці заряду."
+  },
+  "Discharging": {
+    cat: "Status (0025)",
+    title: "Йде розряд (Discharging)",
+    level: "ok",
+    levelName: "Штатний режим",
+    desc: "Акумулятор віддає енергію в навантаження (струм < 0 А). Силовий розрядний ключ відкритий.",
+    action: "Штатний режим. Забезпечте підзарядку при досягненні 10-15% SOC."
+  },
+  "Protect": {
+    cat: "Status (0025)",
+    title: "Спрацював захист BMS (Protect)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "BMS заблокувала силові ключі через вихід одного або кількох параметрів (напруга, струм або температура) за критичні межі.",
+    action: "Перевірте блоки Warning та Protection нижче. Усуньте першопричину (перенапругу або перевантаження по струму)."
+  },
+  "Charging Lmt": {
+    cat: "Status (0025)",
+    title: "Обмеження струму заряду (Charging Limit)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "BMS обмежує допустимий струм заряду для захисту комірок від перегріву або передчасного перезаряду.",
+    action: "Інвертор повинен автоматично знизити струм заряду згідно з обмеженнями BMS."
+  },
+  "Standby": {
+    cat: "Status (0025)",
+    title: "Режим очікування (Standby)",
+    level: "ok",
+    levelName: "Очікування",
+    desc: "Струм навантаження близький до 0 А. Батарея повністю заряджена або очікує підключення навантаження.",
+    action: "Штатний стан у буферному режимі. При появі струму розряду автоматично перейде в Discharging."
+  },
+
+  // Warnings (0026)
+  "Pack OV": {
+    cat: "Warning (0026)",
+    title: "Загальна перенапруга пака (Pack Over Voltage)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Загальна напруга 15S батареї перевищила заводський поріг попередження (> 54.0 В).",
+    action: "Знизьте напругу Bulk/Absorption на інверторі до рекомендованих 52.5 В (3.50 В / ком)."
+  },
+  "Cell OV": {
+    cat: "Warning (0026)",
+    title: "Перенапруга комірки (Cell Over Voltage Warning)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Напруга хоча б однієї комірки перевищила заводський поріг 3570 мВ. Найчастіше трапляється наприкінці швидкого заряду через розбаланс.",
+    action: "Знизьте напругу Bulk на інверторі до 52.5 В або увімкніть балансування (DIP 4 на COM-Box). Скидається автоматично, коли напруга опускається нижче 3550 мВ."
+  },
+  "Pack UV": {
+    cat: "Warning (0026)",
+    title: "Знижена напруга пака (Pack Under Voltage)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Загальна напруга впала нижче 43.5 В (глибокий розряд).",
+    action: "Негайно розпочніть заряджання акумулятора, щоб уникнути деградації хімії LiFePO4."
+  },
+  "Cell UV": {
+    cat: "Warning (0026)",
+    title: "Знижена напруга комірки (Cell Under Voltage)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Напруга найслабшої комірки впала нижче безпечного рівня (< 2850 мВ).",
+    action: "Зупиніть розряд та почніть заряд помірним струмом (0.2C)."
+  },
+  "Charge OC": {
+    cat: "Warning (0026)",
+    title: "Перевантаження по струму заряду (Charge Over Current)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Струм заряду перевищив налаштоване обмеження (зазвичай > 100 А на один пак).",
+    action: "Обмежте максимальний струм заряду на інверторі або розподіліть струм між паралельними батареями."
+  },
+  "Discharge OC": {
+    cat: "Warning (0026)",
+    title: "Перевантаження по струму розряду (Discharge Over Current)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Споживання навантаження перевищує номінальний струм віддачі акумулятора.",
+    action: "Знизьте потужність підключених споживачів."
+  },
+  "Temp anomaly": {
+    cat: "Warning (0026)",
+    title: "Аномальний градієнт температур (Temp Anomaly)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Різниця між датчиками температури всередині пака перевищила допустиму дельту (> 10°C).",
+    action: "Перевірте рівномірність вентиляції та відсутність локального нагріву контактів шин."
+  },
+  "MOS OT": {
+    cat: "Warning (0026)",
+    title: "Перегрів силових ключів (MOS Over Temperature)",
+    level: "bad",
+    levelName: "Аварія / Перегрів",
+    desc: "Температура силових MOSFET-ключів BMS перевищила 85°C під високим навантаженням.",
+    action: "Знизьте струм навантаження та забезпечте циркуляцію повітря навколо батарейного блоку."
+  },
+  "Charge OT": {
+    cat: "Warning (0026)",
+    title: "Перегрів при заряді (Charge Over Temperature)",
+    level: "bad",
+    levelName: "Аварія / Перегрів",
+    desc: "Температура комірок під час заряду перевищила 55°C.",
+    action: "Заряд припиняється автоматично до охолодження батареї до безпечної температури (< 45°C)."
+  },
+  "Discharge OT": {
+    cat: "Warning (0026)",
+    title: "Перегрів при розряді (Discharge Over Temperature)",
+    level: "bad",
+    levelName: "Аварія / Перегрів",
+    desc: "Температура комірок під час розряду перевищила 65°C.",
+    action: "Знизьте навантаження і дайте блоку охолонути."
+  },
+  "Charge UT": {
+    cat: "Warning (0026)",
+    title: "Заряд при низькій температурі (Charge Under Temp)",
+    level: "bad",
+    levelName: "Критична заборона",
+    desc: "Температура батареї нижче 0°C. Заряджати LiFePO4 при мінусовій температурі суворо заборонено через ризик випадіння металевого літію.",
+    action: "Увімкніть підігрів або прогрійте приміщення до плюсової температури (+10°C) перед початком заряду."
+  },
+  "Discharge UT": {
+    cat: "Warning (0026)",
+    title: "Розряд при низькій температурі (Discharge Under Temp)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Температура комірок нижче -20°C.",
+    action: "Експлуатація при сильному морозі знижує корисну ємність і збільшує внутрішній опір."
+  },
+  "Low capacity": {
+    cat: "Protection (0027) / Warning (0026)",
+    title: "Низька ємність / Standby Latch (Low capacity)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
+    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+  },
+  "Float stopped": {
+    cat: "Warning (0026)",
+    title: "Зупинка буферного режиму (Float Stopped)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Буферний режим підзарядки завершено або тимчасово призупинено за таймером BMS.",
+    action: "Штатний процес."
+  },
+
+  // Protections & Errors (0027 / 0028)
+  "Discharge SC": {
+    cat: "Protection (0027)",
+    title: "Коротке замикання на виході (Discharge Short Circuit)",
+    level: "bad",
+    levelName: "Аварія / КЗ",
+    desc: "BMS миттєво відсікла розрядний ключ через виявлення короткого замикання або надструму.",
+    action: "Вимкніть навантаження, перевірте кабелі підключення до інвертора на предмет КЗ. Скидання: вимкнути живлення або підключити зарядний пристрій."
+  },
+  "Reverse": {
+    cat: "Protection (0027)",
+    title: "Захист від переполюсовки (Reverse Polarity)",
+    level: "bad",
+    levelName: "Критична аварія",
+    desc: "Виявлено неправильну полярність підключення силових клем (+/-).",
+    action: "Негайно перевірте полярність підключення кабелів!"
+  },
+  "Voltage error": {
+    cat: "Error (0028)",
+    title: "Апаратна помилка вимірювання напруги (Voltage ADC Error)",
+    level: "bad",
+    levelName: "Апаратна несправність",
+    desc: "Контролер BMS не може зчитати покази одного з вимірювальних каналів напруги комірок.",
+    action: "Перевірте надійність шлейфа балансувальних проводів від комірок до роз'єму плати BMS."
+  },
+  "Temperature error": {
+    cat: "Error (0028)",
+    title: "Помилка датчика температури (NTC Error)",
+    level: "bad",
+    levelName: "Апаратна несправність",
+    desc: "Обрив або коротке замикання одного з температурних сенсорів (T1, T2, MOS).",
+    action: "Перевірте роз'єми датчиків NTC на платі BMS."
+  },
+  "Current sensor": {
+    cat: "Error (0028)",
+    title: "Помилка датчика струму (Current Sensor Error)",
+    level: "bad",
+    levelName: "Апаратна несправність",
+    desc: "Збій вимірювального шунта або підсилювача струму BMS.",
+    action: "Перевірте силові з'єднання біля струмового шунта на платі BMS."
+  },
+  "Cell unbalance": {
+    cat: "Error (0028)",
+    title: "Критичний розбаланс комірок (Severe Cell Unbalance)",
+    level: "bad",
+    levelName: "Критичний розбаланс",
+    desc: "Різниця між найвищою та найнижчою коміркою всередині батареї перевищила аварійний поріг (> 300 мВ).",
+    action: "Необхідно провести вирівнювання: увімкніть балансування в COM-Box (DIP 4) та встановіть невеликий струм буферного заряду."
+  }
+};
+
+function showAlarmHelp(name) {
+  const item = ALARM_HELP_DB[name];
+  if (!item) return;
+  const badgeCls = item.level === 'ok' ? 'ok' : (item.level === 'warn' ? 'warn' : 'bad');
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+      <div>
+        <span class="pill ${badgeCls}">${item.levelName}</span>
+        <span style="color:var(--dim);font-size:12px;margin-left:8px">${item.cat}</span>
+        <h2 style="margin:8px 0 0;font-size:18px">${item.title}</h2>
+      </div>
+      <button class="modal-close-btn" onclick="closeAlarmModal()">✕ Закрити</button>
+    </div>
+    <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px;font-size:13px;line-height:1.6">
+      <b style="color:var(--text)">Що це означає:</b><br>${item.desc}
+    </div>
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
+      <b style="color:var(--acc)">💡 Що робити / Як скинути:</b><br>${item.action}
+    </div>
+  `;
+  document.getElementById('alarm_modal_content').innerHTML = html;
+  document.getElementById('alarm_modal').style.display = 'block';
+}
+
+function closeAlarmModal() {
+  document.getElementById('alarm_modal').style.display = 'none';
+}
 
 function leds(el, arr, cls) {
   if (!el || !arr) return;
-  el.innerHTML = arr.map(b => `<div class="led ${b.on ? cls : ''}"><i></i>${b.name}</div>`).join('');
+  el.innerHTML = arr.map(b => {
+    const isClickable = !!ALARM_HELP_DB[b.name];
+    const clickAttr = isClickable ? `onclick="showAlarmHelp('${b.name}')" title="Клікніть для детального опису та інструкції" style="cursor:pointer"` : '';
+    return `<div class="led ${b.on ? cls : ''}" ${clickAttr}><i></i>${b.name}${isClickable ? ' <span style="opacity:0.5;font-size:9px">ℹ️</span>' : ''}</div>`;
+  }).join('');
 }
 
 function selectTab(tabId) {
@@ -1343,6 +1665,10 @@ function renderTabs() {
     </button>`;
   });
 
+  html += `<button class="tab-btn ${currentTab==='logviewer'?'active':''}" onclick="selectTab('logviewer')">
+    📂 Аналіз логу
+  </button>`;
+
   tb.innerHTML = html;
 }
 
@@ -1350,13 +1676,18 @@ function renderView() {
   if (!latestData) return;
   document.getElementById('view_summary').style.display = (currentTab === 'summary') ? 'block' : 'none';
   document.getElementById('view_charts').style.display = (currentTab === 'charts') ? 'block' : 'none';
-  document.getElementById('view_pack').style.display = (currentTab !== 'summary' && currentTab !== 'charts') ? 'block' : 'none';
+  document.getElementById('view_logviewer').style.display = (currentTab === 'logviewer') ? 'block' : 'none';
+  document.getElementById('view_pack').style.display = (currentTab !== 'summary' && currentTab !== 'charts' && currentTab !== 'logviewer') ? 'block' : 'none';
 
   if (currentTab === 'summary') {
     renderSummary();
   } else if (currentTab === 'charts') {
     renderChartsView();
     drawHistoryChart();
+  } else if (currentTab === 'logviewer') {
+    if (logAnalysisData) {
+      drawLogChart();
+    }
   } else {
     renderPackDetail(currentTab);
     drawCellBarChart(currentTab);
@@ -1813,6 +2144,448 @@ function closeReport() {
   document.getElementById('report_modal').style.display = 'none';
 }
 
+/* --- INVERTER SETTINGS MODAL --- */
+function openInverterModal() {
+  const d = latestData;
+  const packs = (d && d.packs) ? d.packs : {};
+  const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
+  const packCount = onlineAddrs.length || 3;
+  
+  let cellCount = 15;
+  for (const a of onlineAddrs) {
+    if (packs[a].parsed && packs[a].parsed.cell_num) {
+      cellCount = packs[a].parsed.cell_num;
+      break;
+    }
+  }
+
+  const vBulkSafe = (cellCount * 3.50).toFixed(2);
+  const vBulkMax = (cellCount * 3.55).toFixed(2);
+  const vFloat = (cellCount * 3.37).toFixed(2);
+  const vCutoff = (cellCount * 2.95).toFixed(2);
+  const vRestart = (cellCount * 3.30).toFixed(2);
+
+  const iOpt = packCount * 30;
+  const iMax = packCount * 50;
+  const iDis = packCount * 100;
+  const capAh = packCount * 100;
+  const kwh = (packCount * (cellCount * 3.2 * 100) / 1000).toFixed(1);
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+      <div>
+        <h2 style="margin:0;font-size:20px;color:var(--fg)">⚙️ Рекомендовані уставки для інвертора</h2>
+        <div style="color:var(--dim);font-size:12px;margin-top:4px">
+          Deye · Victron · Luxpower · Growatt · Voltronic для <b>${packCount} АКБ (${cellCount}S LiFePO4, ${capAh} А·ч / ~${kwh} кВт·год)</b>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeInverterModal()">✕ Закрити</button>
+    </div>
+
+    <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:12px;line-height:1.5">
+      💡 <b>Чому це важливо:</b> Більшість тривог <i>Warning 0x0002 (Cell OV)</i> виникають, коли на інверторі виставлено завищену напругу заряду (54.0 В або 54.8 В). Для 15S LiFePO4 безпечна та оптимальна напруга заряду становить <b>52.5 В</b> (3.50 В/ком), що забезпечує 98-99% заряду без перенапруги та розбалансу!
+    </div>
+
+    <table class="tbl" style="margin-bottom:16px">
+      <tr><th>Параметр інвертора</th><th>Значення</th><th>На комірку</th><th>Призначення та коментар</th></tr>
+      <tr>
+        <td><b>Bulk / Absorption (Заряд)</b></td>
+        <td><b style="color:var(--ok);font-size:15px">${vBulkSafe} В</b></td>
+        <td>3.50 В</td>
+        <td><b>Рекомендований оптимум.</b> Запобігає спрацьовуванню Cell OV 0x0002 та продовжує ресурс комірок.</td>
+      </tr>
+      <tr>
+        <td>Bulk (Макс. ємність 100%)</td>
+        <td><b>${vBulkMax} В</b></td>
+        <td>3.55 В</td>
+        <td>Повний заряд. Використовувати тільки якщо банк ідеально відбалансований (Δ &lt; 30 мВ).</td>
+      </tr>
+      <tr>
+        <td><b>Float (Буферний підзаряд)</b></td>
+        <td><b style="color:var(--acc);font-size:15px">${vFloat} В</b></td>
+        <td>3.37 В</td>
+        <td>Тривале перебування під 100% готовністю без нагріву та деградації комірок.</td>
+      </tr>
+      <tr>
+        <td><b>Cut-off (Відключення розряду)</b></td>
+        <td><b style="color:var(--bad);font-size:15px">${vCutoff} В</b></td>
+        <td>2.95 В</td>
+        <td>Захист найслабшої комірки від глибокого перерозряду (залишає ~5% безпечного буфера).</td>
+      </tr>
+      <tr>
+        <td><b>Re-start (Старт нового заряду)</b></td>
+        <td><b>${vRestart} В</b></td>
+        <td>3.30 В</td>
+        <td>Початок нового циклу заряду після переходу на роботу від мережі/сонця.</td>
+      </tr>
+      <tr>
+        <td><b>Рекомендований струм заряду</b></td>
+        <td><b style="color:var(--ok)">${iOpt} А</b> (0.3C)</td>
+        <td>—</td>
+        <td>Оптимальний струм для щоденної тривалої експлуатації (${packCount} × 30 А).</td>
+      </tr>
+      <tr>
+        <td><b>Максимальний струм заряду</b></td>
+        <td><b>${iMax} А</b> (0.5C)</td>
+        <td>—</td>
+        <td>Максимум для швидкого заряду від сонця або генератора (${packCount} × 50 А).</td>
+      </tr>
+      <tr>
+        <td><b>Максимальний струм розряду</b></td>
+        <td><b>${iDis} А</b> (1.0C)</td>
+        <td>—</td>
+        <td>Пікове навантаження всієї паралелі (${packCount} × 100 А).</td>
+      </tr>
+    </table>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px">
+      <button onclick="copyInverterSettings(${packCount}, ${cellCount}, '${vBulkSafe}', '${vFloat}', '${vCutoff}', ${iOpt}, ${iMax}, ${iDis})" style="background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600">
+        📋 Скопіювати у буфер
+      </button>
+      <button class="modal-close-btn" onclick="closeInverterModal()">Закрити</button>
+    </div>
+  `;
+  document.getElementById('inverter_modal_content').innerHTML = html;
+  document.getElementById('inverter_modal').style.display = 'block';
+}
+
+function closeInverterModal() {
+  document.getElementById('inverter_modal').style.display = 'none';
+}
+
+function copyInverterSettings(packs, cells, bulk, floatV, cutoff, iOpt, iMax, iDis) {
+  const text = `=== Уставки інвертора для Vision BMS (${packs}x АКБ, ${cells}S LiFePO4) ===\n` +
+    `Bulk / Absorption: ${bulk} V\n` +
+    `Float: ${floatV} V\n` +
+    `Low Battery Cut-off: ${cutoff} V\n` +
+    `Charge Current (Opt): ${iOpt} A (0.3C)\n` +
+    `Charge Current (Max): ${iMax} A (0.5C)\n` +
+    `Discharge Current (Max): ${iDis} A (1.0C)\n` +
+    `Battery Chemistry: LiFePO4 (User-defined / Lithium)`;
+  navigator.clipboard.writeText(text).then(() => {
+    alert('Параметри скопійовано в буфер обміну!');
+  }).catch(() => {
+    alert(text);
+  });
+}
+
+/* --- OFFLINE CSV LOG VIEWER --- */
+function initLogViewer() {
+  const dz = document.getElementById('drop_zone');
+  if (!dz) return;
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); };
+  dz.ondragleave = () => dz.classList.remove('dragover');
+  dz.ondrop = e => {
+    e.preventDefault();
+    dz.classList.remove('dragover');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) {
+      handleCsvFile(e.dataTransfer.files[0]);
+    }
+  };
+}
+
+function handleCsvFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    parseAndAnalyzeCSV(file.name, e.target.result);
+  };
+  reader.readAsText(file);
+}
+
+function resetLogViewer() {
+  document.getElementById('log_results').style.display = 'none';
+  document.getElementById('drop_zone').style.display = 'block';
+  document.getElementById('csv_file_input').value = '';
+  logAnalysisData = null;
+}
+
+function parseAndAnalyzeCSV(filename, text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) {
+    alert('Файл CSV порожній або містить замало рядків');
+    return;
+  }
+  const header = lines[0].split(',').map(s => s.trim());
+  const addrIdx = header.indexOf('addr');
+  const tsIdx = header.indexOf('ts');
+  const r00Idx = header.indexOf('r00');
+  const r01Idx = header.indexOf('r01');
+  const r38Idx = header.indexOf('r38');
+
+  if (addrIdx === -1 || r00Idx === -1) {
+    alert('Не знайдено обов’язкових колонок телеметрії (addr, r00) у файлі');
+    return;
+  }
+
+  const cellIndices = [];
+  for (let c = 2; c <= 16; c++) {
+    const idx = header.indexOf('r' + (c < 10 ? '0' + c : c));
+    if (idx !== -1) cellIndices.push(idx);
+  }
+
+  const rows = [];
+  const packMap = {};
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(',').map(s => s.trim());
+    if (parts.length < header.length) continue;
+
+    const ts = parts[tsIdx] || '';
+    const addr = parts[addrIdx] || '';
+    const v = parseInt(parts[r00Idx], 10) / 100.0;
+    const rawI = parseInt(parts[r01Idx], 10);
+    const curr = rawI > 32767 ? (rawI - 65536) / 100.0 : rawI / 100.0;
+    const balMask = r38Idx !== -1 ? parseInt(parts[r38Idx], 10) : 0;
+    const cells = cellIndices.map(idx => parseInt(parts[idx], 10));
+
+    const item = { ts, addr, v, curr, cells, balMask };
+    rows.push(item);
+
+    if (!packMap[addr]) packMap[addr] = [];
+    packMap[addr].push(item);
+  }
+
+  if (rows.length === 0) {
+    alert('Не знайдено валідних рядків даних у файлі');
+    return;
+  }
+
+  const addrs = Object.keys(packMap).sort();
+  const startTime = rows[0].ts;
+  const endTime = rows[rows.length - 1].ts;
+  const minV = Math.min(...rows.map(r => r.v));
+  const maxV = Math.max(...rows.map(r => r.v));
+  const maxCharge = Math.max(...rows.map(r => r.curr));
+  const maxDischarge = Math.min(...rows.map(r => r.curr));
+
+  const cellStats = [];
+
+  addrs.forEach(addr => {
+    const pRows = packMap[addr];
+    const nCells = pRows[0].cells.length;
+
+    const cellMins = new Array(nCells).fill(99999);
+    const cellMaxs = new Array(nCells).fill(0);
+    const balCounts = new Array(nCells).fill(0);
+    const rintSamples = Array.from({ length: nCells }, () => []);
+
+    for (let i = 0; i < pRows.length; i++) {
+      const r = pRows[i];
+      for (let c = 0; c < nCells; c++) {
+        const mv = r.cells[c];
+        if (mv > 1000 && mv < 5000) {
+          if (mv < cellMins[c]) cellMins[c] = mv;
+          if (mv > cellMaxs[c]) cellMaxs[c] = mv;
+        }
+        if (r.balMask & (1 << c)) {
+          balCounts[c]++;
+        }
+      }
+
+      if (i > 0) {
+        const prev = pRows[i - 1];
+        const dI = Math.abs(r.curr - prev.curr);
+        if (dI >= 1.5 && dI <= 50.0) {
+          for (let c = 0; c < nCells; c++) {
+            const dV = Math.abs(r.cells[c] - prev.cells[c]);
+            const rint = (dV / dI);
+            if (rint >= 0.5 && rint <= 15.0) {
+              rintSamples[c].push(rint);
+            }
+          }
+        }
+      }
+    }
+
+    for (let c = 0; c < nCells; c++) {
+      const samples = rintSamples[c];
+      const avgR = samples.length ? (samples.reduce((a, b) => a + b, 0) / samples.length).toFixed(2) : '—';
+      const diff = (cellMaxs[c] > cellMins[c] && cellMins[c] < 99999) ? (cellMaxs[c] - cellMins[c]) : 0;
+      cellStats.push({
+        addr,
+        cellNum: c + 1,
+        min: cellMins[c] < 99999 ? cellMins[c] : '—',
+        max: cellMaxs[c] > 0 ? cellMaxs[c] : '—',
+        diff,
+        rint: avgR,
+        balCount: balCounts[c]
+      });
+    }
+  });
+
+  let maxBankDelta = 0;
+  rows.forEach(r => {
+    if (r.cells && r.cells.length) {
+      const valid = r.cells.filter(c => c > 1000);
+      if (valid.length) {
+        const d = Math.max(...valid) - Math.min(...valid);
+        if (d > maxBankDelta) maxBankDelta = d;
+      }
+    }
+  });
+
+  logAnalysisData = {
+    filename,
+    rows,
+    packMap,
+    addrs,
+    startTime,
+    endTime,
+    minV,
+    maxV,
+    maxCharge,
+    maxDischarge,
+    maxBankDelta,
+    cellStats
+  };
+
+  renderLogAnalysisResults();
+}
+
+function renderLogAnalysisResults() {
+  if (!logAnalysisData) return;
+  const d = logAnalysisData;
+  document.getElementById('drop_zone').style.display = 'none';
+  document.getElementById('log_results').style.display = 'block';
+  document.getElementById('log_file_title').textContent = `📁 ${d.filename} (${d.rows.length} рядків)`;
+
+  const durationSec = Math.round((new Date(d.endTime) - new Date(d.startTime)) / 1000) || 0;
+  const durMin = Math.floor(durationSec / 60);
+  const durSec = durationSec % 60;
+  const durStr = durMin > 0 ? `${durMin} хв ${durSec} сек` : `${durSec} сек`;
+
+  document.getElementById('log_stats_grid').innerHTML = `
+    <div class="bank-card">
+      <div class="l">Тривалість сесії</div>
+      <div class="v" style="font-size:20px">${durStr}</div>
+      <div class="subtext">Знайдено АКБ: <b>${d.addrs.join(', ')}</b></div>
+    </div>
+    <div class="bank-card">
+      <div class="l">Діапазон напруги банку</div>
+      <div class="v" style="font-size:20px">${d.minV.toFixed(2)} — ${d.maxV.toFixed(2)} В</div>
+      <div class="subtext">ΔV сеансу: ${(d.maxV - d.minV).toFixed(2)} В</div>
+    </div>
+    <div class="bank-card">
+      <div class="l">Пікові струми</div>
+      <div class="v" style="font-size:20px"><span style="color:var(--ok)">+${d.maxCharge.toFixed(1)}А</span> / <span style="color:var(--bad)">${d.maxDischarge.toFixed(1)}А</span></div>
+      <div class="subtext">Заряд / Розряд</div>
+    </div>
+    <div class="bank-card">
+      <div class="l">Макс. розбаланс банку</div>
+      <div class="v" style="font-size:20px;color:${d.maxBankDelta > 50 ? 'var(--bad)' : 'var(--ok)'}">Δ = ${d.maxBankDelta} мВ</div>
+      <div class="subtext">Пікове розходження комірок</div>
+    </div>
+  `;
+
+  const tbody = document.getElementById('log_cells_tbody');
+  tbody.innerHTML = d.cellStats.map(s => {
+    const isBadR = (s.rint !== '—' && parseFloat(s.rint) > 2.8);
+    const isHighDiff = (s.diff > 250);
+    const statusPill = isBadR ? '<span class="pill bad">Підвищений опір</span>' :
+                       (isHighDiff ? '<span class="pill warn">Розбалансована</span>' : '<span class="pill ok">Норма</span>');
+    const balPill = s.balCount > 0 ? `<span class="pill warn">${s.balCount} раз</span>` : '<span style="color:var(--dim)">0</span>';
+    return `
+      <tr>
+        <td><b>${s.addr}</b></td>
+        <td>#${s.cellNum}</td>
+        <td>${s.min} мВ</td>
+        <td>${s.max} мВ</td>
+        <td><b>${s.diff} мВ</b></td>
+        <td><b style="color:var(--acc)">${s.rint !== '—' ? s.rint + ' мОм' : '—'}</b></td>
+        <td>${balPill}</td>
+        <td>${statusPill}</td>
+      </tr>
+    `;
+  }).join('');
+
+  drawLogChart();
+}
+
+function drawLogChart() {
+  const canvas = document.getElementById('logChart');
+  if (!canvas || !logAnalysisData) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const rows = logAnalysisData.rows;
+  if (!rows || rows.length < 2) return;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const padL = 50, padR = 40, padT = 20, padB = 30;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  let minV = logAnalysisData.minV - 0.5;
+  let maxV = logAnalysisData.maxV + 0.5;
+  if (maxV <= minV) maxV = minV + 1.0;
+
+  let minI = logAnalysisData.maxDischarge - 1.0;
+  let maxI = logAnalysisData.maxCharge + 1.0;
+  if (maxI <= minI) maxI = minI + 2.0;
+
+  ctx.strokeStyle = '#252c34';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (plotH / 4) * i;
+    ctx.moveTo(padL, y); ctx.lineTo(w - padR, y);
+
+    const vVal = (maxV - ((maxV - minV) / 4) * i).toFixed(1);
+    ctx.fillStyle = '#3fb950';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(vVal + 'V', padL - 6, y + 3);
+
+    const iVal = (maxI - ((maxI - minI) / 4) * i).toFixed(1);
+    ctx.fillStyle = '#58a6ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(iVal + 'A', w - padR + 6, y + 3);
+  }
+  ctx.stroke();
+
+  if (minI < 0 && maxI > 0) {
+    const y0 = padT + plotH - ((0 - minI) / (maxI - minI)) * plotH;
+    ctx.strokeStyle = '#7d8894';
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath();
+    ctx.moveTo(padL, y0); ctx.lineTo(w - padR, y0);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Voltage
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  rows.forEach((r, idx) => {
+    const x = padL + (idx / (rows.length - 1)) * plotW;
+    const y = padT + plotH - ((r.v - minV) / (maxV - minV)) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Current
+  ctx.strokeStyle = '#58a6ff';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  rows.forEach((r, idx) => {
+    const x = padL + (idx / (rows.length - 1)) * plotW;
+    const y = padT + plotH - ((r.curr - minI) / (maxI - minI)) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = '#7d8894';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  const tStart = (rows[0].ts || '').split('T')[1] || rows[0].ts;
+  const tEnd = (rows[rows.length - 1].ts || '').split('T')[1] || rows[rows.length - 1].ts;
+  ctx.fillText(tStart, padL, h - 10);
+  ctx.textAlign = 'right';
+  ctx.fillText(tEnd, w - padR, h - 10);
+}
+
 async function tick() {
   try {
     const r = await fetch('/api/data');
@@ -1886,6 +2659,7 @@ async function toggleLog() {
 
 tick();
 setInterval(tick, 1000);
+initLogViewer();
 </script></body></html>"""
 
 
