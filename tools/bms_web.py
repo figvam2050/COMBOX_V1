@@ -1338,6 +1338,47 @@ function renderSummary() {
   const alEl = document.getElementById('b_alarm_status');
   alEl.textContent = sum.alarm_count > 0 ? `⚠️ Активних тривог: ${sum.alarm_count}` : 'Усі захисти та попередження в нормі';
   alEl.style.color = sum.alarm_count > 0 ? 'var(--bad)' : 'var(--dim)';
+
+  // Summary Table
+  const tbody = document.getElementById('summary_rows');
+  const addrs = Object.keys(packs).sort();
+  if (addrs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">Жодного АКБ не знайдено.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = addrs.map(addr => {
+    const p = packs[addr];
+    const on = p.online;
+    const d = p.parsed;
+    if (!d) {
+      return `<tr>
+        <td><b>${addr}</b></td>
+        <td colspan="10" style="color:var(--bad)">Офлайн (${p.err || 'немає відповіді'})</td>
+        <td><button onclick="selectTab('${addr}')">Відкрити</button></td>
+      </tr>`;
+    }
+
+    const stClass = on ? (d.status_bits && d.status_bits[2] && d.status_bits[2].on ? 'bad' : 'ok') : 'bad';
+    const balActive = d.balance_bits && d.balance_bits.some(b => b.on);
+    const hasAlarm = (d.warning || d.protection || d.error_code);
+    const currStr = (d.current >= 0 ? '+' : '') + d.current.toFixed(1) + ' А';
+
+    return `<tr>
+      <td><b>${addr}</b> ${on ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--bad)">○</span>'}</td>
+      <td><span class="pill ${stClass}">${d.status_name}</span></td>
+      <td><b>${d.voltage.toFixed(2)} В</b></td>
+      <td>${currStr}</td>
+      <td>${d.soc != null ? d.soc + ' %' : '—'}</td>
+      <td style="color:var(--bad)">${d.cell_min} мВ</td>
+      <td style="color:var(--ok)">${d.cell_max} мВ</td>
+      <td><b>${d.cell_diff} мВ</b></td>
+      <td>${balActive ? '<span class="b-tag">BAL</span>' : '—'}</td>
+      <td>${d.temp_pcb}/${d.temp_avg}/${d.temp_max} °C</td>
+      <td>${hasAlarm ? '<span class="pill bad">Увага</span>' : '<span class="pill ok">Норма</span>'}</td>
+      <td><button onclick="selectTab('${addr}')" style="padding:4px 10px;font-size:12px">Детальніше →</button></td>
+    </tr>`;
+  }).join('');
 }
 
 function renderChartsView() {
@@ -1380,48 +1421,6 @@ function renderChartsView() {
       <td style="color:var(--acc)">${maxR}</td>
       <td>${isBalNow ? '<span class="b-tag">АКТИВНЕ ЗАРАЗ</span>' : '<span style="color:var(--dim)">Неактивне</span>'}</td>
       <td>${balStr}</td>
-    </tr>`;
-  }).join('');
-}
-
-  // Summary Table
-  const tbody = document.getElementById('summary_rows');
-  const addrs = Object.keys(packs).sort();
-  if (addrs.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">Жодного АКБ не знайдено.</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = addrs.map(addr => {
-    const p = packs[addr];
-    const on = p.online;
-    const d = p.parsed;
-    if (!d) {
-      return `<tr>
-        <td><b>${addr}</b></td>
-        <td colspan="10" style="color:var(--bad)">Офлайн (${p.err || 'немає відповіді'})</td>
-        <td><button onclick="selectTab('${addr}')">Відкрити</button></td>
-      </tr>`;
-    }
-
-    const stClass = on ? (d.status_bits && d.status_bits[2] && d.status_bits[2].on ? 'bad' : 'ok') : 'bad';
-    const balActive = d.balance_bits && d.balance_bits.some(b => b.on);
-    const hasAlarm = (d.warning || d.protection || d.error_code);
-    const currStr = (d.current >= 0 ? '+' : '') + d.current.toFixed(1) + ' А';
-
-    return `<tr>
-      <td><b>${addr}</b> ${on ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--bad)">○</span>'}</td>
-      <td><span class="pill ${stClass}">${d.status_name}</span></td>
-      <td><b>${d.voltage.toFixed(2)} В</b></td>
-      <td>${currStr}</td>
-      <td>${d.soc != null ? d.soc + ' %' : '—'}</td>
-      <td style="color:var(--bad)">${d.cell_min} мВ</td>
-      <td style="color:var(--ok)">${d.cell_max} мВ</td>
-      <td><b>${d.cell_diff} мВ</b></td>
-      <td>${balActive ? '<span class="b-tag">BAL</span>' : '—'}</td>
-      <td>${d.temp_pcb}/${d.temp_avg}/${d.temp_max} °C</td>
-      <td>${hasAlarm ? '<span class="pill bad">Увага</span>' : '<span class="pill ok">Норма</span>'}</td>
-      <td><button onclick="selectTab('${addr}')" style="padding:4px 10px;font-size:12px">Детальніше →</button></td>
     </tr>`;
   }).join('');
 }
@@ -1721,10 +1720,9 @@ function openReport() {
       <td>${p.online ? parsed.status_name : 'Офлайн'}</td>
     </tr>`;
   });
-  html += `</table>`;
-
+  html += `</table>
   <div class="rep-sec">3. Матриця напруг 15S комірок, опір та балансування</div>
-  html += `<div style="overflow-x:auto"><table>
+  <div style="overflow-x:auto"><table>
     <tr><th>АКБ</th><th>#1</th><th>#2</th><th>#3</th><th>#4</th><th>#5</th><th>#6</th><th>#7</th><th>#8</th><th>#9</th><th>#10</th><th>#11</th><th>#12</th><th>#13</th><th>#14</th><th>#15</th><th>Δ пака</th></tr>`;
 
   addrs.forEach(a => {
