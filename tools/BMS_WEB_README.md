@@ -48,26 +48,27 @@ Windows-програми **BMS_TOOLS_2.2.01** для банку акумулят
 Скрипт самостійно знайде підключений USB-RS485 адаптер (чіпи FTDI FT232, WCH CH340, CP2102, Prolific тощо).
 
 ```bash
-# Windows (автоматично знайде COM-порт, наприклад COM3 або COM4):
-python tools\bms_web.py
-
-# macOS / Linux (автоматично знайде /dev/cu.usbserial-... або /dev/ttyUSB0):
-python3 tools/bms_web.py
+# Універсальний запуск (macOS, Linux, Windows):
+# Скрипт автоматично визначить потрібний COM/USB порт!
+python3 tools/bms_web.py          # на macOS / Linux
+python tools/bms_web.py           # на Windows
 
 # Запуск одразу в пасивному режимі (якщо паралельно працює інвертор):
-python tools\bms_web.py --passive
+python3 tools/bms_web.py --passive
 
 # Якщо порт потрібно вказати примусово вручну:
-python tools\bms_web.py --port COM3
+python tools/bms_web.py --port COM3               # Windows
+python3 tools/bms_web.py --port /dev/cu.usbserial-A5069RR4  # macOS
 
 # Демо-режим без заліза (симуляція кількох АКБ у браузері):
-python tools\bms_web.py --mock
+python3 tools/bms_web.py --mock   # macOS/Linux
+python tools/bms_web.py --mock    # Windows
 
 # Вбудована самоперевірка:
-python tools\bms_web.py --selftest
+python3 tools/bms_web.py --selftest
 
 # Подивитися список усіх підключених портів у системі:
-python tools\bms_web.py --list
+python3 tools/bms_web.py --list
 ```
 
 Веб-інтерфейс доступний за адресою: **`http://127.0.0.1:8080`**
