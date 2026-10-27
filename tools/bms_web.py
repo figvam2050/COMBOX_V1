@@ -2301,7 +2301,7 @@ function resetLogViewer() {
 }
 
 function parseAndAnalyzeCSV(filename, text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  const lines = text.split(String.fromCharCode(10)).map(l => l.replace(String.fromCharCode(13), '')).filter(l => l.trim().length > 0);
   if (lines.length < 2) {
     alert('Файл CSV порожній або містить замало рядків');
     return;
