@@ -1152,11 +1152,18 @@ canvas{width:100%;height:auto;display:block}
     </div>
   </div>
 
-  <!-- LIVE ROLLING CANVAS CHART -->
+  <!-- LIVE ROLLING CANVAS CHARTS -->
   <div class="card" style="margin-bottom:16px">
-    <h2>📈 Графік напруги, струму та розбалансу в реальному часі (останні 5-10 хв)</h2>
+    <h2>📈 Напруга та струм банку (в реальному часі)</h2>
     <div class="chart-box">
-      <canvas id="historyChart" width="840" height="220"></canvas>
+      <canvas id="historyChart" width="840" height="190"></canvas>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>⚖️ Динаміка розбалансу комірок (Δ банку, мВ)</h2>
+    <div class="chart-box">
+      <canvas id="deltaChart" width="840" height="150"></canvas>
     </div>
   </div>
 
@@ -1684,6 +1691,7 @@ function renderView() {
   } else if (currentTab === 'charts') {
     renderChartsView();
     drawHistoryChart();
+    drawDeltaChart();
   } else if (currentTab === 'logviewer') {
     if (logAnalysisData) {
       drawLogChart();
@@ -1883,7 +1891,7 @@ function renderPackDetail(addr) {
     `<span class="${b.on ? 'on' : ''}">${b.n}</span>`).join('') : '—';
 }
 
-/* --- CANVAS CHART 1: ROLLING HISTORY --- */
+/* --- CANVAS CHART 1: ROLLING HISTORY (VOLTAGE & CURRENT) --- */
 function drawHistoryChart() {
   const canvas = document.getElementById('historyChart');
   if (!canvas || !latestData || !latestData.history) return;
@@ -1895,15 +1903,9 @@ function drawHistoryChart() {
   if (hist.length < 2) {
     ctx.fillStyle = '#7d8894';
     ctx.font = '13px sans-serif';
-    ctx.fillText('Накопичення точок історії телеметрії...', 20, 30);
+    ctx.fillText('Накопичення точок історії напруги та струму...', 20, 30);
     return;
   }
-
-  // Draw legend
-  ctx.font = '11px sans-serif';
-  ctx.fillStyle = '#58a6ff'; ctx.fillText('■ Напруга (В)', 20, 18);
-  ctx.fillStyle = '#3fb950'; ctx.fillText('■ Струм (А)', 120, 18);
-  ctx.fillStyle = '#d29922'; ctx.fillText('■ Δ банку (мВ)', 210, 18);
 
   const padL = 40, padR = 40, padT = 30, padB = 25;
   const plotW = w - padL - padR;
@@ -1912,11 +1914,21 @@ function drawHistoryChart() {
   // Find min/max for voltage & current
   const vArr = hist.map(p => p.v);
   const iArr = hist.map(p => p.i);
+
   let minV = Math.min(...vArr) - 0.5, maxV = Math.max(...vArr) + 0.5;
   if (maxV - minV < 2.0) { minV -= 1.0; maxV += 1.0; }
 
   let maxAbsI = Math.max(...iArr.map(Math.abs), 5.0);
   let minI = -maxAbsI, maxI = maxAbsI;
+
+  // Draw legend with live metrics
+  const lastPt = hist[hist.length - 1] || {};
+  const lastV = (lastPt.v != null ? Number(lastPt.v).toFixed(2) : '—');
+  const lastI = (lastPt.i != null ? ((lastPt.i >= 0 ? '+' : '') + Number(lastPt.i).toFixed(1)) : '—');
+
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#58a6ff'; ctx.fillText('■ Напруга: ' + lastV + ' В', 20, 18);
+  ctx.fillStyle = '#3fb950'; ctx.fillText('■ Струм: ' + lastI + ' А', 160, 18);
 
   // Grid
   ctx.strokeStyle = '#252c34';
@@ -1944,7 +1956,7 @@ function drawHistoryChart() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Plot Voltage Line
+  // Plot Voltage Line (blue #58a6ff)
   ctx.strokeStyle = '#58a6ff';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -1955,7 +1967,7 @@ function drawHistoryChart() {
   });
   ctx.stroke();
 
-  // Plot Current Line
+  // Plot Current Line (green #3fb950)
   ctx.strokeStyle = '#3fb950';
   ctx.lineWidth = 1.8;
   ctx.beginPath();
@@ -1965,6 +1977,120 @@ function drawHistoryChart() {
     if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
+}
+
+/* --- CANVAS CHART 2: CELL DELTA HISTORY --- */
+function drawDeltaChart() {
+  const canvas = document.getElementById('deltaChart');
+  if (!canvas || !latestData || !latestData.history) return;
+  const ctx = canvas.getContext('2d');
+  const hist = latestData.history;
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  if (hist.length < 2) {
+    ctx.fillStyle = '#7d8894';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('Накопичення точок історії розбалансу...', 20, 30);
+    return;
+  }
+
+  const padL = 45, padR = 40, padT = 30, padB = 25;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  const dArr = hist.map(p => (p.diff != null ? p.diff : 0));
+  let maxD = Math.max(...dArr, 25);
+  maxD = Math.max(60, Math.ceil(maxD / 30) * 30);
+
+  const lastPt = hist[hist.length - 1] || {};
+  const lastD = (lastPt.diff != null ? Math.round(lastPt.diff) : 0);
+
+  let statusCol = '#3fb950', statusTxt = '🟢 Відмінно (< 30 мВ)';
+  if (lastD > 50) {
+    statusCol = '#f85149';
+    statusTxt = '🔴 Рекомендовано балансування (> 50 мВ)';
+  } else if (lastD >= 30) {
+    statusCol = '#d29922';
+    statusTxt = '🟡 Робоча норма (30..50 мВ)';
+  }
+
+  // Draw legend
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#d29922'; ctx.fillText('■ Δ розбалансу банку: ' + lastD + ' мВ', 20, 18);
+  ctx.fillStyle = statusCol; ctx.fillText('Стан: ' + statusTxt, 210, 18);
+
+  // Grid (3 intervals)
+  ctx.strokeStyle = '#252c34';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let s = 0; s <= 3; s++) {
+    const y = padT + (plotH / 3) * s;
+    ctx.moveTo(padL, y); ctx.lineTo(w - padR, y);
+    const dVal = Math.round(maxD - (maxD / 3) * s);
+    ctx.fillStyle = '#7d8894';
+    ctx.fillText(dVal + ' mV', 5, y + 4);
+  }
+  ctx.stroke();
+
+  // Balance threshold line (50 mV)
+  const thresh = 50;
+  if (thresh < maxD) {
+    const yThresh = padT + plotH - (thresh / maxD) * plotH;
+    ctx.strokeStyle = 'rgba(248, 81, 73, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(padL, yThresh); ctx.lineTo(w - padR, yThresh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = '#f85149';
+    ctx.fillText('Поріг балансування (50 мВ)', w - padR - 150, yThresh - 4);
+  }
+
+  // Plot Delta Line & Area Fill (golden gradient)
+  const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+  grad.addColorStop(0, 'rgba(210, 153, 34, 0.28)');
+  grad.addColorStop(1, 'rgba(210, 153, 34, 0.02)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  hist.forEach((pt, idx) => {
+    const x = padL + (idx / (hist.length - 1)) * plotW;
+    const dVal = Math.min(maxD, Math.max(0, pt.diff != null ? pt.diff : 0));
+    const y = padT + plotH - (dVal / maxD) * plotH;
+    if (idx === 0) {
+      ctx.moveTo(x, padT + plotH);
+      ctx.lineTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  });
+  ctx.lineTo(padL + plotW, padT + plotH);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = '#d29922';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  hist.forEach((pt, idx) => {
+    const x = padL + (idx / (hist.length - 1)) * plotW;
+    const dVal = Math.min(maxD, Math.max(0, pt.diff != null ? pt.diff : 0));
+    const y = padT + plotH - (dVal / maxD) * plotH;
+    if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Highlight latest point with dot
+  if (hist.length > 0) {
+    const x = padL + plotW;
+    const dVal = Math.min(maxD, Math.max(0, lastPt.diff != null ? lastPt.diff : 0));
+    const y = padT + plotH - (dVal / maxD) * plotH;
+    ctx.fillStyle = '#d29922';
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
+    ctx.fill();
+  }
 }
 
 /* --- CANVAS CHART 2: CELL BAR CHART --- */
