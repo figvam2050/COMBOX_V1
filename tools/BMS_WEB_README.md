@@ -74,6 +74,17 @@
 
 ## Запуск
 
+### Вимоги
+
+* Python 3.8+.
+* **pySerial** для роботи з реальним COM/USB-RS485 портом:
+
+```bash
+python3 -m pip install pyserial
+```
+
+`--mock` і `--selftest` працюють без pySerial.
+
 ### Автоматичне визначення порту (Windows / macOS / Linux)
 Скрипт самостійно знайде підключений USB-RS485 адаптер (FTDI FT232, WCH CH340, CP2102, Prolific тощо).
 

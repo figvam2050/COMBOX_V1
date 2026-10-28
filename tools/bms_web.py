@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.1: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.2: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 
-Features (v2.1):
+Features (v2.2):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
   - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
