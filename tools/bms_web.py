@@ -182,9 +182,11 @@ def decode_fw_version(reg: int) -> str:
 
 
 def decode_dev_info_block(regs: list) -> dict:
-    model = decode_ascii_regs(regs[0:15]) if len(regs) >= 15 else None
-    fw = decode_fw_version(regs[15]) if len(regs) >= 16 else None
-    serial_no = decode_ascii_regs(regs[16:23]) if len(regs) >= 23 else None
+    model = decode_ascii_regs(regs[0:12]) if len(regs) >= 12 else None
+    fw = decode_ascii_regs(regs[12:15]) if len(regs) >= 15 else None
+    if not fw and len(regs) >= 13:
+        fw = decode_fw_version(regs[12])
+    serial_no = decode_ascii_regs(regs[15:23]) if len(regs) >= 23 else None
     return {"model": model, "fw_version": fw, "serial": serial_no}
 
 
@@ -2951,6 +2953,21 @@ def selftest() -> int:
     with patch('serial.tools.list_ports.comports', return_value=[FakePort('COM5', 'USB-SERIAL CH340 (COM5)', 'wch.cn', 0x1A86, 0x7523, 'USB VID:PID=1A86:7523')]):
         p_dev, p_desc = find_usb_rs485_port()
         assert p_dev == 'COM5' and 'CH340' in p_desc, f"Windows CH340 auto-detect: {p_dev}, {p_desc}"
+
+    # --- Device info block (0x0069 qty=23) decode test ---
+    raw_info_bytes = (
+        b"LFP-15SP10G3-100Ah-100A "  # 24 B (12 regs): Model
+        b"V10R18"                    # 6 B (3 regs): Firmware ASCII
+        b"2025040900109522"          # 16 B (8 regs): Serial Number
+    )
+    info_regs = [
+        (raw_info_bytes[i] << 8) | raw_info_bytes[i + 1]
+        for i in range(0, len(raw_info_bytes), 2)
+    ]
+    dev_info = decode_dev_info_block(info_regs)
+    assert dev_info["model"] == "LFP-15SP10G3-100Ah-100A", f"model: {dev_info['model']}"
+    assert dev_info["fw_version"] == "V10R18", f"fw_version: {dev_info['fw_version']}"
+    assert dev_info["serial"] == "2025040900109522", f"serial: {dev_info['serial']}"
 
     print("selftest OK")
     return 0 if ok else 1

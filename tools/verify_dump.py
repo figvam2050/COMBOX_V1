@@ -168,26 +168,29 @@ def print_frame(frame: bytes) -> None:
 
 
 def verify_queries(src: str) -> int:
-    """Витягує BMS_QUERY_TABLE із src/main.cpp і перевіряє CRC кожного запиту."""
-    m = re.search(r"BMS_QUERY_TABLE\[16\]\[8\]\s*=\s*\{(.*?)\};", src, re.S)
-    if not m:
-        print("FAIL: BMS_QUERY_TABLE не знайдено в src/main.cpp")
-        return 1
-    rows = re.findall(r"\{([^}]+)\}", m.group(1))
-    if len(rows) != 16:
-        print(f"FAIL: у таблиці {len(rows)} рядків, очікувалося 16")
-        return 1
-    fails = 0
-    for row in rows:
-        vals = [int(x, 16) for x in row.split(",")]
-        frame = bytes(vals)
-        rx = (frame[-1] << 8) | frame[-2]
-        calc = modbus_crc16(frame[:-2])
-        ok = rx == calc
-        fails += 0 if ok else 1
-        print(f"  {'OK ' if ok else 'FAIL'} addr 0x{frame[0]:02X}  {' '.join(f'{b:02X}' for b in frame)}  CRC {rx:04X}")
-    print(f"BMS_QUERY_TABLE: {16 - fails}/16 валідні")
-    return 1 if fails else 0
+    """Витягує BMS_QUERY_TABLE та BMS_SEARCH_QUERY_TABLE із src/main.cpp і перевіряє CRC кожного запиту."""
+    total_fails = 0
+    for table_name in ("BMS_QUERY_TABLE", "BMS_SEARCH_QUERY_TABLE"):
+        m = re.search(rf"{table_name}\[16\]\[8\]\s*=\s*\{{(.*?)\}};", src, re.S)
+        if not m:
+            print(f"FAIL: {table_name} не знайдено в src/main.cpp")
+            return 1
+        rows = re.findall(r"\{([^}]+)\}", m.group(1))
+        if len(rows) != 16:
+            print(f"FAIL: у таблиці {table_name} {len(rows)} рядків, очікувалося 16")
+            return 1
+        fails = 0
+        for row in rows:
+            vals = [int(x, 16) for x in row.split(",")]
+            frame = bytes(vals)
+            rx = (frame[-1] << 8) | frame[-2]
+            calc = modbus_crc16(frame[:-2])
+            ok = rx == calc
+            fails += 0 if ok else 1
+            print(f"  {'OK ' if ok else 'FAIL'} addr 0x{frame[0]:02X}  {' '.join(f'{b:02X}' for b in frame)}  CRC {rx:04X}")
+        print(f"{table_name}: {16 - fails}/16 валідні")
+        total_fails += fails
+    return 1 if total_fails else 0
 
 
 def build_synthetic_frame(current_raw: int = 0) -> bytes:

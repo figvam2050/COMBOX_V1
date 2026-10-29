@@ -97,9 +97,9 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
 #define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 516 // 51.6 V (3.44 V/cell * 15): hold voltage during balancing
 
-// Per-pack charge current limit, selected by DIP5 (see DIP_CHARGE_CURRENT_50A):
-// OFF = 40 A (soft margin), ON = 50 A (battery manufacturer maximum).
-#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10 400
+// Per-pack charge current limit, selected by DIP5 (SW5, PC6):
+// OFF (default) = 50 A (battery manufacturer maximum), ON = 30 A (0.3C current limit mode).
+#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_LIMIT_X10 300
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
@@ -119,15 +119,15 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // near the PCS-485/CAN jacks); stock SW1 protocol meaning (PYLON) unused.
 #define DIP_PROFILE_CODE_90 1
 // DIP5 (SW5, weight 16, PC6) selects the per-pack charge current limit:
-// OFF = 40 A, ON = 50 A. Orthogonal to the SW1 voltage profile.
-#define DIP_CHARGE_CURRENT_50A 0x10
+// OFF (default) = 50 A, ON = 30 A (current limit mode). Orthogonal to SW1 voltage profile.
+#define DIP_CHARGE_CURRENT_LIMIT_30A 0x10
 // DIP3 (SW3, weight 4, PB14):
 // OFF = Smart Plug & Play autosearch (default, fast polling active packs, 800 ms cycle for 2 packs);
 // ON = Forced full 16-address scan (6.4 s legacy/diagnostic mode).
 #define DIP_FORCE_FULL_SCAN_MASK 0x04
 // DIP4 (SW4, weight 8, PB15): forced balancing mode (27.10.2026)
 // OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 51.6V,
-// 1.0-2.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
+// 0.5-2.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
 #define DIP_FORCED_BALANCE_MASK 0x08
 #define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
 
@@ -143,6 +143,12 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CELL_DISCHARGE_STOP_MV 2750     // Soft Cut-off: DCL = 0 + 0x359 Protect Cell UV (250 mV before BMS 2500 mV)
 #define CELL_DISCHARGE_REENABLE_MV 3000 // Release: restore discharge when recharged to 3000 mV (matches BMS)
 #define CELL_MAX_DELTA_MV 400
+
+// Inter-pack voltage imbalance protection for multi-pack banks (10 mV units):
+// > 1.50 V (150): 50% current derating; >= 3.00 V (300): full inhibit (release < 2.50 V / 250).
+#define PACK_V_DELTA_WARN_10MV 150
+#define PACK_V_DELTA_STOP_10MV 300
+#define PACK_V_DELTA_REENABLE_10MV 250
 
 // ===== SOC з напруги комірок (P1.1, 22.10.2026) =====
 // Заводський SOC Vision (рег 24) мертвий — зависає на 100% навіть за
@@ -226,13 +232,17 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 #define BAL_TRICKLE_A_X10 20       // 2.0 A per pack cap
 #define BAL_HOLD_CELL_MV 3560      // Float hold trigger: max cell reaches 3.56 V
 #define BAL_HOLD_RELEASE_MV 3530   // Float hold release: max cell relaxes below 3.53 V
-#define BAL_HOLD_A_X10 10          // 1.0 A per pack holding cap during float hold
+#define BAL_HOLD_A_X10 10          // 1.0 A per pack holding cap during float hold (< 3.52 V)
+#define BAL_HOLD_FINE_CELL_MV 3520 // Fine float hold threshold (>= 3.52 V -> 0.5 A per pack)
+#define BAL_HOLD_FINE_A_X10 5      // 0.5 A per pack fine trickle during float hold
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
-#define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> abort session
-#define BAL_OUTAGE_AGG_N 19        // ~120 s in 6.4 s sweep (or ~15 s in Fast Polling 2-pack mode)
+#define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> pause/abort session
+#define BAL_OUTAGE_CONFIRM_MS 60000UL // 60 s sustained discharge before pausing session
+#define BAL_PAUSE_MAX_MS (30UL * 60UL * 1000UL) // 30 min max Smart Pause window
+#define BAL_PAUSE_MIN_SOC 90       // keep paused session alive only if SOC >= 90%
 #define BAL_EXIT_STREAK 3          // consecutive aggregates with spread <= exit
 #define BAL_TEMP_MIN_C 0.0f
 #define BAL_TEMP_MAX_C 45.0f
@@ -293,7 +303,8 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 //   LED4 (PC5)  = CAN to inverter — blinks on TX bursts;
 //   LED3 (PC4)  = PCS-485 port (UART4, Q23): blinks on TX/RX — mirror mode
 //                 (DIP2 OFF) or inverter bridge traffic (DIP2 ON);
-//   LED1 (PC13) = free/debug — dark;
+//   LED1 (PC13) = internal status/diagnostic LED: fault blink codes (2..5),
+//                 1 Hz blink on balance session, solid on DIP1 90% mode;
 //   LED2 (VDDA) = power — wired to rail, not MCU-controlled.
 // PC5 is NOT an RS485 direction pin (PC5=DE disproven, RS485 has
 // auto-direction transceivers — ORIGINAL_FIRMWARE.md §14.3).
@@ -344,10 +355,16 @@ static uint8_t agg_count = 0;
 static uint8_t agg_charge_capable_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static uint16_t agg_min_cell_mv = 0xFFFF;
+static uint16_t agg_max_pack_v = 0;
+static uint16_t agg_min_pack_v = 0xFFFF;
+static uint16_t bank_max_cell_mv = 0;
+static uint16_t bank_min_cell_mv = 0xFFFF;
+static uint16_t bank_pack_v_delta_10mv = 0;
 static bool charge_cell_ov_inhibit = false;
 static bool charge_temp_inhibit = false;
 static bool discharge_cell_uv_inhibit = false;
 static bool discharge_temp_inhibit = false;
+static bool pack_imbalance_inhibit = false;
 
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
@@ -395,7 +412,9 @@ static uint32_t bal_session_start_ms = 0;
 static uint32_t bal_last_improve_ms = 0;
 static uint16_t bal_best_spread_mv = 0xFFFF;
 static uint8_t bal_exit_streak = 0;
-static uint8_t bal_outage_agg = 0;
+static uint32_t bal_outage_start_ms = 0;
+static bool bal_session_paused = false;
+static uint32_t bal_pause_start_ms = 0;
 static uint8_t bal_prev_packs = 0;
 static uint16_t bal_hist_mv[BAL_HIST_HOURS];
 static uint8_t bal_hist_n = 0;
@@ -458,7 +477,7 @@ static void leds_init(void) {
   gpio_init(LED_INV485_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED_INV485_PIN);
   gpio_bit_reset(LED_INV485_PORT, LED_INV485_PIN);
-  // LED1 (PC13): free/debug — dark.
+  // LED1 (PC13): internal status/diagnostic indicator (DIP1 90%, balance 1 Hz, fault blink codes).
   gpio_init(LED1_DEBUG_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ,
             LED1_DEBUG_PIN);
   gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
@@ -1011,9 +1030,19 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // базуються виключно на фізичних вимірах напруги комірок.
   uint16_t raw_soh = (uart_rx_buffer[49] << 8) | uart_rx_buffer[50];
 
+  if (raw_voltage > 0) {
+    if (raw_voltage > agg_max_pack_v)
+      agg_max_pack_v = raw_voltage;
+    if (raw_voltage < agg_min_pack_v)
+      agg_min_pack_v = raw_voltage;
+  }
+
+  uint16_t pack_max_cell_mv = 0;
   for (uint8_t cell = 0; cell < 15; cell++) {
     uint16_t cell_mv = ((uint16_t)uart_rx_buffer[7 + cell * 2] << 8) |
                        uart_rx_buffer[8 + cell * 2];
+    if (cell_mv > pack_max_cell_mv)
+      pack_max_cell_mv = cell_mv;
     if (cell_mv > agg_max_cell_mv)
       agg_max_cell_mv = cell_mv;
     if (cell_mv > 0 && cell_mv < agg_min_cell_mv)
@@ -1122,6 +1151,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
   bool pack_charge_ok = true;
   if (reg_protect & 0x3513)
     pack_charge_ok = false;
+  if (pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
+    pack_charge_ok = false;
   if (pack_t_min < TEMP_CHARGE_MIN_C || pack_t_max > TEMP_CHARGE_MAX_C)
     pack_charge_ok = false;
   if (reg_error != 0 || (reg_status & 0x0004))
@@ -1144,13 +1175,18 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
   uint32_t per_pack_x10 = profile_charge_current_per_pack_x10;
-  // Balance/manual top-off phase: cap at 2.0 A per pack (or 1.0 A during float hold)
+  // Balance/manual top-off phase: cap at 2.0 A per pack (or 1.0 A / 0.5 A during float hold)
   // so passive balancing gets hours of gentle CV time instead of a rushed stop at the threshold.
   if (bal_session_active) {
-    if (bal_float_hold && per_pack_x10 > BAL_HOLD_A_X10)
-      per_pack_x10 = BAL_HOLD_A_X10;
-    else if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10)
+    if (bal_float_hold) {
+      uint32_t hold_cap_x10 = (agg_max_cell_mv >= BAL_HOLD_FINE_CELL_MV)
+                                  ? BAL_HOLD_FINE_A_X10
+                                  : BAL_HOLD_A_X10;
+      if (per_pack_x10 > hold_cap_x10)
+        per_pack_x10 = hold_cap_x10;
+    } else if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10) {
       per_pack_x10 = BAL_TRICKLE_A_X10;
+    }
   } else if (bal_trickle && per_pack_x10 > BAL_TRICKLE_A_X10) {
     per_pack_x10 = BAL_TRICKLE_A_X10;
   }
@@ -1185,8 +1221,13 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     }
   }
 
-  if (charge_temp_inhibit || charge_cell_ov_inhibit) {
+  if (charge_temp_inhibit || charge_cell_ov_inhibit || pack_imbalance_inhibit) {
     return 0;
+  }
+
+  // Inter-pack voltage imbalance warning (> 1.50 V between parallel packs): derate 50%
+  if (bank_pack_v_delta_10mv > PACK_V_DELTA_WARN_10MV && !(bal_session_active && bal_float_hold)) {
+    max_current_x10 /= 2;
   }
 
   if (bal_session_active && bal_float_hold) {
@@ -1231,7 +1272,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     }
   }
 
-  if (discharge_temp_inhibit || discharge_cell_uv_inhibit) {
+  if (discharge_temp_inhibit || discharge_cell_uv_inhibit || pack_imbalance_inhibit) {
     return 0;
   }
 
@@ -1245,6 +1286,11 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     max_current_x10 /= 2;
   }
 
+  // Inter-pack voltage imbalance warning (> 1.50 V between parallel packs): derate 50%
+  if (bank_pack_v_delta_10mv > PACK_V_DELTA_WARN_10MV) {
+    max_current_x10 /= 2;
+  }
+
   return (uint16_t)max_current_x10;
 }
 
@@ -1253,22 +1299,23 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 // cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
 // full; current capped at 2 A per pack once min cell >= 3400 mV).
 // DIP1 ON (51.8 V option): auto logic disabled; the same 2 A trickle from
-// 3400 mV applies. Sessions exit on spread convergence (<= 25 mV), BMS loss,
-// sustained discharge (grid outage), no progress or an 8 h timeout.
+// 3400 mV applies. Sessions exit on spread convergence (<= 35 mV), BMS loss,
+// sustained discharge (grid outage > 60 s -> Smart Pause up to 30 min), no progress or an 8 h timeout.
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
+  bal_session_paused = false;
   bal_trickle = false;
   bal_float_hold = false;
   bal_exit_streak = 0;
-  bal_outage_agg = 0;
+  bal_outage_start_ms = 0;
   if (success)
     bal_last_success_ms = millis();
   bal_cooldown_until_ms = cooldown_until;
 }
 
 static void balance_on_bms_lost(void) {
-  if (bal_session_active)
+  if (bal_session_active || bal_session_paused)
     balance_session_end(false, millis() + BAL_COOLDOWN_OUTAGE_MS);
 }
 
@@ -1305,17 +1352,24 @@ static void balance_update(uint8_t packs) {
   if (have_cells)
     balance_hist_push(spread, now);
 
+  // Saturate elapsed time since last success at BAL_INTERVAL_OK_MS (30 days)
+  // so 49.7-day uint32_t millis() wraparound never resets a due interval.
+  if ((now - bal_last_success_ms) > BAL_INTERVAL_OK_MS) {
+    bal_last_success_ms = now - BAL_INTERVAL_OK_MS;
+  }
+
   // DIP4 Forced Balancing (PB15 / SW4):
   // When DIP4 is ON, immediately engage forced balance session bypassing
   // all auto timers, intervals, and cooldowns.
-  // Hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 1.0..2.0 A/pack,
+  // Hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 0.5..2.0 A/pack,
   // request full charge via CAN 0x35C bit 3.
   if (forced && !bal_forced_prev) {
     bal_forced_prev = true;
     bal_session_active = true;
+    bal_session_paused = false;
     bal_session_start_ms = now;
     bal_exit_streak = 0;
-    bal_outage_agg = 0;
+    bal_outage_start_ms = 0;
     bal_best_spread_mv = 0xFFFF;
     bal_last_improve_ms = now;
     bal_float_hold = true;
@@ -1331,11 +1385,28 @@ static void balance_update(uint8_t packs) {
   if (!forced) {
     if (manual && !bal_manual_prev) {
       bal_session_active = false;
+      bal_session_paused = false;
       bal_manual_prev = true;
     } else if (!manual && bal_manual_prev) {
       bal_session_active = false;
+      bal_session_paused = false;
       bal_manual_prev = false;
       bal_cooldown_until_ms = now + BAL_COOLDOWN_TRY_MS;
+    }
+  }
+
+  // Smart Pause & Resume handling: if an auto session was paused by a grid outage / discharge,
+  // resume if power returns within 30 min and SOC >= 90%; otherwise abort cleanly.
+  if (bal_session_paused && !forced) {
+    if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
+      balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
+    } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit) {
+      uint32_t paused_dur = now - bal_pause_start_ms;
+      bal_session_paused = false;
+      bal_session_active = true;
+      bal_session_start_ms += paused_dur;
+      bal_last_improve_ms = now;
+      bal_outage_start_ms = 0;
     }
   }
 
@@ -1355,16 +1426,24 @@ static void balance_update(uint8_t packs) {
       return;
     }
 
-    // Sustained discharge (~60 s) = grid outage or heavy load -> abort.
+    // Sustained discharge (>= 60 s real time) = grid outage or heavy load -> Smart Pause.
     if (bms_current > BAL_OUTAGE_I_MIN_A) {
-      if (bal_outage_agg < 255)
-        bal_outage_agg++;
-      if (bal_outage_agg >= BAL_OUTAGE_AGG_N) {
-        balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
+      if (bal_outage_start_ms == 0) {
+        bal_outage_start_ms = now;
+      } else if ((now - bal_outage_start_ms) >= BAL_OUTAGE_CONFIRM_MS) {
+        bal_session_active = false;
+        bal_session_paused = true;
+        bal_pause_start_ms = now;
+        bal_trickle = false;
+        bal_float_hold = false;
+        bal_outage_start_ms = 0;
+        calc_taper_start_mv = profile_taper_start_mv;
+        calc_charge_stop_mv = profile_charge_stop_mv;
+        calc_charge_reenable_mv = profile_charge_reenable_mv;
         return;
       }
     } else {
-      bal_outage_agg = 0;
+      bal_outage_start_ms = 0;
     }
 
     // Top-off phase: min cell reached ~90% -> 2 A per pack cap
@@ -1424,7 +1503,7 @@ static void balance_update(uint8_t packs) {
   bal_trickle = manual && have_cells &&
                 (agg_min_cell_mv >= BAL_TRICKLE_CELL_MV);
 
-  if (manual || !BAL_AUTO_ENABLED)
+  if (manual || !BAL_AUTO_ENABLED || bal_session_paused)
     return;
   if (!bms_data_valid)
     return;
@@ -1438,7 +1517,7 @@ static void balance_update(uint8_t packs) {
     return;
   if (bms_current >= BAL_START_I_MAX_A)
     return;
-  if (charge_cell_ov_inhibit || charge_temp_inhibit)
+  if (charge_cell_ov_inhibit || charge_temp_inhibit || pack_imbalance_inhibit)
     return;
   if (agg_temp_min < BAL_TEMP_MIN_C || agg_temp_max > BAL_TEMP_MAX_C)
     return;
@@ -1466,9 +1545,10 @@ static void balance_update(uint8_t packs) {
 
   // Start a session.
   bal_session_active = true;
+  bal_session_paused = false;
   bal_session_start_ms = now;
   bal_exit_streak = 0;
-  bal_outage_agg = 0;
+  bal_outage_start_ms = 0;
   bal_best_spread_mv = 0xFFFF;
   bal_last_improve_ms = now;
   bal_trickle = false;
@@ -1478,11 +1558,55 @@ static void balance_update(uint8_t packs) {
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 }
 
-// LED1 (PC13): solid = 51.8 V option (DIP1 ON), slow blink = balance session
-// (auto or DIP4 forced), off = standard 54 V without session. Called from the main loop.
+// LED1 (PC13):
+// - Diagnostic fault blink codes (2..5 flashes + 1.4 s pause) when protection/warning is active:
+//     2 blinks = Cell UV warning / cut-off
+//     3 blinks = Temperature inhibit (cold/hot)
+//     4 blinks = Severe cell (>400 mV) or inter-pack (>3.0 V) voltage imbalance
+//     5 blinks = BMS RS-485 communication lost
+// - 1 Hz slow blink = active or paused balance session (auto or DIP4 forced)
+// - Solid ON = 51.8 V option (DIP1 ON)
+// - OFF = standard 54.0 V normal operation.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
+  static uint8_t blink_step = 0;
+
+  uint8_t fault_blinks = 0;
+  if (!bms_data_valid) {
+    fault_blinks = 5;
+  } else if (pack_imbalance_inhibit ||
+             (bank_max_cell_mv > bank_min_cell_mv &&
+              (bank_max_cell_mv - bank_min_cell_mv) > CELL_MAX_DELTA_MV)) {
+    fault_blinks = 4;
+  } else if (charge_temp_inhibit || discharge_temp_inhibit) {
+    fault_blinks = 3;
+  } else if (discharge_cell_uv_inhibit ||
+             (bank_min_cell_mv != 0xFFFF && bank_min_cell_mv <= CELL_UV_WARN_MV)) {
+    fault_blinks = 2;
+  }
+
+  if (fault_blinks > 0) {
+    uint8_t total_steps = (uint8_t)(fault_blinks * 2);
+    uint32_t wait_ms = (blink_step >= total_steps) ? 1400UL : 150UL;
+    if ((now - last_toggle) >= wait_ms) {
+      last_toggle = now;
+      if (blink_step >= total_steps) {
+        blink_step = 0;
+      }
+      if ((blink_step & 1) == 0) {
+        gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+        on = true;
+      } else {
+        gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
+        on = false;
+      }
+      blink_step++;
+    }
+    return;
+  }
+  blink_step = 0;
+
   if (dip_applied_code & DIP_FORCED_BALANCE_MASK) {
     if ((now - last_toggle) >= 500) {
       last_toggle = now;
@@ -1499,7 +1623,7 @@ static void balance_led_tick(uint32_t now) {
     on = true;
     return;
   }
-  if (bal_session_active) {
+  if (bal_session_active || bal_session_paused) {
     if ((now - last_toggle) >= 500) {
       last_toggle = now;
       on = !on;
@@ -1524,6 +1648,8 @@ static void agg_reset(void) {
   agg_charge_capable_count = 0;
   agg_max_cell_mv = 0;
   agg_min_cell_mv = 0xFFFF;
+  agg_max_pack_v = 0;
+  agg_min_pack_v = 0xFFFF;
 }
 
 static void bms_aggregate_data(void) {
@@ -1566,6 +1692,20 @@ static void bms_aggregate_data(void) {
   }
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
+
+  // Latch bank cell extremes and inter-pack voltage spread for multi-pack protection
+  bank_max_cell_mv = agg_max_cell_mv;
+  bank_min_cell_mv = agg_min_cell_mv;
+  if (agg_count >= 2 && agg_max_pack_v >= agg_min_pack_v && agg_min_pack_v != 0xFFFF) {
+    bank_pack_v_delta_10mv = (uint16_t)(agg_max_pack_v - agg_min_pack_v);
+  } else {
+    bank_pack_v_delta_10mv = 0;
+  }
+  if (bank_pack_v_delta_10mv >= PACK_V_DELTA_STOP_10MV) {
+    pack_imbalance_inhibit = true;
+  } else if (pack_imbalance_inhibit && bank_pack_v_delta_10mv < PACK_V_DELTA_REENABLE_10MV) {
+    pack_imbalance_inhibit = false;
+  }
 
   // Latch sweep alarms and protection into active CAN frame registers
   can_protect_b0 = sweep_protect_b0;
@@ -1738,7 +1878,7 @@ static void send_all_frames(void) {
   // Bit 3 (0x08) = Request Full Charge (Pylontech v1.2+ for balancing/equalization)
   memset(data, 0, 8);
   uint8_t req_flags = 0x00;
-  if (bms_data_valid) {
+  if (bms_data_valid && !pack_imbalance_inhibit) {
     if (bal_session_active) {
       if (!charge_temp_inhibit && charge_current_limit > 0)
         req_flags |= (0x80 | 0x08);
@@ -1884,7 +2024,7 @@ static void bms_advance_poll_address(uint32_t now) {
 
 static uint8_t dip_read_code(void) {
   uint8_t code = (uint8_t)((~GPIO_ISTAT(DIP_GPIO_PORT) >> 12) & 0x0FU);
-  if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= DIP_CHARGE_CURRENT_50A;
+  if (!(GPIO_ISTAT(DIP5_GPIO_PORT) & DIP5_GPIO_PIN)) code |= DIP_CHARGE_CURRENT_LIMIT_30A;
   return code;
 }
 
@@ -1901,9 +2041,11 @@ static void dip_charge_profile_apply(uint8_t code) {
     profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
   }
   profile_charge_current_per_pack_x10 =
-      (code & DIP_CHARGE_CURRENT_50A) ? CHARGE_CURRENT_LIMIT_PER_PACK_X10
-                                      : CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_OFF_X10;
-  charge_voltage_limit = profile_charge_voltage_limit;
+      (code & DIP_CHARGE_CURRENT_LIMIT_30A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_LIMIT_X10
+                                            : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
+  if (!(bal_session_active && bal_float_hold)) {
+    charge_voltage_limit = profile_charge_voltage_limit;
+  }
   dip_applied_code = code;
   pcs_mode_apply(code);       // DIP2: mirror (OFF) vs inverter bridge (ON)
   fast_poll_mode_apply(code); // DIP3: Plug & Play fast poll (OFF) vs force full scan (ON)
@@ -1954,8 +2096,8 @@ int main(void) {
       last_dip_poll = now;
       dip_charge_profile_poll();
       pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
-      balance_led_tick(now);
     }
+    balance_led_tick(now);
 
     // Non-blocking RS-485 BMS polling step (mirror mode only; DIP2 bridge mode handles own)
     bms_poll_step(now);
@@ -1984,6 +2126,10 @@ int main(void) {
       charge_temp_inhibit = false;
       discharge_cell_uv_inhibit = false;
       discharge_temp_inhibit = false;
+      pack_imbalance_inhibit = false;
+      bank_max_cell_mv = 0;
+      bank_min_cell_mv = 0xFFFF;
+      bank_pack_v_delta_10mv = 0;
       can_protect_b0 = 0;
       can_protect_b1 = 0;
       can_alarm_b2 = 0;
