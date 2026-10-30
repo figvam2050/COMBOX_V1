@@ -202,8 +202,11 @@ static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
 
 // Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C.
 // Charging re-enables with hysteresis (>= +3°C and <= 50°C) to prevent chattering.
+// Thermal derating (v2.5): proactive 50% CCL cut at >= +45°C to protect cells from thermal stress.
 #define TEMP_CHARGE_MIN_C 2.0f
 #define TEMP_CHARGE_MIN_REENABLE_C 3.0f
+#define TEMP_CHARGE_DERATE_C 45.0f
+#define TEMP_CHARGE_DERATE_REENABLE_C 42.0f
 #define TEMP_CHARGE_MAX_C 55.0f
 #define TEMP_CHARGE_MAX_REENABLE_C 50.0f
 #define TEMP_DISCHARGE_MIN_C -20.0f
@@ -362,9 +365,12 @@ static uint16_t bank_min_cell_mv = 0xFFFF;
 static uint16_t bank_pack_v_delta_10mv = 0;
 static bool charge_cell_ov_inhibit = false;
 static bool charge_temp_inhibit = false;
+static bool charge_temp_derate = false;
 static bool discharge_cell_uv_inhibit = false;
 static bool discharge_temp_inhibit = false;
 static bool pack_imbalance_inhibit = false;
+static bool bank_any_pack_protect = false;
+static bool sweep_any_pack_protect = false;
 
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
@@ -1038,6 +1044,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
   }
 
   uint16_t pack_max_cell_mv = 0;
+  uint16_t pack_min_cell_mv = 0xFFFF;
   for (uint8_t cell = 0; cell < 15; cell++) {
     uint16_t cell_mv = ((uint16_t)uart_rx_buffer[7 + cell * 2] << 8) |
                        uart_rx_buffer[8 + cell * 2];
@@ -1045,6 +1052,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
       pack_max_cell_mv = cell_mv;
     if (cell_mv > agg_max_cell_mv)
       agg_max_cell_mv = cell_mv;
+    if (cell_mv > 0 && cell_mv < pack_min_cell_mv)
+      pack_min_cell_mv = cell_mv;
     if (cell_mv > 0 && cell_mv < agg_min_cell_mv)
       agg_min_cell_mv = cell_mv;
   }
@@ -1095,12 +1104,12 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
   // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
   // so that activating the 90% software taper profile never generates false emergency cell OV alarms:
-  if ((reg_protect & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
+  if ((reg_protect & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
   // Cell UV Protect (0x359 b0): triggers proactively at <= 2750 mV (ahead of BMS 2500 mV)
   // or if confirmed by BMS hardware alarm:
-  if (agg_min_cell_mv <= CELL_DISCHARGE_STOP_MV ||
-      ((reg_protect & 0x0008) && agg_min_cell_mv <= CELL_UV_WARN_MV))
+  if (pack_min_cell_mv <= CELL_DISCHARGE_STOP_MV ||
+      ((reg_protect & 0x0008) && pack_min_cell_mv <= CELL_UV_WARN_MV))
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
   if ((reg_protect & 0x0001) && raw_voltage >= 5450)
     sweep_protect_b0 |= CAN_PROT_PACK_OV;
@@ -1121,18 +1130,18 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
 
   // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
-  if ((reg_warning & 0x0002) && agg_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
+  if ((reg_warning & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
     sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
   // Cell UV Warning (0x359 b2): proactive warning <= 2900 mV (ahead of BMS 2800 mV)
   // or if confirmed by BMS warning:
-  if (agg_min_cell_mv <= CELL_UV_WARN_MV ||
-      ((reg_warning & 0x0008) && agg_min_cell_mv <= CELL_UV_WARN_MV))
+  if (pack_min_cell_mv <= CELL_UV_WARN_MV ||
+      ((reg_warning & 0x0008) && pack_min_cell_mv <= CELL_UV_WARN_MV))
     sweep_alarm_b2 |= CAN_PROT_CELL_UV;
   if ((reg_warning & 0x0001) && raw_voltage >= 5400)
     sweep_alarm_b2 |= CAN_PROT_PACK_OV;
   if ((reg_warning & 0x0004) && raw_voltage <= 4400)
     sweep_alarm_b2 |= CAN_PROT_CELL_UV;
-  if ((reg_warning & 0x0300) || pack_t_max >= 50.0f)
+  if ((reg_warning & 0x0300) || pack_t_max >= TEMP_CHARGE_DERATE_C)
     sweep_alarm_b2 |= CAN_PROT_OT;
   if ((reg_warning & 0x0C00) || pack_t_min <= (TEMP_DISCHARGE_MIN_C + 5.0f))
     sweep_alarm_b2 |= CAN_PROT_UT;
@@ -1157,6 +1166,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
     pack_charge_ok = false;
   if (reg_error != 0 || (reg_status & 0x0004))
     pack_charge_ok = false;
+
+  if ((reg_status & 0x0004) || (reg_protect != 0) || (reg_error != 0)) {
+    sweep_any_pack_protect = true;
+  }
 
   // Feed the sums once per address per sweep: in bridge mode the inverter may
   // repeat an address and would bias the averages toward it. Cells/temps and
@@ -1202,6 +1215,14 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     }
   }
 
+  // Thermal derating: proactive 50% CCL cut at >= 45°C to protect cells from heat stress.
+  // Re-enable full current once battery cools down to <= 42°C.
+  if (agg_temp_max >= TEMP_CHARGE_DERATE_C) {
+    charge_temp_derate = true;
+  } else if (charge_temp_derate && agg_temp_max <= TEMP_CHARGE_DERATE_REENABLE_C) {
+    charge_temp_derate = false;
+  }
+
   // System error or over-current protection from 0x359
   if (can_protect_b1 & (CAN_PROT_CHARGE_OC | CAN_PROT_SYSTEM_ERROR)) {
     return 0;
@@ -1230,12 +1251,20 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     max_current_x10 /= 2;
   }
 
+  // Thermal derating at >= 45°C: reduce CCL by 50% to mitigate heat buildup
+  if (charge_temp_derate && !(bal_session_active && bal_float_hold)) {
+    max_current_x10 /= 2;
+  }
+
   if (bal_session_active && bal_float_hold) {
     return (uint16_t)max_current_x10;
   }
 
   if (agg_max_cell_mv <= calc_taper_start_mv)
     return (uint16_t)max_current_x10;
+
+  if (agg_max_cell_mv >= calc_charge_stop_mv)
+    return 0;
 
   return (uint16_t)(max_current_x10 *
                     (calc_charge_stop_mv - agg_max_cell_mv) /
@@ -1395,12 +1424,13 @@ static void balance_update(uint8_t packs) {
     }
   }
 
-  // Smart Pause & Resume handling: if an auto session was paused by a grid outage / discharge,
-  // resume if power returns within 30 min and SOC >= 90%; otherwise abort cleanly.
+  // Smart Pause & Resume handling: if an auto session was paused by a grid outage / discharge
+  // or a pack hardware protect event (Status & 0x04 / Protect != 0),
+  // resume if conditions normalize within 30 min and SOC >= 90%; otherwise abort cleanly.
   if (bal_session_paused && !forced) {
     if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
       balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
-    } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit) {
+    } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit && !bank_any_pack_protect) {
       uint32_t paused_dur = now - bal_pause_start_ms;
       bal_session_paused = false;
       bal_session_active = true;
@@ -1423,6 +1453,21 @@ static void balance_update(uint8_t packs) {
       } else {
         bal_exit_streak = 0;
       }
+      return;
+    }
+
+    // Active BMS Protect Mode (Status Protect / Hardware error): pause session
+    // so inverter does not continuously hammer open charge MOSFETs with Request Full Charge (0x88)
+    if (bank_any_pack_protect) {
+      bal_session_active = false;
+      bal_session_paused = true;
+      bal_pause_start_ms = now;
+      bal_trickle = false;
+      bal_float_hold = false;
+      bal_outage_start_ms = 0;
+      calc_taper_start_mv = profile_taper_start_mv;
+      calc_charge_stop_mv = profile_charge_stop_mv;
+      calc_charge_reenable_mv = profile_charge_reenable_mv;
       return;
     }
 
@@ -1579,7 +1624,9 @@ static void balance_led_tick(uint32_t now) {
              (bank_max_cell_mv > bank_min_cell_mv &&
               (bank_max_cell_mv - bank_min_cell_mv) > CELL_MAX_DELTA_MV)) {
     fault_blinks = 4;
-  } else if (charge_temp_inhibit || discharge_temp_inhibit) {
+  } else if (bank_any_pack_protect) {
+    fault_blinks = 3;
+  } else if (charge_temp_inhibit || discharge_temp_inhibit || charge_temp_derate) {
     fault_blinks = 3;
   } else if (discharge_cell_uv_inhibit ||
              (bank_min_cell_mv != 0xFFFF && bank_min_cell_mv <= CELL_UV_WARN_MV)) {
@@ -1650,6 +1697,7 @@ static void agg_reset(void) {
   agg_min_cell_mv = 0xFFFF;
   agg_max_pack_v = 0;
   agg_min_pack_v = 0xFFFF;
+  sweep_any_pack_protect = false;
 }
 
 static void bms_aggregate_data(void) {
@@ -1712,10 +1760,12 @@ static void bms_aggregate_data(void) {
   can_protect_b1 = sweep_protect_b1;
   can_alarm_b2 = sweep_alarm_b2;
   can_alarm_b3 = sweep_alarm_b3;
+  bank_any_pack_protect = sweep_any_pack_protect;
   sweep_protect_b0 = 0;
   sweep_protect_b1 = 0;
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
+  sweep_any_pack_protect = false;
   bms_balance_mask = sweep_balance_mask;
   sweep_balance_mask = 0;
 
@@ -1837,8 +1887,9 @@ static void send_all_frames(void) {
   memset(data, 0, 8);
   // Deye off-grid workaround (Battery-Emulator BYD-CAN.cpp): оф-грід Deye
   // ігнорує CCL/DCL і розряджає до SOC=0. Дзеркалити ліміти в SOC:
-  // DCL=0 (розряд заборонено / порожній) → SOC=0; CCL=0 (заряд заборонено /
-  // повний) → SOC=100. Обидва 0 (нема даних) → SOC=0 (чесний «не запрошуй»).
+  // DCL=0 (розряд заборонено / порожній) → SOC=0;
+  // Повний заряд (charge_cell_ov_inhibit або bms_soc >= 99 при CCL=0) → SOC=100.
+  // Заборона заряду холодом (< +2°C) не форсує 100%, зберігаючи актуальний SOC.
   uint8_t can_soc = bms_soc;
   if (discharge_current_limit == 0) {
     can_soc = 0;
@@ -1847,7 +1898,7 @@ static void send_all_frames(void) {
     // Retain cell-based OCV calculation, capped at 98% until session completes successfully.
     if (can_soc > 98)
       can_soc = 98;
-  } else if (charge_current_limit == 0) {
+  } else if (charge_cell_ov_inhibit || (bms_soc >= 99 && charge_current_limit == 0)) {
     can_soc = 100;
   }
   put_u16le(&data[0], can_soc);
