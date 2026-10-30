@@ -217,33 +217,75 @@ def decode_dev_info_block(regs: list) -> dict:
 
 
 # 15S LiFePO4 OCV-таблиця калібрована під Vision V-LFP48100 (ізоморфно до src/main.cpp)
-LFP_OCV_TABLE = [
-    (3600, 100.0),
-    (3450, 95.0),
-    (3400, 90.0),
-    (3340, 75.0),
-    (3320, 60.0),
-    (3300, 50.0),
-    (3285, 31.0),
-    (3250, 20.0),
-    (3200, 10.0),
+# ===== 3-режимний адаптивний розрахунок SOC (Заряд / Розряд / Спокій) =====
+LFP_CHARGE_TABLE = [
+    (3550, 100.0),
+    (3480, 95.0),
+    (3420, 88.0),
+    (3385, 78.0),
+    (3365, 65.0),
+    (3345, 50.0),
+    (3320, 35.0),
+    (3280, 20.0),
+    (3150, 10.0),
+    (2900, 0.0),
+]
+
+LFP_DISCHARGE_TABLE = [
+    (3360, 100.0),
+    (3300, 90.0),
+    (3280, 80.0),
+    (3250, 60.0),
+    (3220, 40.0),
+    (3180, 25.0),
+    (3100, 15.0),
     (3000, 5.0),
+    (2850, 0.0),
+]
+
+LFP_REST_TABLE = [
+    (3450, 100.0),
+    (3380, 99.0),
+    (3350, 90.0),
+    (3330, 80.0),
+    (3300, 65.0),
+    (3280, 50.0),
+    (3250, 35.0),
+    (3220, 20.0),
+    (3150, 10.0),
     (2900, 0.0),
 ]
 
 
-def soc_from_cell_mv(mv: int) -> float:
-    if mv >= LFP_OCV_TABLE[0][0]:
-        return 100.0
-    if mv <= LFP_OCV_TABLE[-1][0]:
-        return 0.0
-    for i in range(1, len(LFP_OCV_TABLE)):
-        if mv >= LFP_OCV_TABLE[i][0]:
-            mv_hi, soc_hi = LFP_OCV_TABLE[i - 1]
-            mv_lo, soc_lo = LFP_OCV_TABLE[i]
+def interpolate_table(table: list, mv: int) -> float:
+    if mv >= table[0][0]:
+        return table[0][1]
+    if mv <= table[-1][0]:
+        return table[-1][1]
+    for i in range(1, len(table)):
+        if mv >= table[i][0]:
+            mv_hi, soc_hi = table[i - 1]
+            mv_lo, soc_lo = table[i]
             frac = (mv - mv_lo) / (mv_hi - mv_lo)
             return round(soc_lo + frac * (soc_hi - soc_lo), 1)
     return 0.0
+
+
+def calc_adaptive_soc(avg_cell_mv: int, min_cell_mv: int, max_cell_mv: int, current_a: float, pack_v: float) -> float:
+    # У Modbus (Vision): current > 0.5 A — заряд, current < -0.5 A — розряд
+    if current_a > 0.5:
+        soc = interpolate_table(LFP_CHARGE_TABLE, avg_cell_mv)
+        if pack_v >= 53.5 and max_cell_mv >= 3550 and current_a < 1.0:
+            soc = 100.0
+        elif soc >= 100.0:
+            soc = 99.0
+    elif current_a < -0.5:
+        soc = interpolate_table(LFP_DISCHARGE_TABLE, avg_cell_mv)
+        if min_cell_mv <= 2750:
+            soc = 0.0
+    else:
+        soc = interpolate_table(LFP_REST_TABLE, avg_cell_mv)
+    return round(soc, 1)
 
 
 def decode_regs(regs: list) -> dict:
@@ -262,15 +304,19 @@ def decode_regs(regs: list) -> dict:
                  "Standby" if low == 0 else f"Unknown({low:#04x})")
     info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
     min_c = min(alive)
-    real_soc = soc_from_cell_mv(min_c) if min_c > 0 else None
+    max_c = max(alive)
+    avg_c = int(round(sum(alive) / len(alive))) if alive else min_c
+    volts = regs[0] / 100.0 if n > 0 else 0.0
+    curr = s16(regs[1]) / 100.0 if n > 1 else 0.0
+    real_soc = calc_adaptive_soc(avg_c, min_c, max_c, curr, volts) if min_c > 0 else None
     return {
-        "voltage": regs[0] / 100.0 if n > 0 else 0.0,
-        "current": s16(regs[1]) / 100.0 if n > 1 else 0.0,
+        "voltage": volts,
+        "current": curr,
         "cells": cells,
         "cell_num": cell_num,
         "cell_min": min_c,
-        "cell_max": max(alive),
-        "cell_diff": max(alive) - min(alive),
+        "cell_max": max_c,
+        "cell_diff": max_c - min_c,
         "temp_pcb": s16(r(18, 0)),
         "temp_avg": s16(r(19, 0)),
         "temp_max": s16(r(20, 0)),

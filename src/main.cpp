@@ -150,54 +150,110 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define PACK_V_DELTA_STOP_10MV 300
 #define PACK_V_DELTA_REENABLE_10MV 250
 
-// ===== SOC з напруги комірок (P1.1, 22.10.2026) =====
-// Заводський SOC Vision (рег 24) мертвий — зависає на 100% навіть за
-// розряду до 3.43 В/комірку (польові логи 22.10: SOC=100 при мін 3425 мВ).
-// Тому 0x355 SOC рахується з мінімальної (найгіршої) комірки за LFP
-// OCV-таблицею (25 °C) з EMA-згладжуванням (α=1/8 ≈ 8 sweep-ів). Мінімальна
-// комірка — консервативний вибір: інвертор ніколи не бачить більше, ніж є.
-// Обмеження: плоска ділянка LFP 3.33–3.38 В дає похибку ±10%; просідання
-// напруги під навантаженням тимчасово занижує SOC — EMA вирівнює.
-// Валідність лише для 15S LFP (Vision); для інших хімій/серий — своя таблиця.
-// Відкалібровано за реальними фактами акумуляторів Vision V-LFP48100:
-// 3285 мВ = 31% (скріншот BMS_TOOLS), 3300 мВ = 50% (дамп 3297 мВ = 49-50%).
-static const struct {
+// ===== 3-режимний адаптивний розрахунок SOC (Заряд / Розряд / Спокій) =====
+// Враховує електрохімічний гістерезис LiFePO4 та вплив струму на напругу:
+// 1. Заряд (bms_current < -0.5A): напруга піднята струмом (50.5 В ≈ 65%).
+// 2. Розряд (bms_current > +0.5A): напруга просідає під навантаженням.
+// 3. Спокій (|bms_current| <= 0.5A): класична OCV-таблиця розімкнутого кола.
+// Валідність: 15S LiFePO4 (Vision V-LFP48100).
+struct SocPoint {
   uint16_t mv;
   uint8_t soc;
-} lfp_ocv_table[] = {
-    {3600, 100}, // 100% — верхня точка повного заряду (Float hold 3.56..3.60 В)
-    {3450, 95},
-    {3400, 90},  // 90% — початок балансування (балансир вмикається від 3.400 В)
-    {3340, 75},
-    {3320, 60},
-    {3300, 50},  // 50% при 3.300 В (підтверджено дампом 08.10: 3297 мВ = 49%)
-    {3285, 31},  // 31% при 3.285 В (підтверджено скріном BMS_TOOLS: 31% / 31 А·ч)
-    {3250, 20},
-    {3200, 10},  // початок стрімкого завалу напруги LFP
-    {3000, 5},   // перехід до коліна розряду (Release поріг 3000 мВ)
-    {2900, 0},   // 0% — Soft Warning поріг (2900 мВ)
 };
+
+// Таблиця ЗАРЯДУ (під струмом ~0.05C - 0.15C, 5..15 А)
+static const SocPoint lfp_charge_table[] = {
+    {3550, 100}, // Верхня точка активного заряду (верхнє коліно)
+    {3480, 95},  // Початок крутого підйому напруги
+    {3420, 88},  // Зона перед коліном
+    {3385, 78},  // Верхня полиця заряду
+    {3365, 65},  // 50.5 В / 15 = 3367 мВ -> точно відповідає реальним ~65%
+    {3345, 50},  // Середина заряду
+    {3320, 35},  // Нижня полиця
+    {3280, 20},
+    {3150, 10},
+    {2900, 0},
+};
+
+// Таблиця РОЗРЯДУ (під побутовим навантаженням ~0.1C - 0.3C, 10..30 А)
+static const SocPoint lfp_discharge_table[] = {
+    {3360, 100},
+    {3300, 90},
+    {3280, 80},
+    {3250, 60},
+    {3220, 40},
+    {3180, 25},
+    {3100, 15},
+    {3000, 5},
+    {2850, 0},
+};
+
+// Таблиця СПОКОЮ (Relaxed OCV, струм |I| <= 0.5 А)
+static const SocPoint lfp_rest_table[] = {
+    {3450, 100},
+    {3380, 99},
+    {3350, 90},
+    {3330, 80},
+    {3300, 65},
+    {3280, 50},
+    {3250, 35},
+    {3220, 20},
+    {3150, 10},
+    {2900, 0},
+};
+
 static int16_t soc_ema_x8 = 0;   // SOC у 1/8 % для EMA без дробів
 static bool soc_ema_valid = false;
 
-static uint8_t soc_from_cell_mv(uint16_t cell_mv) {
-  uint8_t n = sizeof(lfp_ocv_table) / sizeof(lfp_ocv_table[0]);
-  if (cell_mv >= lfp_ocv_table[0].mv)
-    return 100;
-  if (cell_mv <= lfp_ocv_table[n - 1].mv)
-    return 0;
+static uint8_t interpolate_soc(const SocPoint *table, uint8_t n, uint16_t mv) {
+  if (mv >= table[0].mv)
+    return table[0].soc;
+  if (mv <= table[n - 1].mv)
+    return table[n - 1].soc;
   for (uint8_t i = 1; i < n; i++) {
-    if (cell_mv >= lfp_ocv_table[i].mv) {
-      uint16_t mv_hi = lfp_ocv_table[i - 1].mv;
-      uint16_t mv_lo = lfp_ocv_table[i].mv;
-      uint8_t soc_hi = lfp_ocv_table[i - 1].soc;
-      uint8_t soc_lo = lfp_ocv_table[i].soc;
+    if (mv >= table[i].mv) {
+      uint16_t mv_hi = table[i - 1].mv;
+      uint16_t mv_lo = table[i].mv;
+      uint8_t soc_hi = table[i - 1].soc;
+      uint8_t soc_lo = table[i].soc;
       return (uint8_t)(soc_lo +
-                       (uint16_t)(soc_hi - soc_lo) * (cell_mv - mv_lo) /
+                       (uint16_t)(soc_hi - soc_lo) * (mv - mv_lo) /
                            (mv_hi - mv_lo));
     }
   }
   return 0;
+}
+
+static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
+                                 uint16_t max_cell_mv, float current_a,
+                                 float pack_v) {
+  uint8_t soc = 0;
+  // Deye CAN: current < -0.5A is charge, current > +0.5A is discharge
+  if (current_a < -0.5f) {
+    uint8_t n = sizeof(lfp_charge_table) / sizeof(lfp_charge_table[0]);
+    soc = interpolate_soc(lfp_charge_table, n, avg_cell_mv);
+    // Tail Current Anchor: 100% only if pack V >= 53.5V, max cell >= 3.55V, and current dropped < 1A
+    if (pack_v >= 53.5f && max_cell_mv >= 3550 && current_a > -1.0f) {
+      soc = 100;
+    } else if (soc >= 100) {
+      soc = 99; // do not jump to 100% while charge current is still strong
+    }
+  } else if (current_a > 0.5f) {
+    uint8_t n = sizeof(lfp_discharge_table) / sizeof(lfp_discharge_table[0]);
+    soc = interpolate_soc(lfp_discharge_table, n, avg_cell_mv);
+    if (min_cell_mv <= CELL_DISCHARGE_STOP_MV) {
+      soc = 0;
+    }
+  } else {
+    uint8_t n = sizeof(lfp_rest_table) / sizeof(lfp_rest_table[0]);
+    soc = interpolate_soc(lfp_rest_table, n, avg_cell_mv);
+  }
+
+  // Under-voltage safety floor
+  if (min_cell_mv != 0xFFFF && min_cell_mv <= CELL_UV_WARN_MV && soc > 10) {
+    soc = 10;
+  }
+  return soc;
 }
 
 // Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C.
@@ -352,6 +408,8 @@ static uint8_t bms_pack_count = 0;
 static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
 static uint32_t agg_soh_sum = 0;
+static uint32_t agg_soc_sum = 0;
+static uint8_t agg_soc_count = 0;
 static float agg_temp_max = -1000.0f;
 static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
@@ -563,6 +621,7 @@ static bool bms_parse_response(uint8_t expected_addr);
 static void bms_advance_poll_address(uint32_t now);
 static void bms_aggregate_data(void);
 static void agg_reset(void);
+static int16_t round_to_i16(float v);
 
 static void pcs_uart_init(void) {
   rcu_periph_clock_enable(RCU_GPIOD);
@@ -1035,6 +1094,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // Кулонометр Vision (рег 24) ненадійний/зависає; CAN-SOC (0x355) та UV-захист (0x359)
   // базуються виключно на фізичних вимірах напруги комірок.
   uint16_t raw_soh = (uart_rx_buffer[49] << 8) | uart_rx_buffer[50];
+  uint16_t raw_soc = (uart_rx_buffer[51] << 8) | uart_rx_buffer[52];
 
   if (raw_voltage > 0) {
     if (raw_voltage > agg_max_pack_v)
@@ -1178,6 +1238,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
     agg_voltage_sum += raw_voltage / 100.0f;
     agg_current_sum += raw_current / 100.0f;
     agg_soh_sum += (uint8_t)(raw_soh & 0xFF);
+    if (raw_soc <= 100) {
+      agg_soc_sum += raw_soc;
+      agg_soc_count++;
+    }
     agg_count++;
     if (pack_charge_ok)
       agg_charge_capable_count++;
@@ -1401,7 +1465,7 @@ static void balance_update(uint8_t packs) {
     bal_outage_start_ms = 0;
     bal_best_spread_mv = 0xFFFF;
     bal_last_improve_ms = now;
-    bal_float_hold = true;
+    bal_float_hold = false;
     bal_trickle = true;
   } else if (!forced && bal_forced_prev) {
     bal_forced_prev = false;
@@ -1441,21 +1505,6 @@ static void balance_update(uint8_t packs) {
   }
 
   if (bal_session_active) {
-    if (forced) {
-      bal_float_hold = true;
-      bal_trickle = true;
-      calc_taper_start_mv = CELL_TAPER_START_MV;
-      calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
-      calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
-      if (spread <= BAL_SPREAD_EXIT_MV) {
-        if (bal_exit_streak < 255)
-          bal_exit_streak++;
-      } else {
-        bal_exit_streak = 0;
-      }
-      return;
-    }
-
     // Active BMS Protect Mode (Status Protect / Hardware error): pause session
     // so inverter does not continuously hammer open charge MOSFETs with Request Full Charge (0x88)
     if (bank_any_pack_protect) {
@@ -1468,6 +1517,26 @@ static void balance_update(uint8_t packs) {
       calc_taper_start_mv = profile_taper_start_mv;
       calc_charge_stop_mv = profile_charge_stop_mv;
       calc_charge_reenable_mv = profile_charge_reenable_mv;
+      return;
+    }
+
+    if (forced) {
+      bal_trickle = true;
+      calc_taper_start_mv = CELL_TAPER_START_MV;
+      calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
+      calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
+      // Dynamic Float Hold: engage 51.6V clamp once cell touches hold threshold (3.56V)
+      if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
+        bal_float_hold = true;
+      } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
+        bal_float_hold = false;
+      }
+      if (spread <= BAL_SPREAD_EXIT_MV) {
+        if (bal_exit_streak < 255)
+          bal_exit_streak++;
+      } else {
+        bal_exit_streak = 0;
+      }
       return;
     }
 
@@ -1689,6 +1758,8 @@ static void agg_reset(void) {
   agg_voltage_sum = 0.0f;
   agg_current_sum = 0.0f;
   agg_soh_sum = 0;
+  agg_soc_sum = 0;
+  agg_soc_count = 0;
   agg_temp_max = -1000.0f;
   agg_temp_min = 1000.0f;
   agg_count = 0;
@@ -1726,15 +1797,44 @@ static void bms_aggregate_data(void) {
   // Deye PCS CAN V3.3: 0x356 current is discharge positive, charge negative.
   bms_current = BMS_CURRENT_CHARGE_IS_POSITIVE ? -agg_current_sum
                                                : agg_current_sum;
-  // P1.1: SOC з мінімальної комірки (мертвий рег 24 BMS не використовується);
-  // перший sweep — snap без фільтра, далі EMA α=1/8.
+
+  // 3-режимний адаптивний розрахунок SOC + Smart Coulomb Fallback
   if (agg_min_cell_mv != 0xFFFF) {
-    uint8_t soc_now = soc_from_cell_mv(agg_min_cell_mv);
+    uint16_t avg_cell_mv = (uint16_t)round_to_i16((bms_voltage * 1000.0f) / 15.0f);
+    if (avg_cell_mv == 0)
+      avg_cell_mv = agg_min_cell_mv;
+
+    uint8_t adaptive_soc = calc_adaptive_soc(
+        avg_cell_mv, agg_min_cell_mv, agg_max_cell_mv, bms_current, bms_voltage);
+
+    // Перевірка стану кулонометра BMS (рег 24):
+    // Якщо BMS рапортує 100% при напрузі < 53.0 В — кулонометр вважається завислим.
+    uint8_t bms_raw_soc = (agg_soc_count > 0)
+                              ? (uint8_t)(agg_soc_sum / agg_soc_count)
+                              : 0xFF;
+    bool bms_coulomb_stuck = (bms_raw_soc >= 99 && bms_voltage < 53.0f);
+
+    uint8_t soc_target = adaptive_soc;
+    if (bms_raw_soc <= 100 && !bms_coulomb_stuck && bms_raw_soc > 0) {
+      soc_target = bms_raw_soc;
+    }
+
     if (!soc_ema_valid) {
-      soc_ema_x8 = (int16_t)soc_now * 8;
+      soc_ema_x8 = (int16_t)soc_target * 8;
       soc_ema_valid = true;
     } else {
-      soc_ema_x8 += ((int16_t)soc_now * 8 - soc_ema_x8) / 8;
+      int16_t target_x8 = (int16_t)soc_target * 8;
+      // Rate limiter: максимум 1% (8 восьмих) за такт у робочому діапазоні (захищає від ривків)
+      if (soc_target > 0 && soc_target < 100) {
+        int16_t delta = target_x8 - soc_ema_x8;
+        if (delta > 8)
+          delta = 8;
+        else if (delta < -8)
+          delta = -8;
+        soc_ema_x8 += delta;
+      } else {
+        soc_ema_x8 += (target_x8 - soc_ema_x8) / 8;
+      }
     }
     bms_soc = (uint8_t)((soc_ema_x8 + 4) / 8);
   }
@@ -1889,7 +1989,7 @@ static void send_all_frames(void) {
   // ігнорує CCL/DCL і розряджає до SOC=0. Дзеркалити ліміти в SOC:
   // DCL=0 (розряд заборонено / порожній) → SOC=0;
   // Повний заряд (charge_cell_ov_inhibit або bms_soc >= 99 при CCL=0) → SOC=100.
-  // Заборона заряду холодом (< +2°C) не форсує 100%, зберігаючи актуальний SOC.
+  // Заборона заряду холодом (< +2°C) форсує 100%, гарантуючи відсікання заряду в Deye off-grid.
   uint8_t can_soc = bms_soc;
   if (discharge_current_limit == 0) {
     can_soc = 0;
@@ -1898,6 +1998,9 @@ static void send_all_frames(void) {
     // Retain cell-based OCV calculation, capped at 98% until session completes successfully.
     if (can_soc > 98)
       can_soc = 98;
+  } else if (charge_temp_inhibit) {
+    // Failsafe: Deye off-grid ignores CCL=0. Force SOC=100 so Deye stops charging cold battery (< +2°C)!
+    can_soc = 100;
   } else if (charge_cell_ov_inhibit || (bms_soc >= 99 && charge_current_limit == 0)) {
     can_soc = 100;
   }
