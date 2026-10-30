@@ -1321,8 +1321,8 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 table.tbl th{padding:8px 10px;border-bottom:1px solid var(--border);color:var(--dim);text-align:left;font-size:11px;text-transform:uppercase}
 table.tbl td{padding:9px 10px;border-bottom:1px solid #21262d;font-variant-numeric:tabular-nums}
 table.tbl tr:hover{background:#1f262e}
-table.kv td{padding:3px 10px 3px 0;color:var(--dim)}
-table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-align:right}
+table.kv td{padding:4px 8px 4px 0;color:var(--dim);vertical-align:top;white-space:nowrap}
+table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-align:right;white-space:normal;word-break:break-all}
 
 /* LEDs */
 .leds{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
@@ -1393,7 +1393,7 @@ canvas{width:100%;height:auto;display:block}
   <div class="controls">
     <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
-    <button class="btn-inverter" onclick="openInverterModal()">⚙️ Уставки інвертора</button>
+    <button class="btn-inverter" onclick="openInverterModal()">⚙️ Налаштування інвертора</button>
     <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
   </div>
 </header>
@@ -1615,11 +1615,11 @@ canvas{width:100%;height:auto;display:block}
 
     <div class="card">
       <h2>📝 CSV-лог цієї АКБ</h2>
-      <table class="kv">
-        <tr><td>Файл</td><td id="p_logpath">—</td></tr>
+      <table class="kv" style="width:100%">
+        <tr><td style="width:110px">Файл</td><td id="p_logpath" style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--acc);word-break:break-all">—</td></tr>
         <tr><td>Записано рядків</td><td id="p_logrows">0</td></tr>
         <tr><td>Alarm / Work</td><td><span id="p_log_alarm">0</span> / <span id="p_log_work">0</span></td></tr>
-        <tr><td>Останній запис</td><td id="p_logts">—</td></tr>
+        <tr><td>Останній запис</td><td id="p_logts" style="font-size:12px">—</td></tr>
       </table>
       <div style="margin-top:10px">
         <button id="p_logbtn" onclick="togglePackLog()">Старт запису</button>
@@ -2694,7 +2694,7 @@ function openInverterModal() {
   let html = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
       <div>
-        <h2 style="margin:0;font-size:20px;color:var(--fg)">⚙️ Рекомендовані уставки для інвертора</h2>
+        <h2 style="margin:0;font-size:20px;color:var(--fg)">⚙️ Рекомендовані налаштування для інвертора</h2>
         <div style="color:var(--dim);font-size:12px;margin-top:4px">
           Deye · Victron · Luxpower · Growatt · Voltronic для <b>${packCount} АКБ (${cellCount}S LiFePO4, ${capAh} А·ч / ~${kwh} кВт·год)</b>
         </div>
@@ -2774,7 +2774,7 @@ function closeInverterModal() {
 }
 
 function copyInverterSettings(packs, cells, bulk, floatV, cutoff, iOpt, iMax, iDis) {
-  const text = `=== Уставки інвертора для Vision BMS (${packs}x АКБ, ${cells}S LiFePO4) ===\n` +
+  const text = `=== Налаштування інвертора для Vision BMS (${packs}x АКБ, ${cells}S LiFePO4) ===\n` +
     `Bulk / Absorption: ${bulk} V\n` +
     `Float: ${floatV} V\n` +
     `Low Battery Cut-off: ${cutoff} V\n` +
