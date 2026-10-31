@@ -1,55 +1,68 @@
-# Project Engineering Rules (ub-mode by Robert C. Martin / Uncle Bob)
+# Project Engineering Rules & Agent Guidelines
 
-All AI agents working on this project (Antigravity, OpenCode, Claude Code, Cursor) must automatically follow the **ub-mode** disciplined software engineering principles on every code modification.
+> **Проект:** COMBOX & Vision BMS Monitor  
+> **Цільові агенти:** Antigravity, OpenCode, Claude Code, Cursor  
+> **Стандарт розробки:** ub-mode (Robert C. Martin / Uncle Bob) + Hardware Safety + Token Economy
 
----
-
-## 1. First Make it Work
-
-### Laziness Protocol & Minimal Edits
-* One decision lives in one place.
-* Ship the smallest edit that solves the problem. Do not make unrelated refactorings or introduce bloated abstractions.
-
-### Foundational Thinking & Data Flow
-* Get the data shape right before writing or modifying logic.
-* If a concurrent writer or shared state would cause race conditions, eliminate shared mutable state.
-
-### TDD & Verification
-* Write the failing test or reproduction script **before** changing the code.
-* Verify that it fails for the exact reason expected.
-* Make the smallest change that makes it pass.
-* If an honest, meaningful test is impractical, do not write a fake or hollow test.
-
-### Boundary Discipline & Domain Modeling
-* Check and validate data strictly at the system boundaries (where it enters from serial, network, user input).
-* Inside the system, trust validated data and keep business logic in pure, predictable functions.
-* Make illegal states unrepresentable in data structures.
-* Make operations idempotent (re-running or recovering from a crash halfway through ends in the same safe state).
+Всі ШІ-агенти, які працюють у цьому репозиторії, зобов'язані **автоматично** дотримуватись наведених нижче правил при кожному запиті та модифікації коду.
 
 ---
 
-## 2. Then Make it Right
+## 1. Економія токенів та гігієна контексту (Token Economy)
 
-### Fix Root Causes (No Masking)
-* Reproduce the issue first.
-* Fix the true root cause.
-* **A guard, `try/except: pass`, or `if (val != null)` that only hides the crash without addressing why bad data occurred is strictly forbidden and is NOT a fix.**
-
-### Test Behavior, Not Implementation
-* Tests must verify external behavior and real contracts.
-* **If a test would still pass when every function returned nothing (void/None), that test is useless and must be removed or rewritten.**
-
-### Clean Code & Quality Gates
-* Keep functions small, focused, and below cyclomatic complexity threshold (CRAP < 10).
-* Eliminate duplicate code and logic patterns (structural similarity < 0.8).
-* Cover edge cases and eliminate dead or unreachable code.
-* *(Note: If CLI tools `crapper`, `dryer`, or `mutator` are not installed in the environment, enforce these quality principles directly through careful code design).*
+1. **Цільове читання файлів (No Bloat):**
+   - Заборонено читати великі файли (> 100 рядків) цілком, якщо потрібен конкретний фрагмент.
+   - Використовувати пошук за ключовими словами (`grep -n`, `ripgrep`) або діапазони рядків (`StartLine`/`EndLine`, `sed -n`).
+2. **Лаконічність без «води»:**
+   - Відповідати стисло, структуровано, українською мовою.
+   - Не виводити в чат гігантські полотна незміненого коду. Показувати лише точний diff або змінений блок.
+3. **Очищення робочого простору:**
+   - Тимчасові скрипти та файли тестів видаляти одразу після перевірки.
+   - Не залишати зомбі-процесів чи завислих портів (перевіряти за собою).
 
 ---
 
-## 3. Follow Practice
+## 2. Інженерна дисципліна (ub-mode by Uncle Bob)
 
-### Clarity & Atomic Commits
-* Explain the reasoning: state the root cause, what changed, and how it was verified.
-* Keep git commits small, ordered, and atomic.
-* Preserve project stability and documentation integrity.
+### А. First Make it Work (Спершу зроби, щоб працювало)
+* **Laziness Protocol (Мінімалізм):** Одне рішення живе в одному місці. Роби **найменшу точкову правку**, яка вирішує задачу. Заборонено робити непов'язані «рефакторинги» чи додавати зайві абстракції.
+* **TDD / Відтворення перед зміною:** Перед будь-якою зміною коду обов'язково створи сценарій/тест або команду, що стабільно відтворює баг, і переконайся, що він падає з очікуваної причини.
+* **Чесні тести:** Якщо тест проходить, коли функція взагалі нічого не повертає або повертає пустий результат — такий тест є фіктивним і підлягає видаленню чи повному переписуванню.
+* **Boundary Discipline:** Валідуй дані жорстко на вході (RS485, CAN, UART, користувацький ввід). Всередині ядра працюй лише з чистими, перевіреними структурами.
+* **Ідемпотентність:** Повторний виклик операції або перезапуск після збою на середині повинен гарантовано залишати систему в узгодженому та безпечному стані.
+
+### Б. Then Make it Right (Потім зроби правильно)
+* **Корінь проблеми (No Bug Masking):** Заборонено приховувати помилки!
+  - `try/except: pass` без відновлення або сліпе обгортання `if (val != null)` без розуміння, звідки взялися некоректні дані — **суворо заборонено**.
+* **Clean Code & Складність:** Тримати функції короткими та сфокусованими (цикломатична складність CRAP < 10, дублювання коду < 0.8).
+* **Стійкість протоколів:** Пасивний режим (Sniffer) шини RS485 зобов'язаний бути строго Read-Only (0 байт передачі на шину, щоб уникнути колізій з COMBOX).
+
+---
+
+## 3. Безпека заліза та батарей (Hardware Safety First)
+
+1. **Критичні пороги LiFePO4:**
+   - Максимальна напруга комірки (Cell OVP): **3.65 В** (абсолютний максимум).
+   - Мінімальна напруга комірки (Cell UVP): **2.50 В**.
+   - Температурний захист від заряду на морозі: заборона заряду при **< +2 °C** (charge_temp_inhibit).
+2. **Незмінність заводських констант:** Заборонено змінювати перевірені апаратні піни (UART, CAN, GPIO), адресацію Modbus RTU (0x01..0x10) або алгоритми безпеки без явної вказівки користувача.
+
+---
+
+## 4. Обов'язковий фінал кожної задачі (Mandatory Definition of Done)
+
+Будь-яка зміна вважається завершеною **тільки тоді**, коли виконано ВСІ наступні кроки:
+
+1. **Верифікація коду:**
+   - Для Python: перевірка компіляції (`python3 -m py_compile <file>`) та запуск selftest/тестів.
+   - Для C++: успішна збірка PlatformIO (`pio run`). Якщо змінювався firmware C++ — оновити скомпільовані бінарники в `compiled_firmware/` та `compiled_firmware_app/`.
+2. **Синхронізація документації (Docs in Sync):**
+   - Якщо змінено логіку, алгоритми (SOC, DIP4, балансир) або функціонал інструментів — **обов'язково оновити**:
+     * `USER_MANUAL.md` (та перегенерувати `USER_MANUAL.html` / `USER_MANUAL.pdf` за потреби через `python3 tools/export_manual_pdf.py`).
+     * `README.md`
+     * Відповідні файли документації: `BALANCE_AUTO.md`, `SAFETY_AND_ALARMS.md`, `IMPROVEMENTS_TODO.md` або `tools/BMS_WEB_README.md`.
+3. **Атомарний Git Commit:**
+   - Сформувати лаконічний, чіткий коміт у форматі Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`).
+   - У повідомленні обов'язково зазначити: суть кореневої причини, що саме змінено і як це верифіковано.
+4. **Обов'язковий Push:**
+   - Виконати **`git push origin main`** одразу після успішного коміту.
