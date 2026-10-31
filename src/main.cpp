@@ -414,6 +414,7 @@ static float agg_temp_max = -1000.0f;
 static float agg_temp_min = 1000.0f;
 static uint8_t agg_count = 0;
 static uint8_t agg_charge_capable_count = 0;
+static uint8_t agg_discharge_capable_count = 0;
 static uint16_t agg_max_cell_mv = 0;
 static uint16_t agg_min_cell_mv = 0xFFFF;
 static uint16_t agg_max_pack_v = 0;
@@ -1168,16 +1169,24 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
   // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
-  // so that activating the 90% software taper profile never generates false emergency cell OV alarms:
-  if ((reg_protect & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
+  // so that activating the 90% software taper profile never generates false emergency cell OV alarms.
+  // In Pylontech/Deye protocol, byte 0 CAN_PROT_CELL_OV / PACK_OV are fatal trip conditions that shut down
+  // EPS/backup inverter output. Charge cutoff is cleanly and safely handled via CCL=0 and 0x35C flags (0x80=0).
+  // Therefore, cell/pack OV is reported in CAN alarm byte 2 (warning/alarm), and only promoted to fatal protect
+  // if confirmed emergency overvoltage (>= 3650 mV absolute limit) is breached across the bank.
+  if (((reg_protect & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV) ||
+      ((reg_warning & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)) {
+    sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+  }
+  if (pack_max_cell_mv >= 3650 || ((reg_protect & 0x0001) && raw_voltage >= 5500)) {
     sweep_protect_b0 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
+  }
+
   // Cell UV Protect (0x359 b0): triggers proactively at <= 2750 mV (ahead of BMS 2500 mV)
   // or if confirmed by BMS hardware alarm:
   if (pack_min_cell_mv <= CELL_DISCHARGE_STOP_MV ||
       ((reg_protect & 0x0008) && pack_min_cell_mv <= CELL_UV_WARN_MV))
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
-  if ((reg_protect & 0x0001) && raw_voltage >= 5450)
-    sweep_protect_b0 |= CAN_PROT_PACK_OV;
   if ((reg_protect & 0x0004) && raw_voltage <= 4320)
     sweep_protect_b0 |= CAN_PROT_CELL_UV;
   if ((reg_protect & 0x0300) || pack_t_max >= TEMP_DISCHARGE_MAX_C)
@@ -1191,12 +1200,13 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   if (reg_protect & 0x0010)
     sweep_protect_b1 |= CAN_PROT_CHARGE_OC;
-  if ((reg_protect & 0x2000) || (reg_status & 0x0004) || reg_error != 0)
+  // Hardware fatal error (reg_protect & 0x2000 is short circuit/hardware fail, reg_error is non-zero).
+  // Note: reg_status bit 2 (0x0004) is merely a summary bit that BMS is in protect mode (e.g. charge cut off).
+  // We do NOT treat routine charge protect as fatal SYSTEM_ERROR so inverter EPS backup power is never dropped!
+  if ((reg_protect & 0x2000) || reg_error != 0)
     sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
 
   // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
-  if ((reg_warning & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_WARN_CONFIRM_MV)
-    sweep_alarm_b2 |= (CAN_PROT_CELL_OV | CAN_PROT_PACK_OV);
   // Cell UV Warning (0x359 b2): proactive warning <= 2900 mV (ahead of BMS 2800 mV)
   // or if confirmed by BMS warning:
   if (pack_min_cell_mv <= CELL_UV_WARN_MV ||
@@ -1229,8 +1239,21 @@ static bool bms_parse_response(uint8_t expected_addr) {
     pack_charge_ok = false;
   if (pack_t_min < TEMP_CHARGE_MIN_C || pack_t_max > TEMP_CHARGE_MAX_C)
     pack_charge_ok = false;
-  if (reg_error != 0 || (reg_status & 0x0004))
+  if (reg_error != 0)
     pack_charge_ok = false;
+
+  // Exclude pack from discharge capability if active discharge protection/faults latched:
+  // 0x0004 (Pack UV), 0x0008 (Cell UV), 0x0020 (Discharge OC), 0x0200 (Discharge OT),
+  // 0x0800 (Discharge UT), 0x2000 (Hardware/SC error).
+  bool pack_discharge_ok = true;
+  if (reg_protect & 0x2A2C)
+    pack_discharge_ok = false;
+  if (pack_min_cell_mv <= CELL_DISCHARGE_STOP_MV)
+    pack_discharge_ok = false;
+  if (pack_t_min < TEMP_DISCHARGE_MIN_C || pack_t_max > TEMP_DISCHARGE_MAX_C)
+    pack_discharge_ok = false;
+  if (reg_error != 0)
+    pack_discharge_ok = false;
 
   if ((reg_status & 0x0004) || (reg_protect != 0) || (reg_error != 0)) {
     sweep_any_pack_protect = true;
@@ -1250,6 +1273,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
     agg_count++;
     if (pack_charge_ok)
       agg_charge_capable_count++;
+    if (pack_discharge_ok)
+      agg_discharge_capable_count++;
   }
 
   return true;
@@ -1782,6 +1807,7 @@ static void agg_reset(void) {
   agg_temp_min = 1000.0f;
   agg_count = 0;
   agg_charge_capable_count = 0;
+  agg_discharge_capable_count = 0;
   agg_max_cell_mv = 0;
   agg_min_cell_mv = 0xFFFF;
   agg_max_pack_v = 0;
@@ -1897,16 +1923,22 @@ static void bms_aggregate_data(void) {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
 
-  // Passive Dynamic CCL: count only packs whose charge path is open and capable.
+  // Passive Dynamic CCL & DCL: count only packs whose charge and discharge paths are capable.
   // If 1 of 2 packs has charge MOSFET off/standby, CCL scales to 1 pack (40A/50A)
   // so the remaining pack is never overloaded with double current (1C).
-  // Fail-closed: if 0 packs capable, charge_current_limit = 0.
+  // If 1 of 2 packs has discharge protect/standby, DCL scales to remaining capable packs,
+  // preventing the inverter from dropping backup EPS power to the house as long as >= 1 pack is alive.
+  // Fail-closed: if 0 packs capable, limit = 0.
   uint8_t charge_packs = agg_charge_capable_count;
   if (charge_packs > effective_packs)
     charge_packs = effective_packs;
 
+  uint8_t discharge_packs = agg_discharge_capable_count;
+  if (discharge_packs > effective_packs)
+    discharge_packs = effective_packs;
+
   charge_current_limit = calculate_charge_limit(charge_packs);
-  discharge_current_limit = calculate_discharge_limit(effective_packs);
+  discharge_current_limit = calculate_discharge_limit(discharge_packs);
 
   // Set data valid now that fresh aggregated values are computed
   bms_data_valid = true;
