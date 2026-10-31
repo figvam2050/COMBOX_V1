@@ -8,12 +8,12 @@
   3. Перевіряє CRC усіх 16 запитів BMS_QUERY_TABLE (таблиця витягується з
      src/main.cpp, тож синхронізація з джерелом автоматична).
   4. --selftest: будує синтетичний кадр зі значень, задокументованих у
-     ANALYSIS.md (дамп 08.10.2026), і проганяє його через той самий парсер.
+     аналіз.md (дамп 08.10.2026), і проганяє його через той самий парсер.
 
 Використання:
   python3 tools/verify_dump.py --selftest
   python3 tools/verify_dump.py --queries
-  python3 tools/verify_dump.py tools/dumps/bms_2026-10-08.hex
+  python3 tools/verify_dump.py tools/dumps/2026-10-08_pack01.hex
   python3 tools/verify_dump.py - "01 03 4E ... 7A CC"
 
 Файл дампу: один кадр на рядок, hex байти через пробіл/кому/без розділювача;

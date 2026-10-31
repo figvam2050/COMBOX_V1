@@ -1,9 +1,9 @@
 # Автовирівнювач комірок (баланс-сесії 54 В) — опис алгоритму
 
 *Стан: чинно з 18.10.2026 (`BAL_AUTO_ENABLED = 1`; вердикт тесту (А)/(Б) —
-18.10.2026, див. `README.md` §7). Код — `src/main.cpp`: константи `BAL_*`
-(рядки 214–239), рушій `balance_update()` (рядок 1296), кришка тріклу
-у `calculate_charge_limit()` (рядок 1145), LED `balance_led_tick()` (рядок 1483).*
+18.10.2026, див. `README.md` §7). Код — `src/main.cpp`: константи `BAL_*`,
+рушій `balance_update()`, кришка тріклу у `calculate_charge_limit()`,
+LED-індикація `balance_led_tick()`.*
 
 ---
 

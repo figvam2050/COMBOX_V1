@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.2: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.4: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
@@ -887,8 +887,9 @@ class BmsBus:
             for b in parsed["balance_bits"]:
                 if b["on"]:
                     idx = b["n"] - 1
-                    b_list = self.bal_seconds.setdefault(a, [0.0] * 15)
-                    b_list[idx] += POLL_S
+                    b_list = self.bal_seconds.setdefault(a, [0.0] * LOG_CELL_SLOTS)
+                    if idx < len(b_list):
+                        b_list[idx] += POLL_S
 
         # 2. Weak cell tracking (identify chronically lagging cells)
         alive = [c for c in cells if c > 0]
@@ -933,8 +934,8 @@ class BmsBus:
             "raw": regs,
             "parsed": parsed,
             "dev_info": dinfo,
-            "rint": self.rint.get(a, [0.0] * 15),
-            "bal_seconds": [int(s) for s in self.bal_seconds.get(a, [0.0] * 15)],
+            "rint": self.rint.get(a, [0.0] * LOG_CELL_SLOTS),
+            "bal_seconds": [int(s) for s in self.bal_seconds.get(a, [0.0] * LOG_CELL_SLOTS)],
             "err": None,
         }
 
@@ -1989,6 +1990,14 @@ const ALARM_HELP_DB = {
     desc: "Температура комірок нижче -20°C.",
     action: "Експлуатація при сильному морозі знижує корисну ємність і збільшує внутрішній опір."
   },
+  "Low Capacity": {
+    cat: "Protection (0027) / Warning (0026)",
+    title: "Низька ємність / Standby Latch (Low Capacity)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
+    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+  },
   "Low capacity": {
     cat: "Protection (0027) / Warning (0026)",
     title: "Низька ємність / Standby Latch (Low capacity)",
@@ -1996,6 +2005,14 @@ const ALARM_HELP_DB = {
     levelName: "Інформаційний стан",
     desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
     action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+  },
+  "Float stop": {
+    cat: "Warning (0026)",
+    title: "Зупинка буферного режиму (Float Stop)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Буферний режим підзарядки завершено або тимчасово призупинено за таймером BMS.",
+    action: "Штатний процес."
   },
   "Float stopped": {
     cat: "Warning (0026)",
@@ -2007,6 +2024,14 @@ const ALARM_HELP_DB = {
   },
 
   // Protections & Errors (0027 / 0028)
+  "Short Circuit": {
+    cat: "Protection (0027)",
+    title: "Коротке замикання на виході (Short Circuit)",
+    level: "bad",
+    levelName: "Аварія / КЗ",
+    desc: "BMS миттєво відсікла розрядний ключ через виявлення короткого замикання або надструму.",
+    action: "Вимкніть навантаження, перевірте кабелі підключення до інвертора на предмет КЗ. Скидання: вимкнути живлення або підключити зарядний пристрій."
+  },
   "Discharge SC": {
     cat: "Protection (0027)",
     title: "Коротке замикання на виході (Discharge Short Circuit)",

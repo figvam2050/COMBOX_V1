@@ -721,7 +721,7 @@ static void pcs_poll_service(uint32_t now) {
   }
   pcs_uart_rx_service(now);
   if (inv_frame_n == 0 && inv_rx_n != 0 && (now - inv_last_rx_ms) >= PCS_GAP_MS) {
-    if (inv_rx_n >= PCS_NOISE_MIN_LEN && pcs_request_ok(inv_rx)) {
+    if (inv_rx_n == 8 && pcs_request_ok(inv_rx)) {
       memcpy(inv_frame, inv_rx, inv_rx_n);
       inv_frame_n = inv_rx_n;
     }
@@ -1491,16 +1491,28 @@ static void balance_update(uint8_t packs) {
   // Smart Pause & Resume handling: if an auto session was paused by a grid outage / discharge
   // or a pack hardware protect event (Status & 0x04 / Protect != 0),
   // resume if conditions normalize within 30 min and SOC >= 90%; otherwise abort cleanly.
-  if (bal_session_paused && !forced) {
-    if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
-      balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
-    } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit && !bank_any_pack_protect) {
-      uint32_t paused_dur = now - bal_pause_start_ms;
-      bal_session_paused = false;
-      bal_session_active = true;
-      bal_session_start_ms += paused_dur;
-      bal_last_improve_ms = now;
-      bal_outage_start_ms = 0;
+  // For forced DIP4 session, resume immediately once hardware protect clears.
+  if (bal_session_paused) {
+    if (forced) {
+      if (!bank_any_pack_protect && !charge_cell_ov_inhibit && !charge_temp_inhibit) {
+        uint32_t paused_dur = now - bal_pause_start_ms;
+        bal_session_paused = false;
+        bal_session_active = true;
+        bal_session_start_ms += paused_dur;
+        bal_last_improve_ms = now;
+        bal_outage_start_ms = 0;
+      }
+    } else {
+      if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
+        balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
+      } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit && !bank_any_pack_protect) {
+        uint32_t paused_dur = now - bal_pause_start_ms;
+        bal_session_paused = false;
+        bal_session_active = true;
+        bal_session_start_ms += paused_dur;
+        bal_last_improve_ms = now;
+        bal_outage_start_ms = 0;
+      }
     }
   }
 
@@ -1532,10 +1544,16 @@ static void balance_update(uint8_t packs) {
         bal_float_hold = false;
       }
       if (spread <= BAL_SPREAD_EXIT_MV) {
-        if (bal_exit_streak < 255)
-          bal_exit_streak++;
+        if (++bal_exit_streak >= BAL_EXIT_STREAK) {
+          balance_session_end(true, now);
+          return;
+        }
       } else {
         bal_exit_streak = 0;
+      }
+      if ((now - bal_session_start_ms) >= BAL_SESSION_MAX_MS) {
+        balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
+        return;
       }
       return;
     }
@@ -2278,9 +2296,12 @@ int main(void) {
       discharge_current_limit = DISCHARGE_CURRENT_LIMIT_DEFAULT;
       charge_cell_ov_inhibit = false;
       charge_temp_inhibit = false;
+      charge_temp_derate = false;
       discharge_cell_uv_inhibit = false;
       discharge_temp_inhibit = false;
       pack_imbalance_inhibit = false;
+      bank_any_pack_protect = false;
+      sweep_any_pack_protect = false;
       bank_max_cell_mv = 0;
       bank_min_cell_mv = 0xFFFF;
       bank_pack_v_delta_10mv = 0;

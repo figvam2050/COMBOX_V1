@@ -251,10 +251,13 @@ def main():
             for el in to_wrap:
                 container.append(el.extract())
 
-    # 3. Чистий перехід для фінальних розділів: Розділ 10 (PDF експорт) та Додаток 11 (стікер-пам'ятка)
-    sec10 = soup.find(id="10-pdf")
-    if sec10:
-        sec10["style"] = "break-before: page; page-break-before: always;"
+    # 3. Чистий перехід для фінальних розділів: Розділ 11 (PDF експорт) та Додаток 12 (стікер-пам'ятка)
+    sec_pdf = soup.find(id="11-pdf") or soup.find(id="10-pdf")
+    if sec_pdf:
+        sec_pdf["style"] = "break-before: page; page-break-before: always;"
+    sec12 = soup.find(id="12")
+    if sec12:
+        sec12["style"] = "break-before: page; page-break-before: always;"
 
     full_html = f"""<!DOCTYPE html>
 <html lang="uk">

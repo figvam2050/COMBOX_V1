@@ -115,8 +115,8 @@ def decode_vision(regs: list) -> str:
     cell_s = f"cells={min(cells)}-{max(cells)}mV" if cells else "cells=-"
     temps = "/".join(str(regs[i]) for i in (0x12, 0x13, 0x14) if i < n)
     out.append(f"V={volt:.2f} I={cur:g} {cell_s} t={temps} "
-               f"SOC={regs[0x15]} SOH={regs[0x16]}")
-    tail = [f"r{i:02X}={fmt_r(regs[i])}" for i in range(0x17, n)]
+               f"SOC={regs[0x18] if n > 0x18 else '-'} SOH={regs[0x17] if n > 0x17 else '-'}")
+    tail = [f"r{i:02X}={fmt_r(regs[i])}" for i in range(0x19, n)]
     if tail:
         out.append(" ".join(tail))
     return " ".join(out)
@@ -214,8 +214,8 @@ def run_selftest() -> int:
     sn.handle(0.1, f_req[1])
     text = "\n".join(out)
     assert "start=0x0000 qty=39" in text, text
-    assert "V=49.45" in text and "SOC=50" in text and "SOH=100" in text, text
-    assert "cells=3297-3297mV" in text and "r18=49" in text and "r24=15" in text, text
+    assert "V=49.45" in text and "SOC=49" in text and "SOH=100" in text, text
+    assert "cells=3297-3297mV" in text and "r19=0" in text and "r24=15" in text, text
     # inverter-style qty=28 read
     resp28 = mk_resp(2, regs[:28])
     out2 = []
@@ -225,7 +225,7 @@ def run_selftest() -> int:
     assert len(f2) == 1 and not r2
     sn2.handle(0.1, f2[0])
     t2 = "\n".join(out2)
-    assert "SOC=50" in t2 and "r1B=" in t2 and "r24=" not in t2, t2
+    assert "SOC=49" in t2 and "r1B=" in t2 and "r24=" not in t2, t2
     # last_req must switch to 0x50 so the pair decodes as @0x50
     out3 = []
     sn3 = Sniffer(out3)
@@ -345,10 +345,15 @@ def main() -> int:
             print(f"# dropped bursts: {dropped_bursts}")
         if dropped_dups:
             print(f"# dropped duplicate frames: {dropped_dups}")
-        with open(out_path, "w") as fh:
-            fh.write("\n".join(header + out_lines) + "\n")
-        print(f"# written: {out_path} ({len(out_lines)} frames)")
-        ser.close()
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        try:
+            with open(out_path, "w") as fh:
+                fh.write("\n".join(header + out_lines) + "\n")
+            print(f"# written: {out_path} ({len(out_lines)} frames)")
+        finally:
+            ser.close()
     return 0
 
 
