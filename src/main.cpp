@@ -1455,7 +1455,7 @@ static void balance_update(uint8_t packs) {
   // DIP4 Forced Balancing (PB15 / SW4):
   // When DIP4 is ON, immediately engage forced balance session bypassing
   // all auto timers, intervals, and cooldowns.
-  // Hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 0.5..2.0 A/pack,
+  // Immediately hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 0.5..1.0 A/pack,
   // request full charge via CAN 0x35C bit 3.
   if (forced && !bal_forced_prev) {
     bal_forced_prev = true;
@@ -1467,7 +1467,7 @@ static void balance_update(uint8_t packs) {
     bal_outage_start_ms = 0;
     bal_best_spread_mv = 0xFFFF;
     bal_last_improve_ms = now;
-    bal_float_hold = false;
+    bal_float_hold = true;
     bal_trickle = true;
   } else if (!forced && bal_forced_prev) {
     bal_forced_prev = false;
@@ -1504,6 +1504,8 @@ static void balance_update(uint8_t packs) {
         bal_session_start_ms += paused_dur;
         bal_last_improve_ms = now;
         bal_outage_start_ms = 0;
+        bal_float_hold = true;
+        bal_trickle = true;
       }
     } else {
       if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
@@ -1556,27 +1558,17 @@ static void balance_update(uint8_t packs) {
     }
 
     if (forced) {
+      bal_float_hold = true;
       bal_trickle = true;
       calc_taper_start_mv = CELL_TAPER_START_MV;
       calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
       calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
-      // Dynamic Float Hold: engage 51.6V clamp once cell touches hold threshold (3.56V)
-      if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
-        bal_float_hold = true;
-      } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
-        bal_float_hold = false;
-      }
+      // In forced manual mode (DIP4 ON), maintain Float Hold 51.6 V continuously
       if (spread <= BAL_SPREAD_EXIT_MV) {
-        if (++bal_exit_streak >= BAL_EXIT_STREAK) {
-          balance_session_end(true, now);
-          return;
-        }
+        if (bal_exit_streak < 255)
+          bal_exit_streak++;
       } else {
         bal_exit_streak = 0;
-      }
-      if ((now - bal_session_start_ms) >= BAL_SESSION_MAX_MS) {
-        balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
-        return;
       }
       return;
     }
@@ -2217,7 +2209,9 @@ static void dip_charge_profile_apply(uint8_t code) {
   profile_charge_current_per_pack_x10 =
       (code & DIP_CHARGE_CURRENT_LIMIT_30A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_LIMIT_X10
                                             : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
-  if (!(bal_session_active && bal_float_hold)) {
+  if (code & DIP_FORCED_BALANCE_MASK) {
+    charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD;
+  } else if (!(bal_session_active && bal_float_hold)) {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
   dip_applied_code = code;
