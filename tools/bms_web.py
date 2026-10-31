@@ -32,9 +32,9 @@ Features (v2.2):
   - Zero external dependencies beyond standard Python and pySerial.
 
 Usage:
-  python3 tools/bms_web.py
-  python3 tools/bms_web.py --mock
-  python3 tools/bms_web.py --passive
+  python3 tools/bms_web.py           # Запуск за замовчуванням у пасивному режимі (Sniffer, безпечно для шини)
+  python3 tools/bms_web.py --active  # Примусовий активний режим (Master, опитування батареї)
+  python3 tools/bms_web.py --mock    # Демонстраційний режим
   python3 tools/bms_web.py --port COM3
   python3 tools/bms_web.py --selftest
 """
@@ -357,15 +357,18 @@ def parse_bus(buf: bytes):
         if i + 3 > n:
             break
         addr, fc, b2 = buf[i], buf[i + 1], buf[i + 2]
-        if fc != 0x03 or addr == 0:
+        if fc != 0x03 or addr < 1 or addr > 16:
             i += 1
             continue
         if b2 == 0x00:                       # request: start_hi=0, len 8
             ln = 8
             kind = "req"
-        else:                                # response: bytecount + crc
+        elif 10 <= b2 <= 100 and (b2 % 2 == 0):  # valid response byte count (46, 56, 78)
             ln = b2 + 5
             kind = "resp"
+        else:
+            i += 1
+            continue
         if i + ln > n:
             break                            # incomplete
         frame = buf[i:i + ln]
@@ -604,11 +607,11 @@ def get_bank_summary(packs: dict) -> dict:
 
 
 class BmsBus:
-    PASSIVE_STALE_S = 15.0
+    PASSIVE_STALE_S = 35.0
     PASSIVE_GAP_S = 0.15
 
     def __init__(self, port: str, baud: int, initial_addr: int = DEFAULT_ADDR,
-                 mock: bool = False, passive: bool = False):
+                 mock: bool = False, passive: bool = True):
         self.port = port
         self.baud = baud
         self.focus_addr = initial_addr
@@ -624,6 +627,8 @@ class BmsBus:
         self.last_err = None
 
         self._rescan_requested = True
+        self._passive_scan_until = 0.0
+        self._last_rx_t = 0.0
         self._bg_probe_idx = 0
         self._stop = False
         self._mock_t = 0.0
@@ -696,12 +701,19 @@ class BmsBus:
                     self.ser.reset_input_buffer()
                 except Exception:
                     pass
-            if self.mode == "active":
-                self._rescan_requested = True
+            self._rescan_requested = True
+            self.is_scanning = True
+            self.scan_msg = "Запуск сканування 0x01..0x10..." if self.mode == "active" else "Пасивне сканування: слухаю шину RS485..."
+            if self.mode == "passive":
+                self._passive_scan_until = time.time() + 4.0
 
     def request_rescan(self) -> None:
         with self.lock:
             self._rescan_requested = True
+            self.is_scanning = True
+            self.scan_msg = "Запуск сканування 0x01..0x10..." if self.mode == "active" else "Пасивне сканування: слухаю шину RS485..."
+            if self.mode == "passive":
+                self._passive_scan_until = time.time() + 4.0
 
     def _log_state(self, addr: int) -> dict:
         st = self.logs.get(addr)
@@ -1173,6 +1185,31 @@ class BmsBus:
                 time.sleep(2.5)
                 return b""
 
+        now = time.time()
+        with self.lock:
+            if self._rescan_requested:
+                self._rescan_requested = False
+                self.is_scanning = True
+                self.scan_msg = "Пасивне сканування: слухаю шину RS485 (1..16)..."
+                self._passive_scan_until = now + 4.0
+                if self.ser and self.ser.is_open:
+                    try:
+                        self.ser.reset_input_buffer()
+                    except Exception:
+                        pass
+                buf = b""
+
+            if getattr(self, "_passive_scan_until", 0) > 0:
+                if now < self._passive_scan_until:
+                    self.is_scanning = True
+                    self.scan_msg = "Пасивне сканування: слухаю шину RS485 (1..16)..."
+                else:
+                    self.is_scanning = False
+                    self._passive_scan_until = 0
+                    if not self.active_addrs:
+                        self.scan_msg = "Шина мовчить"
+                        self.last_err = "Шина RS485 мовчить. Перемкніть у ⚡ Активний режим для прямого опитування."
+
         if self.mock:
             time.sleep(0.8)
             for a in (1, 2):
@@ -1182,26 +1219,40 @@ class BmsBus:
                 self.log_row(regs, a)
             with self.lock:
                 self.active_addrs = [1, 2]
+                self.is_scanning = False
+                self._passive_scan_until = 0
             return b""
 
         try:
-            chunk = self.ser.read(512)
+            avail = getattr(self.ser, "in_waiting", 0)
+            chunk = self.ser.read(avail if avail > 0 else 1)
             if chunk:
                 buf += chunk
+                self._last_rx_t = now
                 frames, buf = parse_bus(buf)
             else:
-                buf = b""
                 frames = []
+                if (now - getattr(self, "_last_rx_t", now)) > 1.5:
+                    buf = b""
 
-            now = time.time()
             for kind, addr, payload in frames:
-                if kind == "resp" and len(payload) >= 28 and (1 <= addr <= 16):
-                    with self.lock:
-                        self._update_pack_telemetry(addr, payload)
-                        if addr not in self.active_addrs:
-                            self.active_addrs.append(addr)
-                            self.active_addrs.sort()
-                    self.log_row(payload, addr)
+                if kind == "resp" and (1 <= addr <= 16):
+                    if len(payload) >= 28:
+                        with self.lock:
+                            self._update_pack_telemetry(addr, payload)
+                            if addr not in self.active_addrs:
+                                self.active_addrs.append(addr)
+                                self.active_addrs.sort()
+                            self.is_scanning = False
+                            self._passive_scan_until = 0
+                        self.log_row(payload, addr)
+                    elif len(payload) == 23:
+                        dev_info = decode_dev_info_block(payload)
+                        with self.lock:
+                            p = self.packs.setdefault(addr, {})
+                            p["dev_info"] = dev_info
+                            if addr in self.packs:
+                                self.packs[addr]["dev_info"] = dev_info
 
             with self.lock:
                 for a, p in self.packs.items():
@@ -1307,6 +1358,7 @@ h1{font-size:20px;margin:0;display:flex;align-items:center;gap:10px}
 button{background:var(--acc);border:0;color:#0b0f14;padding:7px 14px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px;transition:opacity .15s}
 button:hover{opacity:.9}
 button.off{background:#30363d;color:var(--dim)}
+button:disabled{opacity:.6;cursor:wait}
 .btn-mode{background:#238636;color:#fff;border:1px solid #2ea043}
 .btn-mode.passive{background:#1f6feb;border-color:#388bfd}
 .btn-rescan{background:#21262d;border:1px solid var(--border);color:var(--fg)}
@@ -3275,8 +3327,33 @@ async function toggleMode() {
 }
 
 async function triggerRescan() {
+  const btn = document.querySelector('.btn-rescan');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '🔄 Сканування...';
+  }
+
+  if (latestData && latestData.mode === 'passive') {
+    const doActive = confirm(
+      "Утиліта зараз у ПАСИВНОМУ режимі (Sniffer) — передачу в шину вимкнено, щоб не створювати колізій із COMBOX.\n\n" +
+      "Бажаєте перемкнутися в ⚡ АКТИВНИЙ режим (Master), щоб утиліта сама опитала адреси 0x01..0x10 прямо зараз?"
+    );
+    if (doActive) {
+      await fetch('/api/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'active' })
+      });
+      await fetch('/api/rescan', { method: 'POST' });
+      setTimeout(tick, 100);
+      setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Пересканувати всі 16'; } }, 3000);
+      return;
+    }
+  }
+
   await fetch('/api/rescan', { method: 'POST' });
-  tick();
+  setTimeout(tick, 100);
+  setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Пересканувати всі 16'; } }, 2500);
 }
 
 async function toggleLog() {
@@ -3579,8 +3656,10 @@ def main() -> int:
                     help="initial battery tab address (e.g. 0x01)")
     ap.add_argument("--http", type=int, default=DEFAULT_HTTP)
     ap.add_argument("--mock", action="store_true", help="no serial, mock multi-pack data")
+    ap.add_argument("--active", action="store_true",
+                    help="start in active master polling mode (default is passive sniffer)")
     ap.add_argument("--passive", action="store_true",
-                    help="listen only: parse live bus traffic (no TX, no collisions)")
+                    help="start in passive sniffer mode (default, listen only, no TX)")
     ap.add_argument("--list", action="store_true", help="list serial ports")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -3613,13 +3692,14 @@ def main() -> int:
     elif not port:
         port = "MOCK"
 
-    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=args.passive)
+    is_passive = not args.active
+    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=is_passive)
     threading.Thread(target=bus.loop, daemon=True).start()
     Handler.bus = bus
     srv = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
 
     mode_label = "MOCK MULTI-PACK" if args.mock else (
-        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
+        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if is_passive else "ACTIVE MASTER"))
     print(f"BMS Web Monitor: http://127.0.0.1:{args.http}  [{mode_label}]")
     print("Multi-pack scanning: 0x01..0x10 enabled. Press Ctrl-C to stop.")
     try:

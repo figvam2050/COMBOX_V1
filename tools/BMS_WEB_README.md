@@ -90,12 +90,12 @@ python3 -m pip install pyserial
 
 ```bash
 # Універсальний запуск (macOS, Linux, Windows):
-# Скрипт автоматично знайде потрібний COM/USB порт!
-python3 tools/bms_web.py          # на macOS / Linux
+# Скрипт автоматично знайде потрібний COM/USB порт та запуститься у безпечному ПАСИВНОМУ режимі:
+python3 tools/bms_web.py          # на macOS / Linux (за замовчуванням: Пасивний Sniffer)
 python tools/bms_web.py           # на Windows
 
-# Запуск одразу в пасивному режимі (якщо паралельно працює інвертор):
-python3 tools/bms_web.py --passive
+# Якщо потрібно запустити примусово в АКТИВНОМУ режимі Master (опитування батареї без COMBOX):
+python3 tools/bms_web.py --active
 
 # Якщо порт потрібно вказати примусово вручну:
 python tools/bms_web.py --port COM3               # Windows
