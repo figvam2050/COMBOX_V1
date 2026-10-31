@@ -703,6 +703,11 @@ static bool pcs_request_ok(const uint8_t *f) {
 }
 
 static void pcs_uart_rx_service(uint32_t now) {
+  if (usart_flag_get(PCS_UART, USART_FLAG_ORERR) != RESET ||
+      usart_flag_get(PCS_UART, USART_FLAG_FERR) != RESET ||
+      usart_flag_get(PCS_UART, USART_FLAG_NERR) != RESET) {
+    pcs_clear_errors();
+  }
   while (usart_flag_get(PCS_UART, USART_FLAG_RBNE) != RESET) {
     uint8_t b = (uint8_t)usart_data_receive(PCS_UART);
     pcs_led_activity();
@@ -1973,6 +1978,7 @@ static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
 
   uint32_t tx_start = millis();
   while (can_transmit_states(DEYE_CAN, mbox) == CAN_TRANSMIT_PENDING) {
+    pcs_poll_service(millis());
     if (millis() - tx_start >= 3)
       return;
   }
