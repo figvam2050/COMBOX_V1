@@ -1489,7 +1489,7 @@ canvas{width:100%;height:auto;display:block}
 <header>
   <h1>Vision BMS Multi-Pack Monitor <span id="conn" class="pill">…</span></h1>
   <div class="controls">
-    <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
+    <button id="modebtn" class="btn-mode passive" onclick="toggleMode()">👂 Режим: Пасивний (Sniffer)</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
     <button class="btn-inverter" onclick="openInverterModal()">⚙️ Налаштування інвертора</button>
     <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
@@ -3316,14 +3316,25 @@ async function tick() {
 }
 
 async function toggleMode() {
-  if (!latestData) return;
-  const targetMode = (latestData.mode === 'active') ? 'passive' : 'active';
-  await fetch('/api/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: targetMode })
-  });
-  tick();
+  const mbtn = document.getElementById('modebtn');
+  if (mbtn) {
+    mbtn.disabled = true;
+    mbtn.textContent = '⏳ Перемикання...';
+  }
+  const curPassive = latestData ? (latestData.mode === 'passive') : (mbtn && mbtn.classList.contains('passive'));
+  const targetMode = curPassive ? 'active' : 'passive';
+  try {
+    await fetch('/api/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: targetMode })
+    });
+    await tick();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    if (mbtn) mbtn.disabled = false;
+  }
 }
 
 async function triggerRescan() {
@@ -3335,7 +3346,7 @@ async function triggerRescan() {
 
   if (latestData && latestData.mode === 'passive') {
     const doActive = confirm(
-      "Утиліта зараз у ПАСИВНОМУ режимі (Sniffer) — передачу в шину вимкнено, щоб не створювати колізій із COMBOX.\n\n" +
+      "Утиліта зараз у ПАСИВНОМУ режимі (Sniffer) — передачу в шину вимкнено, щоб не створювати колізій із COMBOX.\\n\\n" +
       "Бажаєте перемкнутися в ⚡ АКТИВНИЙ режим (Master), щоб утиліта сама опитала адреси 0x01..0x10 прямо зараз?"
     );
     if (doActive) {
