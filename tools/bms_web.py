@@ -4,13 +4,13 @@
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 Version-3
-Features (v2.2):
+Features (v2.4):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
   - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
   - Autonomy & Energy Calculator (kWh stored, ETA charge time, ETA discharge runtime).
   - Cell Health & Weak Cell Tracker: detects chronically lagging cells and estimates
-    internal resistance (R_int in mО©) and balancing duration per cell.
+    internal resistance (R_int in mΩ) and balancing duration per cell.
   - Live HTML5 Canvas Charts:
       * Rolling time chart (voltage, current, power, bank delta).
       * 15S Cell bar chart with min/max, active balancing glow, and R_int per cell.
@@ -56,7 +56,7 @@ try:
 except ImportError:
     serial = None
 
-DEFAULT_PORT = "/dev/cu.usbserial-A5069RR4"
+DEFAULT_PORT = None
 DEFAULT_BAUD = 9600
 DEFAULT_ADDR = 0x01
 DEFAULT_HTTP = 8080
@@ -295,9 +295,8 @@ def decode_regs(regs: list) -> dict:
         return regs[i] if i < n else default
 
     cell_num = r(36) or 15
-    cells = [regs[2 + i] for i in range(16) if 2 + i < n]
-    cells = [c for c in cells[:cell_num] if c > 0] or [c for c in cells[:15] if c]
-    alive = [c for c in cells if c > 0] or cells or [0]
+    cells = [regs[2 + i] if 2 + i < n else 0 for i in range(cell_num)]
+    alive = [c for c in cells if c > 0] or [0]
     status = r(25, 0)
     low = status & 0x00FF
     state = next((name for v, name in STATUS_STATES if low == v),
@@ -305,10 +304,10 @@ def decode_regs(regs: list) -> dict:
     info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
     min_c = min(alive)
     max_c = max(alive)
-    avg_c = int(round(sum(alive) / len(alive))) if alive else min_c
+    avg_c = int(round(sum(alive) / len(alive))) if any(c > 0 for c in cells) else 0
     volts = regs[0] / 100.0 if n > 0 else 0.0
     curr = s16(regs[1]) / 100.0 if n > 1 else 0.0
-    real_soc = calc_adaptive_soc(avg_c, min_c, max_c, curr, volts) if min_c > 0 else None
+    real_soc = calc_adaptive_soc(avg_c, min_c, max_c, curr, volts) if any(c > 0 for c in cells) else None
     return {
         "voltage": volts,
         "current": curr,
@@ -619,6 +618,7 @@ class BmsBus:
         self.mode = "passive" if passive else "active"
         self.ser = None
         self.lock = threading.Lock()
+        self._io_lock = threading.Lock()
 
         self.packs = {}
         self.active_addrs = []
@@ -695,12 +695,13 @@ class BmsBus:
             if new_mode not in ("active", "passive") or self.mode == new_mode:
                 return
             self.mode = new_mode
-            if not self.mock and self.ser and self.ser.is_open:
-                try:
-                    self.ser.timeout = self.PASSIVE_GAP_S if self.mode == "passive" else RESP_TIMEOUT_S
-                    self.ser.reset_input_buffer()
-                except Exception:
-                    pass
+            with self._io_lock:
+                if not self.mock and self.ser and self.ser.is_open:
+                    try:
+                        self.ser.timeout = self.PASSIVE_GAP_S if self.mode == "passive" else RESP_TIMEOUT_S
+                        self.ser.reset_input_buffer()
+                    except Exception:
+                        pass
             self._rescan_requested = True
             self.is_scanning = True
             self.scan_msg = "Запуск сканування 0x01..0x10..." if self.mode == "active" else "Пасивне сканування: слухаю шину RS485..."
@@ -772,52 +773,58 @@ class BmsBus:
     def read_regs(self, addr: int, timeout: float = RESP_TIMEOUT_S) -> list:
         req = bytes([addr, 0x03, 0x00, 0x00, 0x00, 0x27])
         req += crc_bytes(req)
-        self.ser.timeout = timeout
-        self.ser.reset_input_buffer()
-        self.ser.write(req)
-        self.ser.flush() # Ждем, пока байты физически уйдут в порт
-        
-        # Читаем заголовок. Если с первого раза пусто (задержка Windows), пробуем еще раз
-        hdr = self.ser.read(3)
-        if not hdr:
-            time.sleep(0.05)
+        with self._io_lock:
+            if self.ser is None or not self.ser.is_open:
+                raise IOError("port not open")
+            self.ser.timeout = timeout
+            self.ser.reset_input_buffer()
+            self.ser.write(req)
+            self.ser.flush() # Ждем, пока байты физически уйдут в порт
+            
+            # Читаем заголовок. Если с первого раза пусто (задержка Windows), пробуем еще раз
             hdr = self.ser.read(3)
+            if not hdr:
+                time.sleep(0.05)
+                hdr = self.ser.read(3)
 
-        if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
-            raise IOError(f"bad response header {hdr.hex()}")
-            
-        bytecount = hdr[2]
-        rest = self.ser.read(bytecount + 2)
-        if len(rest) < bytecount + 2:
-            raise IOError("short response")
-            
-        frame = hdr + rest
-        if crc_bytes(frame[:-2]) != frame[-2:]:
-            raise IOError("CRC mismatch")
-            
-        data = frame[3:3 + bytecount]
-        return [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
+            if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
+                raise IOError(f"bad response header {hdr.hex()}")
+                
+            bytecount = hdr[2]
+            rest = self.ser.read(bytecount + 2)
+            if len(rest) < bytecount + 2:
+                raise IOError("short response")
+                
+            frame = hdr + rest
+            if crc_bytes(frame[:-2]) != frame[-2:]:
+                raise IOError("CRC mismatch")
+                
+            data = frame[3:3 + bytecount]
+            return [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
 
     def read_dev_info(self, addr: int, timeout: float = 0.2) -> dict:
         try:
             req = bytes([addr, 0x03, 0x00, 0x69, 0x00, 0x17])
             req += crc_bytes(req)
-            self.ser.timeout = timeout
-            self.ser.reset_input_buffer()
-            self.ser.write(req)
-            hdr = self.ser.read(3)
-            if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
-                return {}
-            bytecount = hdr[2]
-            rest = self.ser.read(bytecount + 2)
-            if len(rest) < bytecount + 2:
-                return {}
-            frame = hdr + rest
-            if crc_bytes(frame[:-2]) != frame[-2:]:
-                return {}
-            data = frame[3:3 + bytecount]
-            regs = [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
-            return decode_dev_info_block(regs)
+            with self._io_lock:
+                if self.ser is None or not self.ser.is_open:
+                    return {}
+                self.ser.timeout = timeout
+                self.ser.reset_input_buffer()
+                self.ser.write(req)
+                hdr = self.ser.read(3)
+                if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
+                    return {}
+                bytecount = hdr[2]
+                rest = self.ser.read(bytecount + 2)
+                if len(rest) < bytecount + 2:
+                    return {}
+                frame = hdr + rest
+                if crc_bytes(frame[:-2]) != frame[-2:]:
+                    return {}
+                data = frame[3:3 + bytecount]
+                regs = [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
+                return decode_dev_info_block(regs)
         except Exception:
             return {}
 
@@ -1126,10 +1133,20 @@ class BmsBus:
                     with self.lock:
                         self._update_pack_telemetry(a, regs, dev_info)
                     self.log_row(regs, a)
-                except Exception:
+                except Exception as e:
                     with self.lock:
                         if a in self.packs:
                             self.packs[a]["online"] = False
+                    err_s = str(e).lower()
+                    if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
+                        with self._io_lock:
+                            if self.ser:
+                                try:
+                                    self.ser.close()
+                                except Exception:
+                                    pass
+                                self.ser = None
+                        break
 
             with self.lock:
                 self.active_addrs = sorted(found)
@@ -1157,6 +1174,16 @@ class BmsBus:
                             self.packs[a]["online"] = False
                             if a in self.active_addrs:
                                 self.active_addrs.remove(a)
+                err_s = str(e).lower()
+                if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
+                    with self._io_lock:
+                        if self.ser:
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                            self.ser = None
+                    break
             time.sleep(POLL_S)
 
         # 3. Background hot-plug discovery of 1 inactive address per cycle
@@ -1177,8 +1204,16 @@ class BmsBus:
                             self.active_addrs.append(probe_a)
                             self.active_addrs.sort()
                     self.log_row(regs, probe_a)
-            except Exception:
-                pass
+            except Exception as e:
+                err_s = str(e).lower()
+                if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
+                    with self._io_lock:
+                        if self.ser:
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                            self.ser = None
 
     def passive_step(self, buf: bytes) -> bytes:
         if not self.mock and (self.ser is None or not self.ser.is_open):
@@ -1225,8 +1260,12 @@ class BmsBus:
             return b""
 
         try:
-            avail = getattr(self.ser, "in_waiting", 0)
-            chunk = self.ser.read(avail if avail > 0 else 1)
+            with self._io_lock:
+                if self.ser is None or not self.ser.is_open:
+                    time.sleep(0.5)
+                    return b""
+                avail = getattr(self.ser, "in_waiting", 0)
+                chunk = self.ser.read(avail if avail > 0 else 1)
             if chunk:
                 buf += chunk
                 self._last_rx_t = now
@@ -1263,12 +1302,13 @@ class BmsBus:
                             self.active_addrs.remove(a)
         except Exception as e:
             self.last_err = str(e)
-            if self.ser:
-                try:
-                    self.ser.close()
-                except Exception:
-                    pass
-                self.ser = None
+            with self._io_lock:
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
             time.sleep(1.0)
         return buf
 
@@ -1850,6 +1890,16 @@ let logOn = false;
 let latestData = null;
 let logAnalysisData = null;
 
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const ALARM_HELP_DB = {
   // Statuses
   "Charging": {
@@ -2006,17 +2056,17 @@ const ALARM_HELP_DB = {
     desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
     action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
   },
+  "Low Capacity": {
+    cat: "Protection (0027) / Warning (0026)",
+    title: "Низька ємність / Standby Latch (Low Capacity)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
+    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+  },
   "Float stop": {
     cat: "Warning (0026)",
     title: "Зупинка буферного режиму (Float Stop)",
-    level: "ok",
-    levelName: "Інформаційний стан",
-    desc: "Буферний режим підзарядки завершено або тимчасово призупинено за таймером BMS.",
-    action: "Штатний процес."
-  },
-  "Float stopped": {
-    cat: "Warning (0026)",
-    title: "Зупинка буферного режиму (Float Stopped)",
     level: "ok",
     levelName: "Інформаційний стан",
     desc: "Буферний режим підзарядки завершено або тимчасово призупинено за таймером BMS.",
@@ -2027,14 +2077,6 @@ const ALARM_HELP_DB = {
   "Short Circuit": {
     cat: "Protection (0027)",
     title: "Коротке замикання на виході (Short Circuit)",
-    level: "bad",
-    levelName: "Аварія / КЗ",
-    desc: "BMS миттєво відсікла розрядний ключ через виявлення короткого замикання або надструму.",
-    action: "Вимкніть навантаження, перевірте кабелі підключення до інвертора на предмет КЗ. Скидання: вимкнути живлення або підключити зарядний пристрій."
-  },
-  "Discharge SC": {
-    cat: "Protection (0027)",
-    title: "Коротке замикання на виході (Discharge Short Circuit)",
     level: "bad",
     levelName: "Аварія / КЗ",
     desc: "BMS миттєво відсікла розрядний ключ через виявлення короткого замикання або надструму.",
@@ -2740,15 +2782,15 @@ function openReport() {
     const p = packs[a];
     const parsed = p.parsed || {};
     html += `<tr>
-      <td><b>${a}</b></td>
-      <td>${parsed.model || '—'}</td>
-      <td>${parsed.fw_version || '—'}</td>
-      <td>${parsed.serial || '—'}</td>
+      <td><b>${escapeHtml(a)}</b></td>
+      <td>${escapeHtml(parsed.model || '—')}</td>
+      <td>${escapeHtml(parsed.fw_version || '—')}</td>
+      <td>${escapeHtml(parsed.serial || '—')}</td>
       <td><b>${parsed.real_soc != null ? parsed.real_soc.toFixed(1) + '%' : '—'}</b> / <span style="color:#666">${parsed.soc != null ? parsed.soc + '%' : '—'}</span></td>
       <td>${parsed.soh != null ? parsed.soh + '%' : '—'}</td>
       <td>${parsed.cycles != null ? parsed.cycles : '—'}</td>
       <td>${parsed.designed_cap_ah != null ? parsed.designed_cap_ah + ' А·ч' : '—'}</td>
-      <td>${p.online ? parsed.status_name : 'Офлайн'}</td>
+      <td>${p.online ? escapeHtml(parsed.status_name) : 'Офлайн'}</td>
     </tr>`;
   });
   html += `</table>
@@ -2792,7 +2834,7 @@ function openInverterModal() {
   const d = latestData;
   const packs = (d && d.packs) ? d.packs : {};
   const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
-  const packCount = onlineAddrs.length || 3;
+  const packCount = onlineAddrs.length || 1;
   
   let cellCount = 15;
   for (const a of onlineAddrs) {
@@ -3038,10 +3080,15 @@ function parseAndAnalyzeCSV(filename, text) {
   const addrs = Object.keys(packMap).sort();
   const startTime = rows[0].ts;
   const endTime = rows[rows.length - 1].ts;
-  const minV = Math.min(...rows.map(r => r.v));
-  const maxV = Math.max(...rows.map(r => r.v));
-  const maxCharge = Math.max(...rows.map(r => r.curr));
-  const maxDischarge = Math.min(...rows.map(r => r.curr));
+  let minV = Infinity, maxV = -Infinity, maxCharge = -Infinity, maxDischarge = Infinity;
+  for (let i = 0; i < rows.length; i++) {
+    const v = rows[i].v;
+    const c = rows[i].curr;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+    if (c > maxCharge) maxCharge = c;
+    if (c < maxDischarge) maxDischarge = c;
+  }
 
   const cellStats = [];
 
@@ -3327,7 +3374,7 @@ async function tick() {
       lf.innerHTML = keys.length ? keys.map(k => {
         const f = files[k];
         const state = f.on ? '<span class="pill ok">запис</span>' : '<span class="pill">стоп</span>';
-        return `<tr><td>${k}</td><td>${f.path || '—'}</td><td>${f.rows || 0} · ${f.last_ts || '—'}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
+        return `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(f.path || '—')}</td><td>${f.rows || 0} · ${escapeHtml(f.last_ts || '—')}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
       }).join('') : '<tr><td>—</td><td>лог ще не створювався</td><td>—</td><td>—</td><td>—</td></tr>';
     }
 
@@ -3453,6 +3500,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
+        host = self.headers.get("Host", "").split(":")[0].strip()
+        if host and host not in ("127.0.0.1", "localhost", "0.0.0.0"):
+            self._send(403, "Forbidden: Invalid Host header", "text/plain")
+            return
+        origin = self.headers.get("Origin", "")
+        if origin:
+            from urllib.parse import urlparse
+            p_orig = urlparse(origin)
+            if p_orig.hostname not in ("127.0.0.1", "localhost"):
+                self._send(403, "Forbidden: Cross-origin request not allowed", "text/plain")
+                return
+
         if self.path == "/api/mode":
             n = int(self.headers.get("Content-Length") or 0)
             try:
@@ -3714,7 +3773,7 @@ def main() -> int:
         if auto_port:
             port = auto_port
             print(f"[Автовизначення] Знайдено адаптер RS485: {port} ({desc})")
-        elif os.path.exists(DEFAULT_PORT):
+        elif DEFAULT_PORT and os.path.exists(DEFAULT_PORT):
             port = DEFAULT_PORT
             print(f"[Порт] Використовуємо дефолтний: {port}")
         else:
@@ -3728,7 +3787,7 @@ def main() -> int:
     elif not port:
         port = "MOCK"
 
-    is_passive = not args.active
+    is_passive = not args.active or args.passive
     bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=is_passive)
     threading.Thread(target=bus.loop, daemon=True).start()
     Handler.bus = bus
@@ -3744,6 +3803,13 @@ def main() -> int:
         pass
     finally:
         bus._stop = True
+        with bus._io_lock:
+            if bus.ser:
+                try:
+                    bus.ser.close()
+                except Exception:
+                    pass
+                bus.ser = None
         srv.server_close()
     return 0
 

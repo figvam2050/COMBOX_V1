@@ -48,6 +48,8 @@ __pycache__/
 deye/
 120-200177-01(GD305COMBOX_V102_20230904)/
 can_sniffer/backups/
+original_firmware/backups/
+аналіз.md
 
 # --- Згенеровані артефакти реверс-аналізу (відтворюються tools/*.py) ---
 original_firmware/dumps/*.asm

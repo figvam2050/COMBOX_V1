@@ -104,7 +104,7 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: 50 A/pack to 0 A between 3.450 V and 3.600 V.
+// Max-cell charge taper: nominal per-pack limit (50 A default / 30 A DIP5) to 0 A between 3.450 V and 3.600 V.
 // Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
 #define CELL_TAPER_START_MV 3450
 #define CELL_CHARGE_STOP_MV 3600
@@ -464,9 +464,9 @@ static uint16_t calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
 
 // Balance session engine state
 static bool bal_session_active = false;
+static bool bal_session_forced = false;
 static bool bal_trickle = false;
 static bool bal_float_hold = false;
-static uint16_t bms_balance_mask = 0;
 static uint16_t sweep_balance_mask = 0;
 static bool bal_manual_prev = false;
 static bool bal_forced_prev = false;
@@ -682,7 +682,7 @@ static void pcs_mirror_pump(void) {
 }
 
 // --- bridge state (DIP2 ON) ---
-enum { BR_IDLE = 0, BR_SEND, BR_WAIT_RESP, BR_FWD_RESP };
+enum { BR_IDLE = 0, BR_WAIT_RESP, BR_FWD_RESP };
 static uint8_t br_state = BR_IDLE;
 static uint8_t inv_frame[256]; // one complete inverter request
 static uint16_t inv_frame_n = 0;
@@ -703,13 +703,13 @@ static bool pcs_request_ok(const uint8_t *f) {
 }
 
 static void pcs_uart_rx_service(uint32_t now) {
-  if (usart_flag_get(PCS_UART, USART_FLAG_RBNE) == RESET)
-    return;
-  uint8_t b = (uint8_t)usart_data_receive(PCS_UART);
-  pcs_led_activity();
-  if (inv_rx_n < sizeof(inv_rx))
-    inv_rx[inv_rx_n++] = b;
-  inv_last_rx_ms = now;
+  while (usart_flag_get(PCS_UART, USART_FLAG_RBNE) != RESET) {
+    uint8_t b = (uint8_t)usart_data_receive(PCS_UART);
+    pcs_led_activity();
+    if (inv_rx_n < sizeof(inv_rx))
+      inv_rx[inv_rx_n++] = b;
+    inv_last_rx_ms = now;
+  }
 }
 
 // Called every main-loop pass and inside bms_receive_response(): mirror mode
@@ -943,7 +943,7 @@ static void bms_poll_step(uint32_t now) {
       break;
     }
 
-    // Partial response with inter-byte silence (>= 20 ms)
+    // Partial response with inter-byte silence (>= 5 ms, PCS_GAP_MS)
     if (uart_rx_index >= 5 && (now - bms_fsm_last_byte_ms) >= PCS_GAP_MS) {
       rs485_clear_errors();
       gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
@@ -1397,6 +1397,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
+  bal_session_forced = false;
   bal_session_paused = false;
   bal_trickle = false;
   bal_float_hold = false;
@@ -1458,6 +1459,7 @@ static void balance_update(uint8_t packs) {
   // request full charge via CAN 0x35C bit 3.
   if (forced && !bal_forced_prev) {
     bal_forced_prev = true;
+    bal_session_forced = true;
     bal_session_active = true;
     bal_session_paused = false;
     bal_session_start_ms = now;
@@ -1469,6 +1471,7 @@ static void balance_update(uint8_t packs) {
     bal_trickle = true;
   } else if (!forced && bal_forced_prev) {
     bal_forced_prev = false;
+    bal_session_forced = false;
     balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
   }
 
@@ -1491,10 +1494,10 @@ static void balance_update(uint8_t packs) {
   // Smart Pause & Resume handling: if an auto session was paused by a grid outage / discharge
   // or a pack hardware protect event (Status & 0x04 / Protect != 0),
   // resume if conditions normalize within 30 min and SOC >= 90%; otherwise abort cleanly.
-  // For forced DIP4 session, resume immediately once hardware protect clears.
+  // For forced DIP4 session, resume once hardware protect clears and charge current is safe.
   if (bal_session_paused) {
-    if (forced) {
-      if (!bank_any_pack_protect && !charge_cell_ov_inhibit && !charge_temp_inhibit) {
+    if (forced || bal_session_forced) {
+      if (bms_current < BAL_START_I_MAX_A && !bank_any_pack_protect && !charge_cell_ov_inhibit && !charge_temp_inhibit) {
         uint32_t paused_dur = now - bal_pause_start_ms;
         bal_session_paused = false;
         bal_session_active = true;
@@ -1532,6 +1535,26 @@ static void balance_update(uint8_t packs) {
       return;
     }
 
+    // Sustained discharge (>= 60 s real time) = grid outage or heavy load -> Smart Pause.
+    if (bms_current > BAL_OUTAGE_I_MIN_A) {
+      if (bal_outage_start_ms == 0) {
+        bal_outage_start_ms = now;
+      } else if ((now - bal_outage_start_ms) >= BAL_OUTAGE_CONFIRM_MS) {
+        bal_session_active = false;
+        bal_session_paused = true;
+        bal_pause_start_ms = now;
+        bal_trickle = false;
+        bal_float_hold = false;
+        bal_outage_start_ms = 0;
+        calc_taper_start_mv = profile_taper_start_mv;
+        calc_charge_stop_mv = profile_charge_stop_mv;
+        calc_charge_reenable_mv = profile_charge_reenable_mv;
+        return;
+      }
+    } else {
+      bal_outage_start_ms = 0;
+    }
+
     if (forced) {
       bal_trickle = true;
       calc_taper_start_mv = CELL_TAPER_START_MV;
@@ -1556,26 +1579,6 @@ static void balance_update(uint8_t packs) {
         return;
       }
       return;
-    }
-
-    // Sustained discharge (>= 60 s real time) = grid outage or heavy load -> Smart Pause.
-    if (bms_current > BAL_OUTAGE_I_MIN_A) {
-      if (bal_outage_start_ms == 0) {
-        bal_outage_start_ms = now;
-      } else if ((now - bal_outage_start_ms) >= BAL_OUTAGE_CONFIRM_MS) {
-        bal_session_active = false;
-        bal_session_paused = true;
-        bal_pause_start_ms = now;
-        bal_trickle = false;
-        bal_float_hold = false;
-        bal_outage_start_ms = 0;
-        calc_taper_start_mv = profile_taper_start_mv;
-        calc_charge_stop_mv = profile_charge_stop_mv;
-        calc_charge_reenable_mv = profile_charge_reenable_mv;
-        return;
-      }
-    } else {
-      bal_outage_start_ms = 0;
     }
 
     // Top-off phase: min cell reached ~90% -> 2 A per pack cap
@@ -1884,7 +1887,6 @@ static void bms_aggregate_data(void) {
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
   sweep_any_pack_protect = false;
-  bms_balance_mask = sweep_balance_mask;
   sweep_balance_mask = 0;
 
   uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
