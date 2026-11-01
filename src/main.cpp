@@ -1950,6 +1950,7 @@ static void can_init_500k(void) {
   rcu_periph_clock_enable(RCU_AF);
   rcu_periph_clock_enable(DEYE_CAN_GPIO_RCU);
   rcu_periph_clock_enable(DEYE_CAN_RCU);
+  gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE); // Preserve SWD (PA13/PA14)
   gpio_pin_remap_config(GPIO_CAN_PARTIAL_REMAP, ENABLE);
   gpio_init(DEYE_CAN_GPIO_PORT, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ,
             DEYE_CAN_RX_PIN);
