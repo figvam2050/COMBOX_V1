@@ -1024,7 +1024,8 @@ static void bms_poll_step(uint32_t now) {
       last_bms_start = now;
       // Standby prevention during active balance sessions:
       // Periodically (every ~3 seconds) send FC06 to keep Charge MOSFET alive/awake
-      if (bal_session_active && (now - last_wakeup_send_ms >= 3000)) {
+      if ((bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) &&
+          (now - last_wakeup_send_ms >= 3000)) {
         last_wakeup_send_ms = now;
         bms_send_wakeup_query(current_addr_index);
         bms_fsm_query_ms = now;
