@@ -313,9 +313,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_TRICKLE_A_X10 20       // 2.0 A per pack cap
 #define BAL_HOLD_CELL_MV 3560      // Float hold trigger: max cell reaches 3.56 V
 #define BAL_HOLD_RELEASE_MV 3530   // Float hold release: max cell relaxes below 3.53 V
-#define BAL_HOLD_A_X10 20          // 2.0 A per pack holding cap during float hold (< 3.55 V)
-#define BAL_HOLD_FINE_CELL_MV 3550 // Fine float hold threshold (>= 3.55 V -> 1.0 A per pack)
-#define BAL_HOLD_FINE_A_X10 10     // 1.0 A per pack fine trickle during float hold
+#define BAL_HOLD_A_X10 50          // 5.0 A per pack holding cap during float hold (< 3.55 V)
+#define BAL_HOLD_FINE_CELL_MV 3550 // Fine float hold threshold (>= 3.55 V -> 2.0 A per pack)
+#define BAL_HOLD_FINE_A_X10 20     // 2.0 A per pack fine trickle during float hold
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
