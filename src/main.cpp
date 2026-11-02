@@ -148,8 +148,8 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // ON = Forced full 16-address scan (6.4 s legacy/diagnostic mode).
 #define DIP_FORCE_FULL_SCAN_MASK 0x04
 // DIP5 (SW5, weight 16, PC6): forced balancing mode
-// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 51.6V,
-// 0.5-2.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
+// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 52.5V,
+// 2.0-5.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
 #define DIP_FORCED_BALANCE_MASK 0x10
 #define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
 
@@ -1407,7 +1407,7 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
 
   // Cell voltage cut-off:
   // In a balance session, hard cutoff is pushed to CELL_EMERGENCY_OV_MV (3620 mV)
-  // because float-hold voltage regulation (51.6 V) prevents cells from staying too high,
+  // because float-hold voltage regulation (52.5 V) prevents cells from staying too high,
   // avoiding premature 0 A cutoffs that force Deye into Standby.
   uint16_t stop_mv = is_bal ? CELL_EMERGENCY_OV_MV : calc_charge_stop_mv;
   uint16_t reenable_mv = is_bal ? (CELL_EMERGENCY_OV_MV - 50) : calc_charge_reenable_mv;
@@ -1586,7 +1586,7 @@ static void balance_update(uint8_t packs) {
   // DIP5 Forced Balancing (PC6 / SW5):
   // When DIP5 is ON, immediately engage forced balance session bypassing
   // all auto timers, intervals, and cooldowns.
-  // Immediately hold Float voltage at 51.6 V (3.44 V/cell), clamp current to 0.5..1.0 A/pack,
+  // Immediately hold Float voltage at 52.5 V (3.50 V/cell), clamp current to 2.0..5.0 A/pack,
   // request full charge via CAN 0x35C bit 3.
   if (forced) {
     if (!bal_forced_prev) {
@@ -1697,7 +1697,7 @@ static void balance_update(uint8_t packs) {
       calc_taper_start_mv = CELL_TAPER_START_MV;
       calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
       calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
-      // In forced manual mode (DIP5 ON), maintain Float Hold 51.6 V continuously
+      // In forced manual mode (DIP5 ON), maintain Float Hold 52.5 V continuously
       if (spread <= BAL_SPREAD_EXIT_MV) {
         if (bal_exit_streak < 255)
           bal_exit_streak++;
@@ -1713,7 +1713,7 @@ static void balance_update(uint8_t packs) {
                   (agg_min_cell_mv >= BAL_TRICKLE_CELL_MV);
 
     // Dynamic Float Hold: when max cell reaches 3.56 V, clamp requested voltage
-    // to 51.6 V to prevent emergency cell OV while maintaining gentle balance current.
+    // to 52.5 V to prevent emergency cell OV while maintaining gentle balance current.
     if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
       bal_float_hold = true;
     } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
