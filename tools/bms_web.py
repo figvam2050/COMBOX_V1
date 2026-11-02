@@ -3460,7 +3460,8 @@ async function togglePackLog() {
 async function saveLogCfg() {
   const alarm = !!(document.getElementById('cfg_alarm') || {}).checked;
   const work = !!(document.getElementById('cfg_work') || {}).checked;
-  const interval = parseFloat((document.getElementById('cfg_interval') || {}).value) || 5;
+  const rawIv = (document.getElementById('cfg_interval') || {}).value;
+  const interval = (rawIv !== '' && !isNaN(rawIv)) ? Math.max(0, parseFloat(rawIv)) : 0;
   await fetch('/api/logcfg', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
