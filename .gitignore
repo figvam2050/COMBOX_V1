@@ -44,6 +44,9 @@ desktop.ini
 __pycache__/
 *.pyc
 
+# --- Local release backups ---
+release_backup/
+
 # --- Локальні папки з документацією/прошивками (не для репозиторію) ---
 deye/
 120-200177-01(GD305COMBOX_V102_20230904)/
