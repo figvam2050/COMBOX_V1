@@ -116,7 +116,7 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 
 #define CHARGE_VOLTAGE_LIMIT_STATIC 540
 #define CHARGE_VOLTAGE_LIMIT_DIP90 518
-#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 516 // 51.6 V (3.44 V/cell * 15): hold voltage during balancing
+#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 525 // 52.5 V (3.50 V/cell * 15): hold voltage during balancing (provides current for BMS balancers)
 
 // Per-pack charge current limit, selected by DIP4 (SW4, PB15):
 // OFF (default) = 50 A (battery manufacturer maximum), ON = 30 A (0.3C current limit mode).
@@ -313,9 +313,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_TRICKLE_A_X10 20       // 2.0 A per pack cap
 #define BAL_HOLD_CELL_MV 3560      // Float hold trigger: max cell reaches 3.56 V
 #define BAL_HOLD_RELEASE_MV 3530   // Float hold release: max cell relaxes below 3.53 V
-#define BAL_HOLD_A_X10 10          // 1.0 A per pack holding cap during float hold (< 3.52 V)
-#define BAL_HOLD_FINE_CELL_MV 3520 // Fine float hold threshold (>= 3.52 V -> 0.5 A per pack)
-#define BAL_HOLD_FINE_A_X10 5      // 0.5 A per pack fine trickle during float hold
+#define BAL_HOLD_A_X10 20          // 2.0 A per pack holding cap during float hold (< 3.55 V)
+#define BAL_HOLD_FINE_CELL_MV 3550 // Fine float hold threshold (>= 3.55 V -> 1.0 A per pack)
+#define BAL_HOLD_FINE_A_X10 10     // 1.0 A per pack fine trickle during float hold
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
