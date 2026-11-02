@@ -316,6 +316,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_HOLD_A_X10 50          // 5.0 A per pack holding cap during float hold (< 3.55 V)
 #define BAL_HOLD_FINE_CELL_MV 3550 // Fine float hold threshold (>= 3.55 V -> 2.0 A per pack)
 #define BAL_HOLD_FINE_A_X10 20     // 2.0 A per pack fine trickle during float hold
+#define BAL_BANK_MAX_TOTAL_CCL_X10 50 // 5.0 A max total bank charge current during Float Hold
+#define BAL_BANK_FINE_TOTAL_CCL_X10 20 // 2.0 A max total bank charge current when max cell >= 3.55 V
+#define BANK_PROTECT_ASYMMETRY_CCL_X10 50 // 5.0 A absolute total bank limit when >= 1 pack in bank has charge protect
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
@@ -452,6 +455,8 @@ static bool discharge_temp_inhibit = false;
 static bool pack_imbalance_inhibit = false;
 static bool bank_any_pack_protect = false;
 static bool sweep_any_pack_protect = false;
+static bool bank_charge_asymmetry_clamp = false;
+static bool sweep_charge_asymmetry_clamp = false;
 
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
@@ -1329,6 +1334,12 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if ((reg_protect & 0x2512) || (reg_error != 0)) {
     sweep_any_pack_protect = true;
   }
+  // Detect pack charge protection/inhibition for bank asymmetry current clamping:
+  // If ANY pack in the bank has closed its charge FET due to OV (0x0001, 0x0002), OC (0x0010),
+  // OT (0x0100), UT (0x0400) or error, remaining packs must not absorb full bank current.
+  if (!pack_charge_ok || (reg_protect & 0x0513) || (reg_error != 0)) {
+    sweep_charge_asymmetry_clamp = true;
+  }
 
   // Feed the sums once per address per sweep: in bridge mode the inverter may
   // repeat an address and would bias the averages toward it. Cells/temps and
@@ -1422,7 +1433,25 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     max_current_x10 /= 2;
   }
 
+  // Bank charge protection asymmetry clamp:
+  // If >= 1 pack in the bank is in charge protect (Cell OV, Pack OV, Temp, etc.),
+  // remaining packs must NEVER absorb full nominal current (e.g. 50 A into 1 pack).
+  // Clamp total bank current to a safe equalization ceiling (5.0 A total).
+  if (bank_charge_asymmetry_clamp && !is_bal) {
+    if (max_current_x10 > BANK_PROTECT_ASYMMETRY_CCL_X10) {
+      max_current_x10 = BANK_PROTECT_ASYMMETRY_CCL_X10;
+    }
+  }
+
   if (is_bal && (bal_float_hold || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0))) {
+    // Total bank current ceiling during Float Hold balancing:
+    // Cap at 5.0 A total (or 2.0 A total when fine hold is active)
+    uint32_t bank_hold_ceiling_x10 = (agg_max_cell_mv >= BAL_HOLD_FINE_CELL_MV)
+                                        ? BAL_BANK_FINE_TOTAL_CCL_X10
+                                        : BAL_BANK_MAX_TOTAL_CCL_X10;
+    if (max_current_x10 > bank_hold_ceiling_x10) {
+      max_current_x10 = bank_hold_ceiling_x10;
+    }
     return (uint16_t)max_current_x10;
   }
 
@@ -1888,6 +1917,7 @@ static void agg_reset(void) {
   agg_max_pack_v = 0;
   agg_min_pack_v = 0xFFFF;
   sweep_any_pack_protect = false;
+  sweep_charge_asymmetry_clamp = false;
 }
 
 static void bms_aggregate_data(void) {
@@ -1977,18 +2007,21 @@ static void bms_aggregate_data(void) {
   // Latch sweep alarms and protection into active CAN frame registers
   can_protect_b0 = sweep_protect_b0;
   can_protect_b1 = sweep_protect_b1;
+  uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
+  bms_pack_count = effective_packs;
+
   can_alarm_b2 = sweep_alarm_b2;
   can_alarm_b3 = sweep_alarm_b3;
   bank_any_pack_protect = sweep_any_pack_protect;
+  bank_charge_asymmetry_clamp = sweep_charge_asymmetry_clamp ||
+                                (agg_charge_capable_count < effective_packs);
   sweep_protect_b0 = 0;
   sweep_protect_b1 = 0;
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
   sweep_any_pack_protect = false;
+  sweep_charge_asymmetry_clamp = false;
   sweep_balance_mask = 0;
-
-  uint8_t effective_packs = (active_pack_count > 0) ? active_pack_count : agg_count;
-  bms_pack_count = effective_packs;
 
   balance_update(effective_packs);
   if (bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) {
@@ -2412,6 +2445,8 @@ int main(void) {
       pack_imbalance_inhibit = false;
       bank_any_pack_protect = false;
       sweep_any_pack_protect = false;
+      bank_charge_asymmetry_clamp = false;
+      sweep_charge_asymmetry_clamp = false;
       bank_max_cell_mv = 0;
       bank_min_cell_mv = 0xFFFF;
       bank_pack_v_delta_10mv = 0;
