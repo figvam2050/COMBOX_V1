@@ -395,8 +395,8 @@ LOG_TEMP_SLOTS = 6
 # v2.4: two independent logging profiles (may run together; Alarm has priority).
 LOG_KIND_ALARM = "Alarm"
 LOG_KIND_WORK = "Work"
-DEFAULT_WORK_INTERVAL_S = 5.0
-MIN_WORK_INTERVAL_S = 1.0
+DEFAULT_WORK_INTERVAL_S = 0.0
+MIN_WORK_INTERVAL_S = 0.0
 MAX_WORK_INTERVAL_S = 3600.0
 # Temperature events for the Alarm profile (degrees C).
 ALARM_TEMP_HIGH_C = 45.0
@@ -740,8 +740,8 @@ class BmsBus:
     def set_log(self, on: bool, addrs=None) -> list:
         """Start/stop CSV logging. addrs=None -> all active (or known) packs."""
         with self.lock:
-            self.log_auto = on
             if addrs is None:
+                self.log_auto = on
                 targets = list(self.active_addrs) or sorted(self.packs)
             else:
                 targets = [a for a in addrs if a]
@@ -766,8 +766,6 @@ class BmsBus:
                     iv = DEFAULT_WORK_INTERVAL_S
                 self.log_cfg["work_interval"] = max(
                     MIN_WORK_INTERVAL_S, min(MAX_WORK_INTERVAL_S, iv))
-            if self.log_cfg["alarm"] or self.log_cfg["work"]:
-                self.log_auto = True
             return dict(self.log_cfg)
 
     def read_regs(self, addr: int, timeout: float = RESP_TIMEOUT_S) -> list:
@@ -1836,14 +1834,14 @@ canvas{width:100%;height:auto;display:block}
   <div class="log-profiles">
     <div class="log-profiles-title">Профілі запису <span style="font-weight:400;color:var(--dim)">(можна увімкнути обидва одночасно)</span></div>
     <label class="log-profile-row">
-      <input type="checkbox" id="cfg_alarm" onchange="saveLogCfg()">
+      <input type="checkbox" id="cfg_alarm" checked onchange="saveLogCfg()">
       <span><b>🚨 Лише аварійні події</b> — регістри 0025–0028 (статус, попередження, захист, помилка) + температура (поріг 0…45&nbsp;°C).
         Запис виконується лише при зміні стану: поява, зміна або зняття аварії. Без змін — файл не пишеться.</span>
     </label>
     <label class="log-profile-row">
-      <input type="checkbox" id="cfg_work" onchange="saveLogCfg()">
+      <input type="checkbox" id="cfg_work" checked onchange="saveLogCfg()">
       <span><b>🔬 Аналіз / тест комірок</b> — періодичний запис повної телеметрії з інтервалом
-        <input type="number" id="cfg_interval" min="1" max="3600" step="1" value="5" onchange="saveLogCfg()"> с.</span>
+        <input type="number" id="cfg_interval" min="0" max="3600" step="1" value="0" onchange="saveLogCfg()"> с (0 = кожен пакет).</span>
     </label>
     <div class="log-profiles-note">
       Колонка <b>Log</b> у файлі позначає тип рядка: <b>Alarm</b> або <b>Work</b>.
