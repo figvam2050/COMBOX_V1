@@ -66,6 +66,27 @@ const uint8_t BMS_SEARCH_QUERY_TABLE[16][8] = {
     {0x10, 0x03, 0x00, 0x69, 0x00, 0x17, 0xD6, 0x99}  // 0x10
 };
 
+// Modbus Function 0x06, Start 0x002A (Switch Control), Value 0x0001 (Charge MOSFET Enable/Keepalive)
+// Used during active balancing sessions to prevent BMS from entering dormant Standby mode.
+const uint8_t BMS_WAKEUP_QUERY_TABLE[16][8] = {
+    {0x01, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0xC2}, // 0x01
+    {0x02, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0xF1}, // 0x02
+    {0x03, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0x20}, // 0x03
+    {0x04, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0x97}, // 0x04
+    {0x05, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0x46}, // 0x05
+    {0x06, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0x75}, // 0x06
+    {0x07, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0xA4}, // 0x07
+    {0x08, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0x5B}, // 0x08
+    {0x09, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0x8A}, // 0x09
+    {0x0A, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0xB9}, // 0x0A
+    {0x0B, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0x68}, // 0x0B
+    {0x0C, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0xDF}, // 0x0C
+    {0x0D, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0x0E}, // 0x0D
+    {0x0E, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x69, 0x3D}, // 0x0E
+    {0x0F, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x68, 0xEC}, // 0x0F
+    {0x10, 0x06, 0x00, 0x2A, 0x00, 0x01, 0x6A, 0x83}  // 0x10
+};
+
 static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
   uint16_t crc = 0xFFFF;
   for (uint16_t i = 0; i < len; i++) {
@@ -492,13 +513,15 @@ static uint32_t last_bg_probe_ms = 0;
 static uint8_t bg_probe_candidate = 0;
 static bool bg_probe_in_flight = false;
 static uint8_t current_addr_index = 0;
+static uint32_t last_wakeup_send_ms = 0; // Throttle BMS keepalive/wakeup FC06 frames
 
 // Non-blocking RS-485 BMS polling FSM state
 enum {
   BMS_FSM_BOOT_SEARCH_SEND = 0,
   BMS_FSM_BOOT_SEARCH_WAIT,
   BMS_FSM_IDLE,
-  BMS_FSM_WAIT_RESP
+  BMS_FSM_WAIT_RESP,
+  BMS_FSM_WAIT_WAKEUP_RESP
 };
 static uint8_t bms_fsm_state = BMS_FSM_BOOT_SEARCH_SEND;
 static uint32_t bms_fsm_query_ms = 0;
@@ -876,6 +899,16 @@ static void bms_send_search_query(uint8_t addr_index) {
   }
 }
 
+static void bms_send_wakeup_query(uint8_t addr_index) {
+  rs485_flush_rx();
+  uart_rx_index = 0;
+  gpio_bit_set(LED_BMS485_PORT, LED_BMS485_PIN); // poll in flight
+  for (uint8_t i = 0; i < 8; i++) {
+    rs485_send_byte(BMS_WAKEUP_QUERY_TABLE[addr_index][i]);
+    pcs_mirror_push(BMS_WAKEUP_QUERY_TABLE[addr_index][i]); // mirror for diagnostics
+  }
+}
+
 // Non-blocking RS-485 BMS polling FSM step (mirror mode only; DIP2 bridge mode handles own)
 static void bms_poll_step(uint32_t now) {
   if (pcs_bridge_mode) {
@@ -988,10 +1021,40 @@ static void bms_poll_step(uint32_t now) {
   case BMS_FSM_IDLE: {
     if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS) {
       last_bms_start = now;
+      // Standby prevention during active balance sessions:
+      // Periodically (every ~3 seconds) send FC06 to keep Charge MOSFET alive/awake
+      if (bal_session_active && (now - last_wakeup_send_ms >= 3000)) {
+        last_wakeup_send_ms = now;
+        bms_send_wakeup_query(current_addr_index);
+        bms_fsm_query_ms = now;
+        bms_fsm_last_byte_ms = now;
+        bms_fsm_state = BMS_FSM_WAIT_WAKEUP_RESP;
+        break;
+      }
       bms_send_query(current_addr_index);
       bms_fsm_query_ms = now;
       bms_fsm_last_byte_ms = now;
       bms_fsm_state = BMS_FSM_WAIT_RESP;
+    }
+    break;
+  }
+
+  case BMS_FSM_WAIT_WAKEUP_RESP: {
+    while (usart_flag_get(USART0, USART_FLAG_RBNE) != RESET) {
+      uint8_t byte = (uint8_t)usart_data_receive(USART0);
+      pcs_mirror_push(byte);
+      if (uart_rx_index < sizeof(uart_rx_buffer)) {
+        uart_rx_buffer[uart_rx_index++] = byte;
+      }
+      bms_fsm_last_byte_ms = now;
+    }
+    // Modbus FC06 echo is 8 bytes
+    if (uart_rx_index >= 8 || ((now - bms_fsm_query_ms) >= 120)) {
+      rs485_clear_errors();
+      gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
+      last_bms_finish = now;
+      bms_fsm_state = BMS_FSM_IDLE;
+      break;
     }
     break;
   }
@@ -1231,9 +1294,12 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // Exclude pack from charge capability if active charge protection/faults latched:
   // 0x0001 (Pack OV), 0x0002 (Cell OV), 0x0010 (Charge OC), 0x0100 (Charge OT),
   // 0x0400 (Charge UT), 0x1000 (Low cap / Standby latch: charge MOSFET open), 0x2000 (Hardware/SC error).
+  // During active balance session: 0x1000 (Standby latch) is ignored for capacity scaling to allow
+  // trickle balance currents and wakeup commands without zeroing out CCL.
   // Also check per-pack cell max voltage >= 3600 mV or temp limits.
   bool pack_charge_ok = true;
-  if (reg_protect & 0x3513)
+  uint16_t charge_protect_mask = bal_session_active ? 0x2513 : 0x3513;
+  if (reg_protect & charge_protect_mask)
     pack_charge_ok = false;
   if (pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     pack_charge_ok = false;
