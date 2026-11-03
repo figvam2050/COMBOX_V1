@@ -114,6 +114,8 @@
 | | [`IMPROVEMENTS_TODO.md`](IMPROVEMENTS_TODO.md) | **Актуальний беклог задач**: Фаза 3 (Інвертор), Фаза 4 (Q23), чек-листи польових тестів |
 | | [`WHAT_NOT_TO_DO.md`](WHAT_NOT_TO_DO.md) | **12 інженерних табу**: антипатерни, заборона RTOS, заборона 16S, захист від апаратних пасток |
 | **Еталони знань** | [`DEYE_CAN_RS485_BASE.md`](DEYE_CAN_RS485_BASE.md) | Канонічна база протоколів Deye CAN, Modbus-розклад інвертора, мапа регістрів BMS Vision та HMI-меню |
+| | [`VISION_BMS_INTERNAL_LOGIC.md`](VISION_BMS_INTERNAL_LOGIC.md) | **Внутрішня логіка прошивки BMS Vision**: кінцевий автомат (FSM), стадії заряду/Float, робота балансирів, матриця захистів та поведінка MOSFET-ключів |
+| | [`VISION_BMS_EXTENDED_PROTOCOL.md`](VISION_BMS_EXTENDED_PROTOCOL.md) | **Розширений протокол BMS Vision**: 91 регістр супер-кадру, маски та команди активного керування MOSFET |
 | | [`PORT_MAPPING.md`](PORT_MAPPING.md) | Фізичні піни MCU, продзвонювання кіл плати V1.3 (LED, DIP, UART, трансивери) з рівнями достовірності |
 | | [`SAFETY_AND_ALARMS.md`](SAFETY_AND_ALARMS.md) | Архітектура безпеки, аварійні стани та реакції COM-Box: пороги UV/OV/OT/UT, 0x359, матриця дій |
 | | [`ERRORS_REFERENCE.md`](ERRORS_REFERENCE.md) | Довідник кодів помилок: мапінг регістрів BMS 25..28 у біти CAN 0x359/0x35C, розбір Boot Latch |
