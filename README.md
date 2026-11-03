@@ -123,6 +123,7 @@
 | | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32 (режим ACK) та Arduino Nano для тестування COM-Box без інвертора |
 | | [`tools/bms_web.py`](tools/bms_web.py) | Мульти-пакова веб-станція моніторингу та діагностики (v2.4): автопошук 1..16, графіки, $R_{int}$, уставки інвертора, алярм-хелпер, офлайн-аналізатор логів, A4 PDF-звіт |
 | | [`tools/rs485_sniff.py`](tools/rs485_sniff.py) | Пасивний сніфер батарейної шини Modbus RTU з авто-декодом полів Vision |
+| | [`detect_probe.py`](detect_probe.py) | Автоматичне апаратне визначення типу підключеного програматора (DAPLink CMSIS-DAP / ST-Link) для PlatformIO |
 | | [`tools/verify_dump.py`](tools/verify_dump.py) | Регресійні тести парсера BMS на реальних фікстурах дампів (`--selftest`, `--queries`) |
 
 ---
@@ -136,8 +137,9 @@ pio run -e genericGD32F305_app  # лише образ під заводськи�
 ```
 
 - **Два режими прошивки**:
-  - `genericGD32F305` — автономний образ на `0x08000000`, **стирає заводський bootloader** (відновлення: `combobox_bkp_40000.bin` → 0x08000000 через ST-Link).
-  - `genericGD32F305_app` — образ на **`0x08004000`**: ST-Link пише лише область застосунку, заводський bootloader `0x08000000..0x08003FFF` зберігається. `generate_hex.py` автоматично прописує магічний dword `G5RC` на зсуві `0x150` (bootloader перевіряє `0x08004150` та валідність початкового SP).
+  - `genericGD32F305` — автономний образ на `0x08000000`, **стирає заводський bootloader** (відновлення: `combobox_bkp_40000.bin` → 0x08000000 через ST-Link/DAPLink).
+  - `genericGD32F305_app` — образ на **`0x08004000`**: ST-Link/DAPLink пише лише область застосунку, заводський bootloader `0x08000000..0x08003FFF` зберігається. `generate_hex.py` автоматично прописує магічний dword `G5RC` на зсуві `0x150` (bootloader перевіряє `0x08004150` та валідність початкового SP).
+- **Автоматичне визначення програматора (ST-Link / DAPLink)**: завдяки пре-скрипту [`detect_probe.py`](detect_probe.py) PlatformIO перед завантаженням опитує USB-шину. Якщо виявлено WeAct DAPLink (CMSIS-DAP) — автоматично активується `upload_protocol = cmsis-dap` (швидкість SWD 4 МГц); якщо ST-Link — `upload_protocol = stlink`. Обидва типи відладчиків працюють без ручного редагування конфігурації.
 - **Актуальні характеристики збірки (31.10.2026, `pio run`, обидва env)**:
   - **Flash**: 17 616 Б (6.7% від 256 КБ).
   - **RAM**: 2 168 Б (2.3% від 96 КБ; 4.4% у звіті від 48 КБ RAM лінкера STM32F103RC).
