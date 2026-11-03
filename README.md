@@ -122,6 +122,7 @@
 | **Утиліти та дослідження** | [`original_firmware/ORIGINAL_FIRMWARE.md`](original_firmware/ORIGINAL_FIRMWARE.md) | Повний реверс-інжиніринг заводської прошивки Felicity Solar G5RC (1400+ рядків) |
 | | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32 (режим ACK) та Arduino Nano для тестування COM-Box без інвертора |
 | | [`tools/bms_web.py`](tools/bms_web.py) | Мульти-пакова веб-станція моніторингу та діагностики (v2.4): автопошук 1..16, графіки, $R_{int}$, уставки інвертора, алярм-хелпер, офлайн-аналізатор логів, A4 PDF-звіт |
+| | [`tools/can_sniff.py`](tools/can_sniff.py) | Пасивний/активний сніфер CAN-шини інвертора Deye/Pylontech (SLCAN / WeAct USB2CAN V2) з повним декодом кадрів 0x351..0x35E/0x305 |
 | | [`tools/rs485_sniff.py`](tools/rs485_sniff.py) | Пасивний сніфер батарейної шини Modbus RTU з авто-декодом полів Vision |
 | | [`detect_probe.py`](detect_probe.py) | Автоматичне апаратне визначення типу підключеного програматора (DAPLink CMSIS-DAP / ST-Link) для PlatformIO |
 | | [`tools/verify_dump.py`](tools/verify_dump.py) | Регресійні тести парсера BMS на реальних фікстурах дампів (`--selftest`, `--queries`) |
@@ -192,9 +193,31 @@ python3 tools/rs485_sniff.py --selftest                   # синтетичні
   09.10.2026: 1291/1291 рядків декодуються ідентично**.
 - Сценарій підключення нового модуля: встановити унікальну DIP-адресу (0x03) → підключити окремо →
   заряд із запущеним сніфером (закриває Q17/Q18) → ΔU < 0.5 В → під'єднувати паралельно.
-- CAN-сніфер для шини інвертора (ESP32 + SN65HVD230, listen-only) — окремий
-  проєкт `can_sniffer/` (11.10.2026 прошито плату; план MQTT → Home Assistant —
-  див. `can_sniffer/README.md`).
+
+### CAN-сніфер шини інвертора (`tools/can_sniff.py`)
+
+Універсальний сніфер та декодер протоколу Deye/Pylontech (500 кбіт/с) для USB-адаптерів з протоколом SLCAN (зокрема **WeAct Studio USB to CAN Module V2**, STM32G431, ізоляція 2500 В):
+- **Автовиявлення адаптера:** автоматично знаходить WeAct USB2CAN V2 за VID:PID (`0x0483:0x5740`) без ручного введення портів.
+- **Два режими шини:**
+  * `NORMAL` (за замовчуванням, з ACK): ідеально для лабораторного стенда без інвертора (запобігає зависанню COM-Box на auto-retransmit першого кадру).
+  * `LISTEN-ONLY` (`--listen-only` / `-l`): повністю пасивний режим моніторингу робочої шини, підключеної до інвертора Deye.
+- **Повне декодування кадрів:**
+  * `0x351`: ліміти заряд/розряд (CVL, CCL, DCL, DVL);
+  * `0x355`: SOC (%) та SOH (%);
+  * `0x356`: напруга (0.01 В), знаковий струм (0.1 А, заряд/розряд), середня температура (0.1 °C);
+  * `0x359`: біти захистів (Cell OV/UV, Pack OV/UV, OT, UT, OC, System Error) та попереджень;
+  * `0x35C`: біти дозволів та балансування (`Request Full Charge`);
+  * `0x35E`: назва бренду (`'PYLON   '`);
+  * `0x305`: час інвертора Deye (PCS Time).
+
+```bash
+python3 tools/can_sniff.py --selftest                   # перевірка декодера на синтетичних векторах
+python3 tools/can_sniff.py --list                       # список доступних портів
+python3 tools/can_sniff.py                              # автовиявлення WeAct + режим стенда (з ACK)
+python3 tools/can_sniff.py --listen-only                # пасивний моніторинг шини з інвертором
+python3 tools/can_sniff.py --duration 60 --out deye/can.log
+```
+*(Для користувачів мікроконтролерів ESP32 або Arduino Nano також доступний окремий скетч у каталозі [`can_sniffer/`](can_sniffer/README.md)).*
 
 ### Веб-станція моніторингу та діагностики (`tools/bms_web.py`)
 

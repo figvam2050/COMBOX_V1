@@ -1109,6 +1109,24 @@ python3 tools/bms_web.py --selftest
    * Графік напруги та струму за весь сеанс випробувань.
    * Повний аудит стабільності комірок, розкиду опорів та активності балансирів.</p>
 <hr/>
+<h3 id="105-can-toolscan_sniffpy">10.5. CAN-сніфер шини інвертора (<code>tools/can_sniff.py</code>)</h3>
+<p>Для контролю вихідних пакетів COM-Box, які надсилаються в порт інвертора Deye (500 кбіт/с, Pylontech), призначена консольна утиліта <a href="tools/can_sniff.py"><code>tools/can_sniff.py</code></a>. Вона підтримує USB-адаптери з протоколом SLCAN (зокрема <strong>WeAct Studio USB to CAN Module V2</strong>):</p>
+<ol>
+<li><strong>Автоматичне виявлення:</strong> самостійно знаходить WeAct USB2CAN V2 за USB VID:PID (<code>0x0483:0x5740</code>) без потреби вручну шукати назву порту.</li>
+<li><strong>Робота без інвертора (на стенді):</strong> у стандартному режимі (<code>NORMAL</code>) адаптер WeAct автоматично формує апаратне підтвердження (ACK) для кожного кадру COM-Box. Це запобігає зависанню передавача коробки у циклі повтору (<code>auto-retransmit</code>) без підключеного інвертора.</li>
+<li><strong>Пасивний моніторинг (<code>--listen-only</code>):</strong> режим без генерації ACK для безпечного спостереження за шиною на працюючому об'єкті з увімкненим інвертором Deye.</li>
+<li><strong>Миттєве декодування:</strong> розшифровує у реальному часі ліміти напруг і струмів (<code>0x351</code>), SOC/SOH (<code>0x355</code>), поточну напругу/струм/температуру (<code>0x356</code>), біти аварійних захистів (<code>0x359</code>), запит балансування (<code>0x35C</code>), бренд (<code>0x35E</code>) та системний час інвертора (<code>0x305</code>).</li>
+</ol>
+<pre><code class="language-bash"># Автопошук адаптера та перегляд живого потоку розшифрованих пакетів:
+python3 tools/can_sniff.py
+
+# Пасивний режим моніторингу разом із працюючим інвертором Deye:
+python3 tools/can_sniff.py --listen-only
+
+# Перевірка правильності роботи парсера:
+python3 tools/can_sniff.py --selftest
+</code></pre>
+<hr/>
 <h2 id="11-pdf" style="break-before: page; page-break-before: always;">11. Як зберегти або експортувати цю інструкцію у PDF</h2>
 <p>Ви можете легко перетворити цей документ на повноцінний PDF-файл для друку або передачі клієнту кількома способами:</p>
 <div class="diagram-card"><h3 id="1">Спосіб 1: Через автоматичний скрипт генерації (рекомендовано)</h3><p>У терміналі виконайте:</p><pre><code class="language-bash">python3 tools/export_manual_pdf.py
