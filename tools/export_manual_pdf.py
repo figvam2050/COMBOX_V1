@@ -94,6 +94,26 @@ h4 {
     margin: 6px 0;
     padding-left: 20px;
 }
+img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    margin: 8px 0;
+    display: block;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+.image-row {
+    display: flex;
+    gap: 12px;
+    margin: 10px 0;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+.image-row img {
+    max-width: 48%;
+}
 table {
     border-collapse: collapse;
     width: 100%;
@@ -190,7 +210,7 @@ hr {
         break-after: avoid !important;
         page-break-after: avoid !important;
     }
-    .table-card, .diagram-card, .scenario-card, pre, blockquote, tr, li {
+    .table-card, .diagram-card, .scenario-card, pre, blockquote, tr, li, img, .image-row {
         break-inside: avoid !important;
         page-break-inside: avoid !important;
     }
