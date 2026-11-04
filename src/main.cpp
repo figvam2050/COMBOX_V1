@@ -119,8 +119,8 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 525 // 52.5 V (3.50 V/cell * 15): hold voltage during balancing (provides current for BMS balancers)
 
 // Per-pack charge current limit, selected by DIP4 (SW4, PB15):
-// OFF (default) = 50 A (battery manufacturer maximum), ON = 30 A (0.3C current limit mode).
-#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10 300
+// OFF (default) = 50 A (battery manufacturer maximum), ON = 15 A (0.15C gentle current limit mode).
+#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10 150
 #define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_LIMIT_X10 CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10 // backward-compat alias
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
@@ -141,7 +141,7 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // near the PCS-485/CAN jacks); stock SW1 protocol meaning (PYLON) unused.
 #define DIP_PROFILE_CODE_90 1
 // DIP4 (SW4, weight 8, PB15) selects the per-pack charge current limit:
-// OFF (default) = 50 A, ON = 30 A (current limit mode). Orthogonal to SW1 voltage profile.
+// OFF (default) = 50 A, ON = 15 A (0.15C current limit mode). Orthogonal to SW1 voltage profile.
 #define DIP_CHARGE_CURRENT_LIMIT_30A 0x08
 // DIP3 (SW3, weight 4, PB14):
 // OFF = Smart Plug & Play autosearch (default, fast polling active packs, 800 ms cycle for 2 packs);
@@ -1714,10 +1714,16 @@ static void balance_update(uint8_t packs) {
 
     // Dynamic Float Hold: when max cell reaches 3.56 V, clamp requested voltage
     // to 52.5 V to prevent emergency cell OV while maintaining gentle balance current.
-    if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
+    // In DIP1 manual 90% mode: maintain Float Hold 52.5 V throughout the entire balance session.
+    if (manual) {
       bal_float_hold = true;
-    } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
-      bal_float_hold = false;
+      bal_trickle = true;
+    } else {
+      if (agg_max_cell_mv != 0 && agg_max_cell_mv >= BAL_HOLD_CELL_MV) {
+        bal_float_hold = true;
+      } else if (bal_float_hold && agg_max_cell_mv < BAL_HOLD_RELEASE_MV) {
+        bal_float_hold = false;
+      }
     }
 
     if (bal_trickle) {
@@ -1764,7 +1770,7 @@ static void balance_update(uint8_t packs) {
   bal_trickle = manual && have_cells &&
                 (agg_min_cell_mv >= BAL_TRICKLE_CELL_MV);
 
-  if (manual || !BAL_AUTO_ENABLED || bal_session_paused)
+  if (!BAL_AUTO_ENABLED || bal_session_paused)
     return;
   if (!bms_data_valid)
     return;
@@ -1812,8 +1818,13 @@ static void balance_update(uint8_t packs) {
   bal_outage_start_ms = 0;
   bal_best_spread_mv = 0xFFFF;
   bal_last_improve_ms = now;
-  bal_trickle = false;
-  bal_float_hold = false;
+  if (manual) {
+    bal_float_hold = true;
+    bal_trickle = true;
+  } else {
+    bal_trickle = false;
+    bal_float_hold = false;
+  }
   calc_taper_start_mv = CELL_TAPER_START_MV;
   calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
   calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
@@ -1870,7 +1881,7 @@ static void balance_led_tick(uint32_t now) {
   }
   blink_step = 0;
 
-  if (dip_applied_code & DIP_FORCED_BALANCE_MASK) {
+  if ((dip_applied_code & DIP_FORCED_BALANCE_MASK) || bal_session_active || bal_session_paused) {
     if ((now - last_toggle) >= 500) {
       last_toggle = now;
       on = !on;
@@ -1886,16 +1897,7 @@ static void balance_led_tick(uint32_t now) {
     on = true;
     return;
   }
-  if (bal_session_active || bal_session_paused) {
-    if ((now - last_toggle) >= 500) {
-      last_toggle = now;
-      on = !on;
-      if (on)
-        gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
-      else
-        gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
-    }
-  } else if (on) {
+  if (on) {
     on = false;
     gpio_bit_reset(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
   }
