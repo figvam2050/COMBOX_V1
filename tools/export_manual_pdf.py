@@ -55,7 +55,7 @@ h4 {
     color: #1e293b;
     margin-top: 1em;
 }
-.table-card, .diagram-card {
+.table-card, .diagram-card, .scenario-card {
     break-inside: avoid !important;
     page-break-inside: avoid !important;
     margin: 14px 0;
@@ -71,6 +71,28 @@ h4 {
     margin-top: 0;
     margin-bottom: 6px;
     font-weight: 500;
+}
+.scenario-card {
+    padding: 12px 16px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-left: 4px solid #0969da;
+    border-radius: 6px;
+}
+.scenario-card > h4 {
+    margin-top: 0;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #e2e8f0;
+    color: #0f172a;
+    font-size: 13.5px;
+}
+.scenario-card p {
+    margin: 6px 0;
+}
+.scenario-card ul {
+    margin: 6px 0;
+    padding-left: 20px;
 }
 table {
     border-collapse: collapse;
@@ -168,7 +190,7 @@ hr {
         break-after: avoid !important;
         page-break-after: avoid !important;
     }
-    .table-card, .diagram-card, pre, blockquote, tr, li {
+    .table-card, .diagram-card, .scenario-card, pre, blockquote, tr, li {
         break-inside: avoid !important;
         page-break-inside: avoid !important;
     }
@@ -251,13 +273,48 @@ def main():
             for el in to_wrap:
                 container.append(el.extract())
 
-    # 3. Чистий перехід для фінальних розділів: Розділ 11 (PDF експорт) та Додаток 12 (стікер-пам'ятка)
-    sec_pdf = soup.find(id="11-pdf") or soup.find(id="10-pdf")
-    if sec_pdf:
-        sec_pdf["style"] = "break-before: page; page-break-before: always;"
-    sec12 = soup.find(id="12")
-    if sec12:
-        sec12["style"] = "break-before: page; page-break-before: always;"
+    # 3. Атомарне зв'язування сценаріїв графіків відключень у неподільні картки .scenario-card
+    for h4 in list(soup.find_all("h4")):
+        if "Сценарій" in h4.get_text():
+            to_wrap = [h4]
+            curr = h4.next_sibling
+            while curr:
+                next_node = curr.next_sibling
+                if curr.name in ["h4", "h3", "h2", "h1"]:
+                    break
+                if curr.name == "hr":
+                    curr.decompose()
+                    break
+                if curr.name is not None or (isinstance(curr, str) and curr.strip()):
+                    to_wrap.append(curr)
+                curr = next_node
+
+            container = soup.new_tag("div", attrs={"class": "scenario-card"})
+            to_wrap[0].insert_before(container)
+            for el in to_wrap:
+                container.append(el.extract())
+
+    # 4. Чисті розриви сторінок для структурованих ключових розділів посібника
+    page_break_ids = [
+        "2",                      # Розділ 2: Фізичні роз'єми та кабелі
+        "4-dip-com-box",          # Розділ 4: Налаштування DIP-перемикачів
+        "6-deye",                 # Розділ 6: Налаштування Deye
+        "8-dip-11",               # Розділ 8: Сценарії при графіках відключень
+        "9-",                     # Розділ 9: Чек-лист запуску
+        "10-troubleshooting",     # Розділ 10: Troubleshooting
+        "11-bms-web-station-v24", # Розділ 11: BMS Web Station
+        "12-pdf",                 # Розділ 12: PDF експорт
+        "13-sticker-memo",        # Розділ 13: Стікер-пам'ятка на корпус
+    ]
+    for p_id in page_break_ids:
+        sec = soup.find(id=p_id)
+        if sec:
+            sec["style"] = "break-before: page; page-break-before: always;"
+
+    # Додаткова гарантія: Додаток зі стікером завжди виноситься на окрему фінальну сторінку
+    for h2 in soup.find_all("h2"):
+        if "Додаток" in h2.get_text():
+            h2["style"] = "break-before: page; page-break-before: always;"
 
     full_html = f"""<!DOCTYPE html>
 <html lang="uk">
