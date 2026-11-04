@@ -99,10 +99,17 @@ img {
     height: auto;
     border-radius: 6px;
     border: 1px solid #cbd5e1;
-    margin: 8px 0;
+    margin: 4px auto;
     display: block;
     break-inside: avoid !important;
     page-break-inside: avoid !important;
+}
+td img, th img {
+    max-height: 220px;
+    width: auto;
+    max-width: 100%;
+    object-fit: contain;
+    margin: 0 auto;
 }
 .image-row {
     display: flex;

@@ -88,10 +88,17 @@ img {
     height: auto;
     border-radius: 6px;
     border: 1px solid #cbd5e1;
-    margin: 8px 0;
+    margin: 4px auto;
     display: block;
     break-inside: avoid !important;
     page-break-inside: avoid !important;
+}
+td img, th img {
+    max-height: 220px;
+    width: auto;
+    max-width: 100%;
+    object-fit: contain;
+    margin: 0 auto;
 }
 .image-row {
     display: flex;
@@ -495,32 +502,54 @@ hr {
 </blockquote>
 <hr/>
 <h3 id="23">2.3. Комплектні заводські кабелі та схеми підключення</h3>
-<p>У коробці COM-Box у комплекті постачаються <strong>два спеціальні заводські інтерфейсні кабелі</strong> з індивідуальним маркуванням на білих термозбіжних трубках.</p>
+<p>У коробці COM-Box у комплекті постачаються <strong>два спеціальні заводські інтерфейсні кабелі</strong> з індивідуальним маркуванням на білих термозбіжних трубках:
+1. <strong>Кабель CAN (500 кбіт/с)</strong> — для зв'язку між COM-Box та інвертором Deye.
+2. <strong>Кабель RS-485 (9600 бод)</strong> — для опитування акумуляторів Vision V-LFP48100 коробкою COM-Box.</p>
 <blockquote>
 <p>⚠️ <strong>КРИТИЧНО ВАЖЛИВЕ ПРАВИЛО: НЕ ЗВЕРТАЙТЕ УВАГУ НА НАПИСИ «BATTERY» ЧИ «PCS»!</strong></p>
 <p>Заводські текстові назви («BATTERY», «PCS CAN», «PCS RS485») надруковані виробником для внутрішніх систем і можуть ввести в оману.
 <strong>Орієнтуйтеся ВИКЛЮЧНО на номери пінів у дужках: <code>(P8.7)</code>, <code>(P4.5)</code>, <code>(P6.5)</code>, <code>(P2.1)</code>!</strong>
-Ці кабелі працюють тільки тоді, коли кожна сторона ввімкнена у свій відповідний прилад правильним кінцем.</p>
+Ці кабелі працюють тільки тоді, коли кожна сторона ввімкнена у свій відповідний роз'єм правильним кінцем.</p>
 </blockquote>
 <hr/>
-<h4 id="1-can-com-box-deye">🔌 Кабель 1: Комплектний крос-кабель CAN (COM-Box ↔ Інвертор Deye)</h4>
-<p>Це спеціальний готовий кабель для передачі телеметрії та лімітів за протоколом Pylontech CAN (500 кбіт/с) між COM-Box та портом BMS інвертора Deye:</p>
-<p><img alt="Комплектний крос-кабель CAN Deye" src="docs/images/cable_can_deye_labels.jpg"/></p>
-<div class="table-card"><p><strong>Макро-фото розшитих штекерів кабелю CAN:</strong></p><table>
+<div class="table-card"><h4 id="1-can-com-box-deye">🔌 Кабель 1: Комплектний крос-кабель CAN (COM-Box ↔ Інвертор Deye)</h4><p>Це спеціальний готовий кабель для передачі телеметрії та лімітів за протоколом Pylontech CAN (500 кбіт/с) між портом <code>PCS-CAN</code> коробки COM-Box та портом <code>BMS</code> інвертора Deye:</p><table>
 <thead>
 <tr>
-<th style="text-align: center;">Штекер 1: COM-Box <code>(P8.7)</code></th>
-<th style="text-align: center;">Штекер 2: Інвертор Deye <code>(P4.5)</code></th>
+<th style="text-align: center;">Загальний вигляд кабелю CAN</th>
+<th style="text-align: center;">Штекер COM-Box <code>(P8.7)</code></th>
+<th style="text-align: center;">Штекер Deye <code>(P4.5)</code></th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="text-align: center;"><img alt="Штекер COM-Box P8.7" src="docs/images/cable_can_deye_p87.jpg"/></td>
-<td style="text-align: center;"><img alt="Штекер Deye P4.5" src="docs/images/cable_can_deye_p45.jpg"/></td>
+<td style="text-align: center;"><img alt="Кабель CAN Deye" src="docs/images/cable_can_deye_labels.jpg"/></td>
+<td style="text-align: center;"><img alt="Роз'єм P8.7" src="docs/images/cable_can_deye_p87.jpg"/></td>
+<td style="text-align: center;"><img alt="Роз'єм P4.5" src="docs/images/cable_can_deye_p45.jpg"/></td>
 </tr>
 <tr>
-<td style="text-align: center;"><strong>Розшито піни 8 та 7</strong> <em>(піни 1..6 порожні)</em></td>
-<td style="text-align: center;"><strong>Розшито піни 4 та 5</strong> <em>(піни 1..3, 6..8 порожні)</em></td>
+<td style="text-align: center;"><strong>Маркування: <code>P8.7</code> ↔ <code>P4.5</code></strong></td>
+<td style="text-align: center;"><strong>Розшито піни 8 та 7</strong></td>
+<td style="text-align: center;"><strong>Розшито піни 4 та 5</strong></td>
+</tr>
+</tbody>
+</table></div>
+
+
+<div class="table-card"><p><strong>Фактичне підключення на живому об'єкті:</strong></p><table>
+<thead>
+<tr>
+<th style="text-align: center;">Штекер <code>(P8.7)</code> увімкнено в COM-Box (<code>PCS-CAN</code>)</th>
+<th style="text-align: center;">Штекер <code>(P4.5)</code> увімкнено в інвертор Deye (<code>BMS</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><img alt="COM-Box PCS-CAN P8.7" src="docs/images/combox_connected_can_cable.jpg"/></td>
+<td style="text-align: center;"><img alt="Deye BMS P4.5" src="docs/images/deye_connected_cable.jpg"/></td>
+</tr>
+<tr>
+<td style="text-align: center;">➡️ <strong>Порт <code>PCS-CAN</code> (COM-Box)</strong></td>
+<td style="text-align: center;">➡️ <strong>Порт <code>BMS</code> (Інвертор Deye)</strong></td>
 </tr>
 </tbody>
 </table></div>
@@ -554,27 +583,46 @@ hr {
 <li><strong>Чому це працює:</strong> Кабель забезпечує прямий зв'язок CAN-H (8 ──► 4) та CAN-L (7 ──► 5).</li>
 <li><strong>Увага:</strong> Не вмикайте кінець <code>BATTERY (P8.7)</code> в акумулятор Vision! У Vision на пінах 7 і 8 CAN відсутній.</li>
 <li><strong>Якщо переплутати сторони місцями:</strong> COM-Box не отримає сигналу на пінах 8/7, а Deye отримає сигнал на пінах RS-485 замість CAN. Інвертор видасть помилку <strong><code>F20 BMS Comm Fault</code></strong>.</li>
-<li><em>(Якщо виготовляєте кабель самостійно вручну — підключіть додатково Pin 1 COM-Box до Pin 3 Deye для спільної сигнальної землі GND).</em></li>
 </ul>
 <hr/>
-<h4 id="2-rs-485-com-box-rs-485">🔌 Кабель 2: Комплектний крос-кабель RS-485 (COM-Box ↔ Інвертор RS-485)</h4>
-<p>Спеціальний готовий кабель для інверторів, які опитують акумуляторні батареї по шині RS-485 (Modbus RTU) замість CAN:</p>
-<p><img alt="Комплектний крос-кабель RS-485" src="docs/images/cable_rs485_labels.jpg"/></p>
-<div class="table-card"><p><strong>Макро-фото розшитих штекерів кабелю RS-485:</strong></p><table>
+<div class="table-card"><h4 id="2-rs-485-com-box-vision-v-lfp48100">🔌 Кабель 2: Комплектний крос-кабель RS-485 (COM-Box ↔ Акумулятор Vision V-LFP48100)</h4><p>Це штатний комплектний кабель для опитування акумуляторів Vision V-LFP48100 по шині RS-485 (Modbus RTU, 9600 бод):</p><table>
 <thead>
 <tr>
-<th style="text-align: center;">Штекер 1: COM-Box <code>(P6.5)</code></th>
-<th style="text-align: center;">Штекер 2: Інвертор <code>(P2.1)</code></th>
+<th style="text-align: center;">Загальний вигляд кабелю RS-485</th>
+<th style="text-align: center;">Штекер COM-Box <code>(P6.5)</code></th>
+<th style="text-align: center;">Штекер Батареї <code>(P2.1)</code></th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="text-align: center;"><img alt="Штекер COM-Box P6.5" src="docs/images/cable_rs485_p65.jpg"/></td>
-<td style="text-align: center;"><img alt="Штекер інвертора P2.1" src="docs/images/cable_rs485_p21.jpg"/></td>
+<td style="text-align: center;"><img alt="Кабель RS-485" src="docs/images/cable_rs485_labels.jpg"/></td>
+<td style="text-align: center;"><img alt="Роз'єм P6.5" src="docs/images/cable_rs485_p65.jpg"/></td>
+<td style="text-align: center;"><img alt="Роз'єм P2.1" src="docs/images/cable_rs485_p21.jpg"/></td>
 </tr>
 <tr>
-<td style="text-align: center;"><strong>Розшито піни 6 та 5</strong> <em>(піни 1..4, 7..8 порожні)</em></td>
-<td style="text-align: center;"><strong>Розшито піни 2 та 1</strong> <em>(піни 3..8 порожні)</em></td>
+<td style="text-align: center;"><strong>Маркування: <code>P6.5</code> ↔ <code>P2.1</code></strong></td>
+<td style="text-align: center;"><strong>Розшито піни 6 та 5</strong></td>
+<td style="text-align: center;"><strong>Розшито піни 2 та 1</strong></td>
+</tr>
+</tbody>
+</table></div>
+
+
+<div class="table-card"><p><strong>Фактичне підключення на живому об'єкті:</strong></p><table>
+<thead>
+<tr>
+<th style="text-align: center;">Штекер <code>(P6.5)</code> увімкнено в COM-Box (<code>BMS-485</code>)</th>
+<th style="text-align: center;">Штекер <code>(P2.1)</code> увімкнено в батарею Vision (<code>RS485</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;"><img alt="COM-Box BMS-485 P6.5" src="docs/images/combox_connected_rs485_cable.jpg"/></td>
+<td style="text-align: center;"><img alt="Vision RS485 P2.1" src="docs/images/battery_connected_cable.jpg"/></td>
+</tr>
+<tr>
+<td style="text-align: center;">➡️ <strong>Порт <code>BMS-485</code> (COM-Box)</strong></td>
+<td style="text-align: center;">➡️ <strong>Порт <code>RS485</code> (Акумулятор Vision)</strong></td>
 </tr>
 </tbody>
 </table></div>
@@ -592,30 +640,25 @@ hr {
 <tr>
 <td style="text-align: left;"><strong><code>BATTERY (P6.5)</code></strong></td>
 <td style="text-align: center;"><strong>Pin 6, Pin 5</strong></td>
-<td style="text-align: left;">➡️ <strong>COM-Box (порт <code>PCS-485</code>)</strong></td>
+<td style="text-align: left;">➡️ <strong>COM-Box (порт <code>BMS-485</code>)</strong></td>
 <td style="text-align: left;"><strong>Pin 6</strong> = RS485-A (+), <strong>Pin 5</strong> = RS485-B (-)</td>
 </tr>
 <tr>
 <td style="text-align: left;"><strong><code>PCS RS485 (P2.1)</code></strong></td>
 <td style="text-align: center;"><strong>Pin 2, Pin 1</strong></td>
-<td style="text-align: left;">➡️ <strong>Інвертор Deye (порт <code>BMS</code> або <code>Meter</code>)</strong></td>
+<td style="text-align: left;">➡️ <strong>Акумулятор Vision (порт <code>RS485</code>)</strong></td>
 <td style="text-align: left;"><strong>Pin 2</strong> = RS485-A (+), <strong>Pin 1</strong> = RS485-B (-)</td>
 </tr>
 </tbody>
 </table></div>
 
 <ul>
-<li><strong>Чому це працює:</strong> У багатьох гібридних інверторах (зокрема Deye в режимі Lithium RS485) лінія RS-485 виведена на піни 1 (B-) та 2 (A+). Кабель ідеально транслює диференційну пару: Pin 6 (A) ──► Pin 2 (A), Pin 5 (B) ──► Pin 1 (B).</li>
+<li><strong>Чому це працює:</strong> У роз'ємі коробки <code>BMS-485</code> лінії опитування виведені на піни 6 (A+) та 5 (B-), а на лицьовій панелі акумулятора Vision роз'єм <code>RS485</code> приймає сигнал на пінах 2 (A+) та 1 (B-). Кабель ідеально транслює диференційну пару: Pin 6 (A) ──► Pin 2 (A), Pin 5 (B) ──► Pin 1 (B).</li>
+<li><strong>Якщо переплутати сторони місцями:</strong> Обміну даними не буде, і світлодіод <code>BMS-485 Connect</code> на кришці коробки не спалахуватиме.</li>
 </ul>
 <hr/>
-<h4 id="3-com-box-vision-bms-485">🔌 Кабель 3: Зв'язок COM-Box ↔ Батарея Vision (<code>BMS-485</code>)</h4>
-<p>Для опитування акумуляторів Vision V-LFP48100 використовується стандартний <strong>прямий мережевий патч-корд RJ45</strong> (розпіновка T568B 1-в-1 з обох боків):
-* <strong>Pin 1 (Біло-помаранчевий):</strong> COM-Box Pin 1 (GND) ──► Батарея Vision Pin 1 (GND) ⚠️ <em>(Обов'язковий контакт сигнальної землі!)</em>
-* <strong>Pin 5 (Біло-синій):</strong> COM-Box Pin 5 (RS485-B) ──► Батарея Vision Pin 5 (RS485-B)
-* <strong>Pin 6 (Зелений):</strong> COM-Box Pin 6 (RS485-A) ──► Батарея Vision Pin 6 (RS485-A)</p>
-<blockquote>
-<p>ℹ️ Оскільки в роз'ємі COM-Box <code>BMS-485</code> та в роз'ємах батареї Vision <code>RS485</code> порти розпаяні абсолютно однаково (піни 1, 5, 6), кросування тут <strong>не потрібне</strong> — підходить будь-який якісний комп'ютерний патч-корд RJ45 Cat5e/Cat6.</p>
-</blockquote>
+<h4 id="vision">🔌 З'єднання між самими акумуляторами Vision (Міжблочний ланцюжок)</h4>
+<p>Для послідовного з'єднання кількох акумуляторних блоків Vision V-LFP48100 між собою (від блоку №1 до №2, від №2 до №3 тощо) використовується <strong>звичайний прямий комп'ютерний патч-корд RJ45</strong> (1-в-1 T568B) із вільного другого гнізда <code>RS485</code> першого блоку в гніздо <code>RS485</code> наступного.</p>
 <hr/>
 <h3 id="24-b-b-">2.4. Підключення живлення (Клеми B+ / B-)</h3>
 <ul>
