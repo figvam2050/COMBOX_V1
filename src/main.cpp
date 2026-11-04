@@ -121,12 +121,11 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // Per-pack charge current limit, selected by DIP4 (SW4, PB15):
 // OFF (default) = 50 A (battery manufacturer maximum), ON = 15 A (0.15C gentle current limit mode).
 #define CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10 150
-#define CHARGE_CURRENT_LIMIT_PER_PACK_DIP5_LIMIT_X10 CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10 // backward-compat alias
 #define CHARGE_CURRENT_LIMIT_PER_PACK_X10 500
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: nominal per-pack limit (50 A default / 30 A DIP4) to 0 A between 3.450 V and 3.600 V.
+// Max-cell charge taper: nominal per-pack limit (50 A default / 15 A DIP4) to 0 A between 3.450 V and 3.600 V.
 // Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
 #define CELL_TAPER_START_MV 3450
 #define CELL_CHARGE_STOP_MV 3600
@@ -300,7 +299,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 // CV time.
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
-#define BAL_SPREAD_MED_MV 30       // regular spread bucket (30..100 mV): retry in 72 h
+#define BAL_SPREAD_MED_MV 40       // regular spread bucket (40..100 mV): retry in 72 h
 #define BAL_SPREAD_EXIT_MV 35      // session success target (spread <= 35 mV, matches BMS 40 mV comparator)
 #define BAL_TREND_DELTA_MV_12H 5   // 5 mV over 12 h == 10 mV/24 h -> HIGH
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
@@ -326,7 +325,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> pause/abort session
 #define BAL_OUTAGE_CONFIRM_MS 60000UL // 60 s sustained discharge before pausing session
 #define BAL_PAUSE_MAX_MS (30UL * 60UL * 1000UL) // 30 min max Smart Pause window
-#define BAL_PAUSE_MIN_SOC 90       // keep paused session alive only if SOC >= 90%
+#define BAL_PAUSE_MIN_SOC 85       // keep paused session alive only if SOC >= 85% (matches BAL_MIN_SOC_START)
 #define BAL_EXIT_STREAK 3          // consecutive aggregates with spread <= exit
 #define BAL_TEMP_MIN_C 0.0f
 #define BAL_TEMP_MAX_C 45.0f
@@ -1641,7 +1640,7 @@ static void balance_update(uint8_t packs) {
         bal_trickle = true;
       }
     } else {
-      if (manual || bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
+      if (bms_soc < BAL_PAUSE_MIN_SOC || (now - bal_pause_start_ms) >= BAL_PAUSE_MAX_MS) {
         balance_session_end(false, now + BAL_COOLDOWN_OUTAGE_MS);
       } else if (bms_current < BAL_START_I_MAX_A && !charge_cell_ov_inhibit && !charge_temp_inhibit && !bank_any_pack_protect) {
         uint32_t paused_dur = now - bal_pause_start_ms;
