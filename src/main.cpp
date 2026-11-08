@@ -480,6 +480,13 @@ static bool sweep_low_capacity_warn = false;
 // Per-pack hardware Cell OV latch: set on 0x0002 or >=3650 mV, released at <= CELL_OV_RELEASE_BMS_MV (3420 mV)
 static bool pack_ov_protect_latched[16] = {false};
 
+// Asymmetry clamp debounce & CCL Slew Rate Limiter:
+#define ASYMMETRY_DEBOUNCE_SWEEPS 3
+static uint8_t asymmetry_streak_count = 0;
+static uint8_t asymmetry_clean_count = 0;
+#define CCL_RAMP_DOWN_STEP_X10 50 // max 5.0 A drop per sweep
+#define CCL_RAMP_UP_STEP_X10 25   // max 2.5 A rise per sweep
+
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
 static uint8_t can_protect_b1 = 0;
@@ -1354,9 +1361,13 @@ static bool bms_parse_response(uint8_t expected_addr) {
   // trickle balance currents and wakeup commands without zeroing out CCL.
   // Also check per-pack cell max voltage >= 3600 mV or temp limits.
   bool pack_charge_ok = true;
-  bool is_bal_now = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
-  uint16_t charge_protect_mask = is_bal_now ? 0x2593 : 0x3593;
+  // Hardware protective fault mask (0x2593): Pack OV (0x0001), Cell OV (0x0002), Charge OC (0x0010),
+  // MOS OT (0x0080), Charge OT (0x0100), Charge UT (0x0400), Short Circuit (0x2000).
+  uint16_t charge_protect_mask = 0x2593;
   if (reg_protect & charge_protect_mask)
+    pack_charge_ok = false;
+  // 0x1000 is Standby / Full Latch: only treated as charge inhibit if cell is near full (>= 3550 mV)
+  if ((reg_protect & 0x1000) && pack_max_cell_mv >= 3550)
     pack_charge_ok = false;
   if (pack_ov_protect_latched[pack_idx])
     pack_charge_ok = false;
@@ -2095,8 +2106,27 @@ static void bms_aggregate_data(void) {
   can_alarm_b2 = sweep_alarm_b2;
   can_alarm_b3 = sweep_alarm_b3;
   bank_any_pack_protect = sweep_any_pack_protect;
-  bank_charge_asymmetry_clamp = sweep_charge_asymmetry_clamp ||
-                                (agg_charge_capable_count < effective_packs);
+
+  // Asymmetry Debounce (3 consecutive sweeps):
+  // Filter out transient packet jitter or brief RS485 delays without flapping CCL.
+  bool sweep_asym = sweep_charge_asymmetry_clamp ||
+                    (agg_charge_capable_count < effective_packs);
+  if (sweep_asym) {
+    if (asymmetry_streak_count < 10)
+      asymmetry_streak_count++;
+    asymmetry_clean_count = 0;
+    if (asymmetry_streak_count >= ASYMMETRY_DEBOUNCE_SWEEPS) {
+      bank_charge_asymmetry_clamp = true;
+    }
+  } else {
+    if (asymmetry_clean_count < 10)
+      asymmetry_clean_count++;
+    asymmetry_streak_count = 0;
+    if (asymmetry_clean_count >= ASYMMETRY_DEBOUNCE_SWEEPS) {
+      bank_charge_asymmetry_clamp = false;
+    }
+  }
+
   bank_mos_ot_protect = sweep_mos_ot_protect;
   bank_sc_protect = sweep_sc_protect;
   bank_low_capacity_warn = sweep_low_capacity_warn;
@@ -2133,8 +2163,34 @@ static void bms_aggregate_data(void) {
   if (discharge_packs > effective_packs)
     discharge_packs = effective_packs;
 
-  charge_current_limit = calculate_charge_limit(charge_packs);
+  uint16_t target_ccl = calculate_charge_limit(charge_packs);
   discharge_current_limit = calculate_discharge_limit(discharge_packs);
+
+  // Slew Rate Limiter for charge_current_limit:
+  // Immediate 0 A shutoff for safety trips (Zero Latency Hardware Safety):
+  if (target_ccl == 0) {
+    charge_current_limit = 0;
+  } else {
+    // Slew rate limiter: smooth CCL transitions to protect inverter inductors and DC capacitors
+    if (charge_current_limit == 0) {
+      // Soft-start: initiate with small step (up to 5.0 A) to avoid inrush
+      charge_current_limit = (target_ccl < 50) ? target_ccl : 50;
+    } else if (charge_current_limit > target_ccl) {
+      // Smooth ramp-down: max 5.0 A drop per sweep
+      if ((charge_current_limit - target_ccl) > CCL_RAMP_DOWN_STEP_X10) {
+        charge_current_limit -= CCL_RAMP_DOWN_STEP_X10;
+      } else {
+        charge_current_limit = target_ccl;
+      }
+    } else if (charge_current_limit < target_ccl) {
+      // Smooth ramp-up: max 2.5 A rise per sweep
+      if ((target_ccl - charge_current_limit) > CCL_RAMP_UP_STEP_X10) {
+        charge_current_limit += CCL_RAMP_UP_STEP_X10;
+      } else {
+        charge_current_limit = target_ccl;
+      }
+    }
+  }
 
   // Set data valid now that fresh aggregated values are computed
   bms_data_valid = true;
@@ -2547,6 +2603,8 @@ int main(void) {
       sweep_sc_protect = false;
       bank_low_capacity_warn = false;
       sweep_low_capacity_warn = false;
+      asymmetry_streak_count = 0;
+      asymmetry_clean_count = 0;
       for (uint8_t i = 0; i < 16; i++) {
         pack_ov_protect_latched[i] = false;
       }
