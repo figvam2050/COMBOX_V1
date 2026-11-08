@@ -133,6 +133,11 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CELL_TAPER_START_MV_DIP90 3400
 #define CELL_CHARGE_STOP_MV_DIP90 3455
 #define CELL_CHARGE_REENABLE_MV_DIP90 3405
+
+// BMS hardware Cell OV Release hysteresis (matches BMS_TOOLS 3.400V + 20mV margin):
+// When a pack trips hardware OV (0x0002 or >=3650mV), BMS hardware charge FET stays
+// locked until the highest cell in that pack drops <= 3420 mV.
+#define CELL_OV_RELEASE_BMS_MV 3420
 // DIP1 OFF (default) = standard 54.0 V mode (100% profile, full thresholds);
 // DIP1 ON = 51.8 V option (90% profile, economy thresholds, auto balance
 // sessions disabled, trickle cap from 3400 mV, LED1 solid indicator).
@@ -277,13 +282,22 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
   return soc;
 }
 
-// Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and > 55°C.
+// Temperature thresholds: LiFePO4 charging blocked < +2°C (lithium plating) and >= 55°C.
 // Charging re-enables with hysteresis (>= +3°C and <= 50°C) to prevent chattering.
-// Thermal derating (v2.5): proactive 50% CCL cut at >= +45°C to protect cells from thermal stress.
+// Multi-step BYD-style thermal derating:
+//   < +2°C:          CCL = 0A (freeze inhibit)
+//   +2°C .. < +10°C: 20% gentle warm-up charge
+//   +10°C .. +42°C:  100% nominal
+//   > +42°C .. +50°C: 50% warm derating
+//   > +50°C .. < +55°C: 10% critical trickle derating (max 5.0A total bank ceiling)
+//   >= +55°C:        CCL = 0A (thermal stop)
 #define TEMP_CHARGE_MIN_C 2.0f
 #define TEMP_CHARGE_MIN_REENABLE_C 3.0f
-#define TEMP_CHARGE_DERATE_C 45.0f
-#define TEMP_CHARGE_DERATE_REENABLE_C 42.0f
+#define TEMP_CHARGE_COLD_DERATE_C 10.0f
+#define TEMP_CHARGE_COLD_DERATE_REENABLE_C 11.0f
+#define TEMP_CHARGE_DERATE_C 42.0f
+#define TEMP_CHARGE_DERATE_REENABLE_C 40.0f
+#define TEMP_CHARGE_HOT_DERATE_C 50.0f
 #define TEMP_CHARGE_MAX_C 55.0f
 #define TEMP_CHARGE_MAX_REENABLE_C 50.0f
 #define TEMP_DISCHARGE_MIN_C -20.0f
@@ -456,6 +470,15 @@ static bool bank_any_pack_protect = false;
 static bool sweep_any_pack_protect = false;
 static bool bank_charge_asymmetry_clamp = false;
 static bool sweep_charge_asymmetry_clamp = false;
+static bool bank_mos_ot_protect = false;
+static bool sweep_mos_ot_protect = false;
+static bool bank_sc_protect = false;
+static bool sweep_sc_protect = false;
+static bool bank_low_capacity_warn = false;
+static bool sweep_low_capacity_warn = false;
+
+// Per-pack hardware Cell OV latch: set on 0x0002 or >=3650 mV, released at <= CELL_OV_RELEASE_BMS_MV (3420 mV)
+static bool pack_ov_protect_latched[16] = {false};
 
 // 0x359 CAN protection and alarm flags (active state and sweep accumulators)
 static uint8_t can_protect_b0 = 0;
@@ -1236,6 +1259,16 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_balance_mask |= reg_balance;
   }
 
+  uint8_t pack_idx = expected_addr - 1;
+
+  // Latch per-pack hardware Cell OV until cell voltage relaxes below BMS release threshold (3.42V):
+  if (((reg_protect & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV) ||
+      pack_max_cell_mv >= 3650) {
+    pack_ov_protect_latched[pack_idx] = true;
+  } else if (pack_ov_protect_latched[pack_idx] && pack_max_cell_mv <= CELL_OV_RELEASE_BMS_MV) {
+    pack_ov_protect_latched[pack_idx] = false;
+  }
+
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):
   // Confirmation uses physical threshold CELL_PHYSICAL_OV_CONFIRM_MV (3600 mV), NOT calc_charge_stop_mv,
   // so that activating the 90% software taper profile never generates false emergency cell OV alarms.
@@ -1269,10 +1302,22 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   if (reg_protect & 0x0010)
     sweep_protect_b1 |= CAN_PROT_CHARGE_OC;
+
+  // MOS Over-Temperature Protect (reg 27 bit 0x0080): MOSFET heatsink > 90°C
+  if (reg_protect & 0x0080) {
+    sweep_mos_ot_protect = true;
+    sweep_protect_b0 |= CAN_PROT_OT;
+    sweep_alarm_b2 |= CAN_PROT_OT;
+  }
+
   // Hardware fatal error (reg_protect & 0x2000 is short circuit/hardware fail, reg_error is non-zero).
   // Note: reg_status bit 2 (0x0004) is merely a summary bit that BMS is in protect mode (e.g. charge cut off).
   // We do NOT treat routine charge protect as fatal SYSTEM_ERROR so inverter EPS backup power is never dropped!
-  if ((reg_protect & 0x2000) || reg_error != 0)
+  if (reg_protect & 0x2000) {
+    sweep_sc_protect = true;
+    sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
+  }
+  if (reg_error != 0)
     sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
 
   // Mirror confirmed warnings into CAN alarm bytes 2 and 3:
@@ -1294,19 +1339,26 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_warning & 0x0010)
     sweep_alarm_b3 |= CAN_PROT_CHARGE_OC;
 
+  // Reg 26 bit 0x1000: Low Capacity Warning (<= 5% remaining capacity)
+  if (reg_warning & 0x1000) {
+    sweep_low_capacity_warn = true;
+  }
+
   bool dup = (sweep_seen_mask & (1 << (expected_addr - 1))) != 0;
   sweep_seen_mask |= (1 << (expected_addr - 1));
 
   // Exclude pack from charge capability if active charge protection/faults latched:
-  // 0x0001 (Pack OV), 0x0002 (Cell OV), 0x0010 (Charge OC), 0x0100 (Charge OT),
+  // 0x0001 (Pack OV), 0x0002 (Cell OV), 0x0010 (Charge OC), 0x0080 (MOS OT), 0x0100 (Charge OT),
   // 0x0400 (Charge UT), 0x1000 (Low cap / Standby latch: charge MOSFET open), 0x2000 (Hardware/SC error).
   // During active balance session: 0x1000 (Standby latch) is ignored for capacity scaling to allow
   // trickle balance currents and wakeup commands without zeroing out CCL.
   // Also check per-pack cell max voltage >= 3600 mV or temp limits.
   bool pack_charge_ok = true;
   bool is_bal_now = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
-  uint16_t charge_protect_mask = is_bal_now ? 0x2513 : 0x3513;
+  uint16_t charge_protect_mask = is_bal_now ? 0x2593 : 0x3593;
   if (reg_protect & charge_protect_mask)
+    pack_charge_ok = false;
+  if (pack_ov_protect_latched[pack_idx])
     pack_charge_ok = false;
   if (pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     pack_charge_ok = false;
@@ -1316,10 +1368,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
     pack_charge_ok = false;
 
   // Exclude pack from discharge capability if active discharge protection/faults latched:
-  // 0x0004 (Pack UV), 0x0008 (Cell UV), 0x0020 (Discharge OC), 0x0200 (Discharge OT),
+  // 0x0004 (Pack UV), 0x0008 (Cell UV), 0x0020 (Discharge OC), 0x0080 (MOS OT), 0x0200 (Discharge OT),
   // 0x0800 (Discharge UT), 0x2000 (Hardware/SC error).
   bool pack_discharge_ok = true;
-  if (reg_protect & 0x2A2C)
+  if (reg_protect & 0x2AAC)
     pack_discharge_ok = false;
   if (pack_min_cell_mv <= CELL_DISCHARGE_STOP_MV)
     pack_discharge_ok = false;
@@ -1328,15 +1380,15 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_error != 0)
     pack_discharge_ok = false;
 
-  // Hardware fatal error or emergency charge protection (0x2000 SC/hardware, 0x0100 OT, 0x0400 UT, 0x0010 OC, 0x0002 Cell OV).
+  // Hardware fatal error or emergency charge protection (0x2000 SC/hardware, 0x0100 OT, 0x0400 UT, 0x0080 MOS OT, 0x0010 OC, 0x0002 Cell OV).
   // 0x1000 (Standby latch) and reg_status 0x0004 (charge FET off in standby) are excluded so routine float does not pause balance!
-  if ((reg_protect & 0x2512) || (reg_error != 0)) {
+  if ((reg_protect & 0x2592) || (reg_error != 0)) {
     sweep_any_pack_protect = true;
   }
   // Detect pack charge protection/inhibition for bank asymmetry current clamping:
   // If ANY pack in the bank has closed its charge FET due to OV (0x0001, 0x0002), OC (0x0010),
-  // OT (0x0100), UT (0x0400) or error, remaining packs must not absorb full bank current.
-  if (!pack_charge_ok || (reg_protect & 0x0513) || (reg_error != 0)) {
+  // MOS OT (0x0080), OT (0x0100), UT (0x0400) or error, remaining packs must not absorb full bank current.
+  if (!pack_charge_ok || (reg_protect & 0x0593) || (reg_error != 0) || pack_ov_protect_latched[pack_idx]) {
     sweep_charge_asymmetry_clamp = true;
   }
 
@@ -1383,7 +1435,7 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
 
   // Temperature cut-offs: LiFePO4 plating occurs below +2°C; over-temp at 55°C.
   // Hysteresis release: re-enable only when temp is within [+3°C .. 50°C] to prevent chattering.
-  if (agg_temp_min < TEMP_CHARGE_MIN_C || agg_temp_max > TEMP_CHARGE_MAX_C) {
+  if (agg_temp_min < TEMP_CHARGE_MIN_C || agg_temp_max >= TEMP_CHARGE_MAX_C) {
     charge_temp_inhibit = true;
   } else if (charge_temp_inhibit) {
     if (agg_temp_min >= TEMP_CHARGE_MIN_REENABLE_C && agg_temp_max <= TEMP_CHARGE_MAX_REENABLE_C) {
@@ -1391,11 +1443,11 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     }
   }
 
-  // Thermal derating: proactive 50% CCL cut at >= 45°C to protect cells from heat stress.
-  // Re-enable full current once battery cools down to <= 42°C.
-  if (agg_temp_max >= TEMP_CHARGE_DERATE_C) {
+  // Multi-step BYD-style thermal derating status flag:
+  // Active when coldest cell < 10°C or hottest cell >= 42°C.
+  if (agg_temp_min < TEMP_CHARGE_COLD_DERATE_C || agg_temp_max >= TEMP_CHARGE_DERATE_C) {
     charge_temp_derate = true;
-  } else if (charge_temp_derate && agg_temp_max <= TEMP_CHARGE_DERATE_REENABLE_C) {
+  } else if (charge_temp_derate && agg_temp_min >= TEMP_CHARGE_COLD_DERATE_REENABLE_C && agg_temp_max <= TEMP_CHARGE_DERATE_REENABLE_C) {
     charge_temp_derate = false;
   }
 
@@ -1427,9 +1479,28 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     max_current_x10 /= 2;
   }
 
-  // Thermal derating at >= 45°C: reduce CCL by 50% to mitigate heat buildup
-  if (charge_temp_derate && !is_bal) {
-    max_current_x10 /= 2;
+  // Multi-step BYD-style thermal derating:
+  if (!is_bal) {
+    if (agg_temp_min < TEMP_CHARGE_COLD_DERATE_C) {
+      // Zone +2°C .. < +10°C: 20% gentle warm-up current limit
+      max_current_x10 = (max_current_x10 * 2) / 10;
+    } else if (agg_temp_max >= TEMP_CHARGE_HOT_DERATE_C) {
+      // Zone +50°C .. < +55°C: 10% critical trickle derating, capped to safe ceiling
+      max_current_x10 /= 10;
+      if (max_current_x10 > BANK_PROTECT_ASYMMETRY_CCL_X10) {
+        max_current_x10 = BANK_PROTECT_ASYMMETRY_CCL_X10;
+      }
+    } else if (agg_temp_max >= TEMP_CHARGE_DERATE_C) {
+      // Zone +42°C .. +50°C: 50% warm derating
+      max_current_x10 /= 2;
+    }
+  }
+
+  // MOS Over-Temperature clamp: if heatsink > 90°C, clamp CCL to safe 5.0A ceiling
+  if (bank_mos_ot_protect && !is_bal) {
+    if (max_current_x10 > BANK_PROTECT_ASYMMETRY_CCL_X10) {
+      max_current_x10 = BANK_PROTECT_ASYMMETRY_CCL_X10;
+    }
   }
 
   // Bank charge protection asymmetry clamp:
@@ -1481,8 +1552,8 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
     }
   }
 
-  // System error protection
-  if (can_protect_b1 & CAN_PROT_SYSTEM_ERROR) {
+  // System error or short circuit protection: immediate discharge cutoff
+  if (bank_sc_protect || (can_protect_b1 & CAN_PROT_SYSTEM_ERROR)) {
     return 0;
   }
 
@@ -1502,6 +1573,13 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   // Soft cut / Cell UV warning (<= 2900 mV): derate discharge current to 50%
   if (agg_min_cell_mv <= CELL_UV_WARN_MV) {
     max_current_x10 /= 2;
+  }
+
+  // MOS Over-Temperature clamp: if heatsink > 90°C, clamp DCL to safe 5.0A ceiling
+  if (bank_mos_ot_protect) {
+    if (max_current_x10 > 50) {
+      max_current_x10 = 50;
+    }
   }
 
   // Severe cell imbalance check (> 400 mV delta): derate to 50%
@@ -1919,6 +1997,9 @@ static void agg_reset(void) {
   agg_min_pack_v = 0xFFFF;
   sweep_any_pack_protect = false;
   sweep_charge_asymmetry_clamp = false;
+  sweep_mos_ot_protect = false;
+  sweep_sc_protect = false;
+  sweep_low_capacity_warn = false;
 }
 
 static void bms_aggregate_data(void) {
@@ -2016,12 +2097,18 @@ static void bms_aggregate_data(void) {
   bank_any_pack_protect = sweep_any_pack_protect;
   bank_charge_asymmetry_clamp = sweep_charge_asymmetry_clamp ||
                                 (agg_charge_capable_count < effective_packs);
+  bank_mos_ot_protect = sweep_mos_ot_protect;
+  bank_sc_protect = sweep_sc_protect;
+  bank_low_capacity_warn = sweep_low_capacity_warn;
   sweep_protect_b0 = 0;
   sweep_protect_b1 = 0;
   sweep_alarm_b2 = 0;
   sweep_alarm_b3 = 0;
   sweep_any_pack_protect = false;
   sweep_charge_asymmetry_clamp = false;
+  sweep_mos_ot_protect = false;
+  sweep_sc_protect = false;
+  sweep_low_capacity_warn = false;
   sweep_balance_mask = 0;
 
   balance_update(effective_packs);
@@ -2151,7 +2238,7 @@ static void send_all_frames(void) {
   // Повний заряд (charge_cell_ov_inhibit або bms_soc >= 99 при CCL=0) → SOC=100.
   // Заборона заряду холодом (< +2°C) форсує 100%, гарантуючи відсікання заряду в Deye off-grid.
   uint8_t can_soc = bms_soc;
-  if (discharge_current_limit == 0) {
+  if (discharge_current_limit == 0 || bank_sc_protect) {
     can_soc = 0;
   } else if (bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) {
     // During active balance session: protect inverter from jumping to Standby on SOC=100.
@@ -2163,6 +2250,9 @@ static void send_all_frames(void) {
     can_soc = 100;
   } else if (charge_cell_ov_inhibit || (bms_soc >= 99 && charge_current_limit == 0)) {
     can_soc = 100;
+  } else if (bank_low_capacity_warn && can_soc > 5) {
+    // Low capacity warning (<= 5%): clamp CAN SOC to 5% to trigger inverter low battery alarm / grid recharge
+    can_soc = 5;
   }
   put_u16le(&data[0], can_soc);
   put_u16le(&data[2], bms_soh);
@@ -2188,8 +2278,8 @@ static void send_all_frames(void) {
 
   // 0x35C: Request / Enable flags
   // Bit 7 (0x80) = Charge enable: active only if data valid, not inhibited, CCL > 0
-  // Bit 6 (0x40) = Discharge enable: active only if data valid, not inhibited, DCL > 0
-  // Bit 3 (0x08) = Request Full Charge (Pylontech v1.2+ for balancing/equalization)
+  // Bit 6 (0x40) = Discharge enable: active only if data valid, not inhibited, DCL > 0, no SC
+  // Bit 3 (0x08) = Request Full Charge (Pylontech v1.2+ for balancing/equalization or low capacity recharge)
   memset(data, 0, 8);
   uint8_t req_flags = 0x00;
   if (bms_data_valid && !pack_imbalance_inhibit) {
@@ -2197,10 +2287,13 @@ static void send_all_frames(void) {
       if (!charge_temp_inhibit && charge_current_limit > 0)
         req_flags |= (0x80 | 0x08);
     } else {
-      if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0)
+      if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0) {
         req_flags |= 0x80;
+        if (bank_low_capacity_warn)
+          req_flags |= 0x08; // Low capacity: request inverter grid/generator charging
+      }
     }
-    if (!discharge_cell_uv_inhibit && !discharge_temp_inhibit && discharge_current_limit > 0)
+    if (!discharge_cell_uv_inhibit && !discharge_temp_inhibit && !bank_sc_protect && discharge_current_limit > 0)
       req_flags |= 0x40;
   }
   data[0] = req_flags;
@@ -2448,6 +2541,15 @@ int main(void) {
       sweep_any_pack_protect = false;
       bank_charge_asymmetry_clamp = false;
       sweep_charge_asymmetry_clamp = false;
+      bank_mos_ot_protect = false;
+      sweep_mos_ot_protect = false;
+      bank_sc_protect = false;
+      sweep_sc_protect = false;
+      bank_low_capacity_warn = false;
+      sweep_low_capacity_warn = false;
+      for (uint8_t i = 0; i < 16; i++) {
+        pack_ov_protect_latched[i] = false;
+      }
       bank_max_cell_mv = 0;
       bank_min_cell_mv = 0xFFFF;
       bank_pack_v_delta_10mv = 0;
