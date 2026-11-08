@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.4: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.5: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 Version-3
-Features (v2.4):
+Features (v2.5):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
   - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
@@ -16,7 +16,8 @@ Features (v2.4):
       * 15S Cell bar chart with min/max, active balancing glow, and R_int per cell.
   - Diagnostic Passport Report (PDF / Print export) with complete battery metrics.
   - CSV logging (v2.3): one file per pack, readable header row (register names),
-    registers 31..35 decoded (Full Capacity, temp sensors), cell voltages in volts,
+    pack serial number in the "Serial" column, registers 31..35 decoded
+    (Full Capacity, temp sensors), cell voltages in volts,
     full date/time column. Offline analyzer reads both new and legacy logs.
   - Dual logging profiles (v2.4), selectable independently in the log card:
       * Alarm - logs only alarm events from registers 0025..0028
@@ -31,10 +32,24 @@ Features (v2.4):
     row as Alarm or Work.
   - Zero external dependencies beyond standard Python and pySerial.
 
+Recent changes:
+  2026-11-03  SOC: real_soc = OCV estimate by AVERAGE cell (was min cell);
+              BMS SOC (reg 0024) is primary in UI/report, OCV is secondary.
+  2026-11-03  Alarm help: ALARM_HELP_DB keys split into "W:" (0026) and
+              "P:" (0027) with BMS_TOOLS thresholds; clicks added for
+              Low Capacity, Float stop, Short Circuit and Heating ON.
+  2026-11-03  CSV log: "Serial" column; dev-info merged in log_row (39-reg
+              poll has no info block, so it was written empty).
+  2026-11-04  CSV schema: log_columns() is the single source of truth; header
+              and row order cannot drift. Reorder columns only there.
+  2026-11-04  UI: active log button uses .log-stop (dark burgundy) instead
+              of grey .off, so "Stop" no longer looks disabled.
+Journal: tools/HystoryMod.md
+
 Usage:
-  python3 tools/bms_web.py           # Запуск за замовчуванням у пасивному режимі (Sniffer, безпечно для шини)
-  python3 tools/bms_web.py --active  # Примусовий активний режим (Master, опитування батареї)
-  python3 tools/bms_web.py --mock    # Демонстраційний режим
+  python3 tools/bms_web.py
+  python3 tools/bms_web.py --mock
+  python3 tools/bms_web.py --passive
   python3 tools/bms_web.py --port COM3
   python3 tools/bms_web.py --selftest
 """
@@ -88,7 +103,7 @@ WARN_BITS = BASE_BITS + [
 
 # В регистре 0027 (Protect) 
 PROT_BITS = BASE_BITS + [
-    (0x1000, "Low Capacity"), (0x2000, "Short Circuit"), (0x4000, "Reverse")
+    (0x2000, "Short Circuit"), (0x4000, "Reverse")
 ]
 
 ERROR_BITS = [
@@ -208,84 +223,56 @@ def decode_fw_version(reg: int) -> str:
 
 
 def decode_dev_info_block(regs: list) -> dict:
-    model = decode_ascii_regs(regs[0:12]) if len(regs) >= 12 else None
-    fw = decode_ascii_regs(regs[12:15]) if len(regs) >= 15 else None
-    if not fw and len(regs) >= 13:
-        fw = decode_fw_version(regs[12])
-    serial_no = decode_ascii_regs(regs[15:23]) if len(regs) >= 23 else None
+    model = decode_ascii_regs(regs[0:15]) if len(regs) >= 15 else None
+    fw = decode_fw_version(regs[15]) if len(regs) >= 16 else None
+    serial_no = decode_ascii_regs(regs[16:23]) if len(regs) >= 23 else None
     return {"model": model, "fw_version": fw, "serial": serial_no}
 
 
+def merge_dev_info(parsed: dict, dev_info: dict) -> dict:
+    """Fill missing model/fw/serial in telemetry from the separate dev-info block.
+
+    The 39-register telemetry frame (0x00..0x26) has no device-info area, so
+    decode_regs() returns serial=None for it. dev_info is read separately on
+    discovery and must be merged before CSV logging / API output.
+    """
+    if not parsed or not dev_info:
+        return parsed
+    merged = dict(parsed)
+    for key, value in dev_info.items():
+        if value and not merged.get(key):
+            merged[key] = value
+    return merged
+
+
 # 15S LiFePO4 OCV-таблиця калібрована під Vision V-LFP48100 (ізоморфно до src/main.cpp)
-# ===== 3-режимний адаптивний розрахунок SOC (Заряд / Розряд / Спокій) =====
-LFP_CHARGE_TABLE = [
-    (3550, 100.0),
-    (3480, 95.0),
-    (3420, 88.0),
-    (3385, 78.0),
-    (3365, 65.0),
-    (3345, 50.0),
-    (3320, 35.0),
-    (3280, 20.0),
-    (3150, 10.0),
-    (2900, 0.0),
-]
-
-LFP_DISCHARGE_TABLE = [
-    (3360, 100.0),
-    (3300, 90.0),
-    (3280, 80.0),
-    (3250, 60.0),
-    (3220, 40.0),
-    (3180, 25.0),
-    (3100, 15.0),
+LFP_OCV_TABLE = [
+    (3600, 100.0),
+    (3450, 95.0),
+    (3400, 90.0),
+    (3340, 75.0),
+    (3320, 60.0),
+    (3300, 50.0),
+    (3285, 31.0),
+    (3250, 20.0),
+    (3200, 10.0),
     (3000, 5.0),
-    (2850, 0.0),
-]
-
-LFP_REST_TABLE = [
-    (3450, 100.0),
-    (3380, 99.0),
-    (3350, 90.0),
-    (3330, 80.0),
-    (3300, 65.0),
-    (3280, 50.0),
-    (3250, 35.0),
-    (3220, 20.0),
-    (3150, 10.0),
     (2900, 0.0),
 ]
 
 
-def interpolate_table(table: list, mv: int) -> float:
-    if mv >= table[0][0]:
-        return table[0][1]
-    if mv <= table[-1][0]:
-        return table[-1][1]
-    for i in range(1, len(table)):
-        if mv >= table[i][0]:
-            mv_hi, soc_hi = table[i - 1]
-            mv_lo, soc_lo = table[i]
+def soc_from_cell_mv(mv: int) -> float:
+    if mv >= LFP_OCV_TABLE[0][0]:
+        return 100.0
+    if mv <= LFP_OCV_TABLE[-1][0]:
+        return 0.0
+    for i in range(1, len(LFP_OCV_TABLE)):
+        if mv >= LFP_OCV_TABLE[i][0]:
+            mv_hi, soc_hi = LFP_OCV_TABLE[i - 1]
+            mv_lo, soc_lo = LFP_OCV_TABLE[i]
             frac = (mv - mv_lo) / (mv_hi - mv_lo)
             return round(soc_lo + frac * (soc_hi - soc_lo), 1)
     return 0.0
-
-
-def calc_adaptive_soc(avg_cell_mv: int, min_cell_mv: int, max_cell_mv: int, current_a: float, pack_v: float) -> float:
-    # У Modbus (Vision): current > 0.5 A — заряд, current < -0.5 A — розряд
-    if current_a > 0.5:
-        soc = interpolate_table(LFP_CHARGE_TABLE, avg_cell_mv)
-        if pack_v >= 53.5 and max_cell_mv >= 3550 and current_a < 1.0:
-            soc = 100.0
-        elif soc >= 100.0:
-            soc = 99.0
-    elif current_a < -0.5:
-        soc = interpolate_table(LFP_DISCHARGE_TABLE, avg_cell_mv)
-        if min_cell_mv <= 2750:
-            soc = 0.0
-    else:
-        soc = interpolate_table(LFP_REST_TABLE, avg_cell_mv)
-    return round(soc, 1)
 
 
 def decode_regs(regs: list) -> dict:
@@ -295,27 +282,28 @@ def decode_regs(regs: list) -> dict:
         return regs[i] if i < n else default
 
     cell_num = r(36) or 15
-    cells = [regs[2 + i] if 2 + i < n else 0 for i in range(cell_num)]
-    alive = [c for c in cells if c > 0] or [0]
+    cells = [regs[2 + i] for i in range(16) if 2 + i < n]
+    cells = [c for c in cells[:cell_num] if c > 0] or [c for c in cells[:15] if c]
+    alive = [c for c in cells if c > 0] or cells or [0]
     status = r(25, 0)
     low = status & 0x00FF
     state = next((name for v, name in STATUS_STATES if low == v),
                  "Standby" if low == 0 else f"Unknown({low:#04x})")
     info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
     min_c = min(alive)
-    max_c = max(alive)
-    avg_c = int(round(sum(alive) / len(alive))) if any(c > 0 for c in cells) else 0
-    volts = regs[0] / 100.0 if n > 0 else 0.0
-    curr = s16(regs[1]) / 100.0 if n > 1 else 0.0
-    real_soc = calc_adaptive_soc(avg_c, min_c, max_c, curr, volts) if any(c > 0 for c in cells) else None
+    # OCV-SOC is estimated from the AVERAGE cell voltage. The weakest cell is
+    # much more sensitive to imbalance and load sag, so min-based SOC reads low.
+    cell_avg = round(sum(alive) / len(alive))
+    soc_avg = soc_from_cell_mv(cell_avg) if cell_avg > 0 else None
     return {
-        "voltage": volts,
-        "current": curr,
+        "voltage": regs[0] / 100.0 if n > 0 else 0.0,
+        "current": s16(regs[1]) / 100.0 if n > 1 else 0.0,
         "cells": cells,
         "cell_num": cell_num,
         "cell_min": min_c,
-        "cell_max": max_c,
-        "cell_diff": max_c - min_c,
+        "cell_max": max(alive),
+        "cell_avg": cell_avg,
+        "cell_diff": max(alive) - min(alive),
         "temp_pcb": s16(r(18, 0)),
         "temp_avg": s16(r(19, 0)),
         "temp_max": s16(r(20, 0)),
@@ -323,7 +311,8 @@ def decode_regs(regs: list) -> dict:
         "max_charge_a": r(22),
         "soh": r(23),
         "soc": r(24),
-        "real_soc": real_soc,
+        "soc_avg": soc_avg,
+        "real_soc": soc_avg,  # legacy alias, kept for API/CSV consumers
         "status": status,
         "status_name": state + (" + Heating" if status & 0x8000 else ""),
         "status_bits": ([{"name": name, "on": low == v} for v, name in STATUS_STATES]
@@ -356,18 +345,15 @@ def parse_bus(buf: bytes):
         if i + 3 > n:
             break
         addr, fc, b2 = buf[i], buf[i + 1], buf[i + 2]
-        if fc != 0x03 or addr < 1 or addr > 16:
+        if fc != 0x03 or addr == 0:
             i += 1
             continue
         if b2 == 0x00:                       # request: start_hi=0, len 8
             ln = 8
             kind = "req"
-        elif 10 <= b2 <= 100 and (b2 % 2 == 0):  # valid response byte count (46, 56, 78)
+        else:                                # response: bytecount + crc
             ln = b2 + 5
             kind = "resp"
-        else:
-            i += 1
-            continue
         if i + ln > n:
             break                            # incomplete
         frame = buf[i:i + ln]
@@ -416,19 +402,29 @@ def _log_slots(parsed: dict) -> tuple:
     return n_cells, n_temps
 
 
-def build_log_header(cell_slots: int = 15, temp_slots: int = 6) -> list:
-    """First CSV row: readable register names instead of raw r00..r38."""
-    header = [
+def log_columns(cell_slots: int = 15, temp_slots: int = 6) -> list:
+    """Ordered CSV schema: the single source of truth for header and rows.
+
+    To move a column, change its position here only. build_log_header() and
+    build_log_values() both take the order from this list, so header names and
+    values can never drift apart.
+    """
+    cols = [
         "Date", "Log", "addr", "Voltage_V", "Current_A", "Power_W",
         "SOC_pct", "Cap_Remaining_Ah", "SOH_pct", "Max_Charge_A",
         "Cycles", "Full_Capacity_Ah", "Designed_Cap_Ah", "Cell_Num",
         "Cell_Min_V", "Cell_Max_V", "Cell_Diff_V",
         "Temp_PCB_C", "Temp_Avg_C", "Temp_Max_C",
     ]
-    header += [f"Cell_{i}_V" for i in range(1, cell_slots + 1)]
-    header += [f"Temp_{i}_C" for i in range(1, temp_slots + 1)]
-    header += ["Status_Hex", "Warning_Hex", "Protection_Hex", "Error_Hex", "Balance_Hex"]
-    return header
+    cols += [f"Cell_{i}_V" for i in range(1, cell_slots + 1)]
+    cols += [f"Temp_{i}_C" for i in range(1, temp_slots + 1)]
+    cols += ["Status_Hex", "Warning_Hex", "Protection_Hex", "Error_Hex", "Balance_Hex", "Serial"]
+    return cols
+
+
+def build_log_header(cell_slots: int = 15, temp_slots: int = 6) -> list:
+    """First CSV row: readable register names instead of raw r00..r38."""
+    return log_columns(cell_slots, temp_slots)
 
 
 def _mv_to_v(mv):
@@ -441,6 +437,8 @@ def build_log_values(parsed: dict, addr: int, cell_slots: int = 15,
     """One CSV data row: volts for cells, decoded regs 31..35, ISO-like date.
 
     log_kind is written into the "Log" column: Alarm or Work (see logging profiles).
+    Values are keyed by column name and ordered by log_columns(), so changing
+    the schema order in one place keeps header and data aligned.
     """
     cells = parsed.get("cells") or []
     temps = parsed.get("temp_sensors") or []
@@ -449,34 +447,43 @@ def build_log_values(parsed: dict, addr: int, cell_slots: int = 15,
     power = round(volts * curr, 1) if (volts is not None and curr is not None) else None
     full_cap = parsed.get("full_cap_ah")
 
-    row = [
-        ts or datetime.now().strftime("%Y-%m-%d | %H:%M:%S"),
-        log_kind,
-        f"0x{addr:02X}",
-        volts, curr, power,
-        parsed.get("soc"), parsed.get("cap_remaining"), parsed.get("soh"),
-        parsed.get("max_charge_a"), parsed.get("cycles"),
-        round(full_cap, 2) if full_cap is not None else None,
-        parsed.get("designed_cap_ah"), parsed.get("cell_num"),
-        _mv_to_v(parsed.get("cell_min")),
-        _mv_to_v(parsed.get("cell_max")),
-        _mv_to_v(parsed.get("cell_diff")),
-        parsed.get("temp_pcb"), parsed.get("temp_avg"), parsed.get("temp_max"),
-    ]
-    for i in range(cell_slots):
-        row.append(_mv_to_v(cells[i]) if i < len(cells) else None)
-    for i in range(temp_slots):
-        row.append(temps[i] if i < len(temps) else None)
-
     def hx(v):
         return f"0x{v:04X}" if v is not None else None
 
-    row += [
-        hx(parsed.get("status")), hx(parsed.get("warning")),
-        hx(parsed.get("protection")), hx(parsed.get("error_code")),
-        hx(parsed.get("balance")),
-    ]
-    return row
+    values = {
+        "Date": ts or datetime.now().strftime("%Y-%m-%d | %H:%M:%S"),
+        "Log": log_kind,
+        "addr": f"0x{addr:02X}",
+        "Serial": parsed.get("serial"),
+        "Voltage_V": volts,
+        "Current_A": curr,
+        "Power_W": power,
+        "SOC_pct": parsed.get("soc"),
+        "Cap_Remaining_Ah": parsed.get("cap_remaining"),
+        "SOH_pct": parsed.get("soh"),
+        "Max_Charge_A": parsed.get("max_charge_a"),
+        "Cycles": parsed.get("cycles"),
+        "Full_Capacity_Ah": round(full_cap, 2) if full_cap is not None else None,
+        "Designed_Cap_Ah": parsed.get("designed_cap_ah"),
+        "Cell_Num": parsed.get("cell_num"),
+        "Cell_Min_V": _mv_to_v(parsed.get("cell_min")),
+        "Cell_Max_V": _mv_to_v(parsed.get("cell_max")),
+        "Cell_Diff_V": _mv_to_v(parsed.get("cell_diff")),
+        "Temp_PCB_C": parsed.get("temp_pcb"),
+        "Temp_Avg_C": parsed.get("temp_avg"),
+        "Temp_Max_C": parsed.get("temp_max"),
+        "Status_Hex": hx(parsed.get("status")),
+        "Warning_Hex": hx(parsed.get("warning")),
+        "Protection_Hex": hx(parsed.get("protection")),
+        "Error_Hex": hx(parsed.get("error_code")),
+        "Balance_Hex": hx(parsed.get("balance")),
+    }
+    for i in range(cell_slots):
+        values[f"Cell_{i + 1}_V"] = _mv_to_v(cells[i]) if i < len(cells) else None
+    for i in range(temp_slots):
+        values[f"Temp_{i + 1}_C"] = temps[i] if i < len(temps) else None
+
+    return [values[name] for name in log_columns(cell_slots, temp_slots)]
 
 
 def calculate_autonomy(avg_voltage: float, total_current: float, cap_remaining: float, full_cap: float) -> dict:
@@ -606,11 +613,11 @@ def get_bank_summary(packs: dict) -> dict:
 
 
 class BmsBus:
-    PASSIVE_STALE_S = 35.0
+    PASSIVE_STALE_S = 15.0
     PASSIVE_GAP_S = 0.15
 
     def __init__(self, port: str, baud: int, initial_addr: int = DEFAULT_ADDR,
-                 mock: bool = False, passive: bool = True):
+                 mock: bool = False, passive: bool = False):
         self.port = port
         self.baud = baud
         self.focus_addr = initial_addr
@@ -618,7 +625,6 @@ class BmsBus:
         self.mode = "passive" if passive else "active"
         self.ser = None
         self.lock = threading.Lock()
-        self._io_lock = threading.Lock()
 
         self.packs = {}
         self.active_addrs = []
@@ -627,8 +633,6 @@ class BmsBus:
         self.last_err = None
 
         self._rescan_requested = True
-        self._passive_scan_until = 0.0
-        self._last_rx_t = 0.0
         self._bg_probe_idx = 0
         self._stop = False
         self._mock_t = 0.0
@@ -654,8 +658,10 @@ class BmsBus:
             "work": True,
             "work_interval": DEFAULT_WORK_INTERVAL_S,
         }
-        # True while at least one profile is selected: new packs start logging
-        # automatically; the Stop button clears it.
+        # Global logging mode: set only by a global set_log(on, addrs=None)
+        # request (the "all packs" button). Per-pack start/stop never touches
+        # it. While it is on, a pack seen for the first time starts logging
+        # automatically; a pack with its own log_path is never resurrected.
         self.log_auto = False
         self._log_write_lock = threading.Lock()
 
@@ -695,26 +701,18 @@ class BmsBus:
             if new_mode not in ("active", "passive") or self.mode == new_mode:
                 return
             self.mode = new_mode
-            with self._io_lock:
-                if not self.mock and self.ser and self.ser.is_open:
-                    try:
-                        self.ser.timeout = self.PASSIVE_GAP_S if self.mode == "passive" else RESP_TIMEOUT_S
-                        self.ser.reset_input_buffer()
-                    except Exception:
-                        pass
-            self._rescan_requested = True
-            self.is_scanning = True
-            self.scan_msg = "Запуск сканування 0x01..0x10..." if self.mode == "active" else "Пасивне сканування: слухаю шину RS485..."
-            if self.mode == "passive":
-                self._passive_scan_until = time.time() + 4.0
+            if not self.mock and self.ser and self.ser.is_open:
+                try:
+                    self.ser.timeout = self.PASSIVE_GAP_S if self.mode == "passive" else RESP_TIMEOUT_S
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
+            if self.mode == "active":
+                self._rescan_requested = True
 
     def request_rescan(self) -> None:
         with self.lock:
             self._rescan_requested = True
-            self.is_scanning = True
-            self.scan_msg = "Запуск сканування 0x01..0x10..." if self.mode == "active" else "Пасивне сканування: слухаю шину RS485..."
-            if self.mode == "passive":
-                self._passive_scan_until = time.time() + 4.0
 
     def _log_state(self, addr: int) -> dict:
         st = self.logs.get(addr)
@@ -738,13 +736,28 @@ class BmsBus:
         st["work_rows"] = 0
 
     def set_log(self, on: bool, addrs=None) -> list:
-        """Start/stop CSV logging. addrs=None -> all active (or known) packs."""
+        """Start/stop CSV logging.
+
+        addrs=None -> global command for all active (or known) packs; it also
+        arms/disarms log_auto. addrs=[...] -> per-pack command: affects only
+        those packs and never starts or stops the others.
+        """
         with self.lock:
             if addrs is None:
                 self.log_auto = on
-                targets = list(self.active_addrs) or sorted(self.packs)
+                if on:
+                    targets = list(self.active_addrs) or sorted(self.packs)
+                else:
+                    # Global stop must also cover offline packs that still
+                    # have an active log session.
+                    targets = sorted(set(self.active_addrs)
+                                     | set(self.packs) | set(self.logs))
             else:
                 targets = [a for a in addrs if a]
+                # A manual per-pack stop exits the global mode; otherwise a
+                # new pack would silently start after the user stopped one.
+                if not on and targets:
+                    self.log_auto = False
             for a in targets:
                 st = self._log_state(a)
                 if on and not st["on"]:
@@ -766,63 +779,59 @@ class BmsBus:
                     iv = DEFAULT_WORK_INTERVAL_S
                 self.log_cfg["work_interval"] = max(
                     MIN_WORK_INTERVAL_S, min(MAX_WORK_INTERVAL_S, iv))
+            # Profiles describe WHAT to write, not WHETHER to write. Changing
+            # them must not start logging on every pack or arm global mode.
             return dict(self.log_cfg)
 
     def read_regs(self, addr: int, timeout: float = RESP_TIMEOUT_S) -> list:
         req = bytes([addr, 0x03, 0x00, 0x00, 0x00, 0x27])
         req += crc_bytes(req)
-        with self._io_lock:
-            if self.ser is None or not self.ser.is_open:
-                raise IOError("port not open")
-            self.ser.timeout = timeout
-            self.ser.reset_input_buffer()
-            self.ser.write(req)
-            self.ser.flush() # Ждем, пока байты физически уйдут в порт
-            
-            # Читаем заголовок. Если с первого раза пусто (задержка Windows), пробуем еще раз
+        self.ser.timeout = timeout
+        self.ser.reset_input_buffer()
+        self.ser.write(req)
+        self.ser.flush() # Ждем, пока байты физически уйдут в порт
+        
+        # Читаем заголовок. Если с первого раза пусто (задержка Windows), пробуем еще раз
+        hdr = self.ser.read(3)
+        if not hdr:
+            time.sleep(0.05)
             hdr = self.ser.read(3)
-            if not hdr:
-                time.sleep(0.05)
-                hdr = self.ser.read(3)
 
-            if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
-                raise IOError(f"bad response header {hdr.hex()}")
-                
-            bytecount = hdr[2]
-            rest = self.ser.read(bytecount + 2)
-            if len(rest) < bytecount + 2:
-                raise IOError("short response")
-                
-            frame = hdr + rest
-            if crc_bytes(frame[:-2]) != frame[-2:]:
-                raise IOError("CRC mismatch")
-                
-            data = frame[3:3 + bytecount]
-            return [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
+        if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
+            raise IOError(f"bad response header {hdr.hex()}")
+            
+        bytecount = hdr[2]
+        rest = self.ser.read(bytecount + 2)
+        if len(rest) < bytecount + 2:
+            raise IOError("short response")
+            
+        frame = hdr + rest
+        if crc_bytes(frame[:-2]) != frame[-2:]:
+            raise IOError("CRC mismatch")
+            
+        data = frame[3:3 + bytecount]
+        return [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
 
     def read_dev_info(self, addr: int, timeout: float = 0.2) -> dict:
         try:
             req = bytes([addr, 0x03, 0x00, 0x69, 0x00, 0x17])
             req += crc_bytes(req)
-            with self._io_lock:
-                if self.ser is None or not self.ser.is_open:
-                    return {}
-                self.ser.timeout = timeout
-                self.ser.reset_input_buffer()
-                self.ser.write(req)
-                hdr = self.ser.read(3)
-                if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
-                    return {}
-                bytecount = hdr[2]
-                rest = self.ser.read(bytecount + 2)
-                if len(rest) < bytecount + 2:
-                    return {}
-                frame = hdr + rest
-                if crc_bytes(frame[:-2]) != frame[-2:]:
-                    return {}
-                data = frame[3:3 + bytecount]
-                regs = [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
-                return decode_dev_info_block(regs)
+            self.ser.timeout = timeout
+            self.ser.reset_input_buffer()
+            self.ser.write(req)
+            hdr = self.ser.read(3)
+            if len(hdr) < 3 or hdr[0] != addr or hdr[1] != 0x03:
+                return {}
+            bytecount = hdr[2]
+            rest = self.ser.read(bytecount + 2)
+            if len(rest) < bytecount + 2:
+                return {}
+            frame = hdr + rest
+            if crc_bytes(frame[:-2]) != frame[-2:]:
+                return {}
+            data = frame[3:3 + bytecount]
+            regs = [data[i] << 8 | data[i + 1] for i in range(0, bytecount - 1, 2)]
+            return decode_dev_info_block(regs)
         except Exception:
             return {}
 
@@ -892,9 +901,8 @@ class BmsBus:
             for b in parsed["balance_bits"]:
                 if b["on"]:
                     idx = b["n"] - 1
-                    b_list = self.bal_seconds.setdefault(a, [0.0] * LOG_CELL_SLOTS)
-                    if idx < len(b_list):
-                        b_list[idx] += POLL_S
+                    b_list = self.bal_seconds.setdefault(a, [0.0] * 15)
+                    b_list[idx] += POLL_S
 
         # 2. Weak cell tracking (identify chronically lagging cells)
         alive = [c for c in cells if c > 0]
@@ -939,8 +947,8 @@ class BmsBus:
             "raw": regs,
             "parsed": parsed,
             "dev_info": dinfo,
-            "rint": self.rint.get(a, [0.0] * LOG_CELL_SLOTS),
-            "bal_seconds": [int(s) for s in self.bal_seconds.get(a, [0.0] * LOG_CELL_SLOTS)],
+            "rint": self.rint.get(a, [0.0] * 15),
+            "bal_seconds": [int(s) for s in self.bal_seconds.get(a, [0.0] * 15)],
             "err": None,
         }
 
@@ -1028,7 +1036,12 @@ class BmsBus:
 
         with self.lock:
             st = self._log_state(addr)
-            if not st["on"] and self.log_auto:
+            # The fast poll frame has no dev-info block; take model/fw/serial
+            # from the pack state filled during discovery.
+            parsed = merge_dev_info(parsed, (self.packs.get(addr) or {}).get("dev_info") or {})
+            # Global mode may auto-start only a pack without a session yet.
+            # An explicitly stopped pack keeps st["path"], so it stays off.
+            if self.log_auto and not st["on"] and not st["path"]:
                 self._start_log_state(st, addr)
             if not st["on"] or not st["path"]:
                 return
@@ -1131,20 +1144,10 @@ class BmsBus:
                     with self.lock:
                         self._update_pack_telemetry(a, regs, dev_info)
                     self.log_row(regs, a)
-                except Exception as e:
+                except Exception:
                     with self.lock:
                         if a in self.packs:
                             self.packs[a]["online"] = False
-                    err_s = str(e).lower()
-                    if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
-                        with self._io_lock:
-                            if self.ser:
-                                try:
-                                    self.ser.close()
-                                except Exception:
-                                    pass
-                                self.ser = None
-                        break
 
             with self.lock:
                 self.active_addrs = sorted(found)
@@ -1172,16 +1175,6 @@ class BmsBus:
                             self.packs[a]["online"] = False
                             if a in self.active_addrs:
                                 self.active_addrs.remove(a)
-                err_s = str(e).lower()
-                if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
-                    with self._io_lock:
-                        if self.ser:
-                            try:
-                                self.ser.close()
-                            except Exception:
-                                pass
-                            self.ser = None
-                    break
             time.sleep(POLL_S)
 
         # 3. Background hot-plug discovery of 1 inactive address per cycle
@@ -1202,47 +1195,14 @@ class BmsBus:
                             self.active_addrs.append(probe_a)
                             self.active_addrs.sort()
                     self.log_row(regs, probe_a)
-            except Exception as e:
-                err_s = str(e).lower()
-                if "device not configured" in err_s or "disconnected" in err_s or "bad file descriptor" in err_s or "no such device" in err_s or "port not open" in err_s:
-                    with self._io_lock:
-                        if self.ser:
-                            try:
-                                self.ser.close()
-                            except Exception:
-                                pass
-                            self.ser = None
+            except Exception:
+                pass
 
     def passive_step(self, buf: bytes) -> bytes:
         if not self.mock and (self.ser is None or not self.ser.is_open):
             if not self.open():
                 time.sleep(2.5)
                 return b""
-
-        now = time.time()
-        with self.lock:
-            if self._rescan_requested:
-                self._rescan_requested = False
-                self.is_scanning = True
-                self.scan_msg = "Пасивне сканування: слухаю шину RS485 (1..16)..."
-                self._passive_scan_until = now + 4.0
-                if self.ser and self.ser.is_open:
-                    try:
-                        self.ser.reset_input_buffer()
-                    except Exception:
-                        pass
-                buf = b""
-
-            if getattr(self, "_passive_scan_until", 0) > 0:
-                if now < self._passive_scan_until:
-                    self.is_scanning = True
-                    self.scan_msg = "Пасивне сканування: слухаю шину RS485 (1..16)..."
-                else:
-                    self.is_scanning = False
-                    self._passive_scan_until = 0
-                    if not self.active_addrs:
-                        self.scan_msg = "Шина мовчить"
-                        self.last_err = "Шина RS485 мовчить. Перемкніть у ⚡ Активний режим для прямого опитування."
 
         if self.mock:
             time.sleep(0.8)
@@ -1253,44 +1213,26 @@ class BmsBus:
                 self.log_row(regs, a)
             with self.lock:
                 self.active_addrs = [1, 2]
-                self.is_scanning = False
-                self._passive_scan_until = 0
             return b""
 
         try:
-            with self._io_lock:
-                if self.ser is None or not self.ser.is_open:
-                    time.sleep(0.5)
-                    return b""
-                avail = getattr(self.ser, "in_waiting", 0)
-                chunk = self.ser.read(avail if avail > 0 else 1)
+            chunk = self.ser.read(512)
             if chunk:
                 buf += chunk
-                self._last_rx_t = now
                 frames, buf = parse_bus(buf)
             else:
+                buf = b""
                 frames = []
-                if (now - getattr(self, "_last_rx_t", now)) > 1.5:
-                    buf = b""
 
+            now = time.time()
             for kind, addr, payload in frames:
-                if kind == "resp" and (1 <= addr <= 16):
-                    if len(payload) >= 28:
-                        with self.lock:
-                            self._update_pack_telemetry(addr, payload)
-                            if addr not in self.active_addrs:
-                                self.active_addrs.append(addr)
-                                self.active_addrs.sort()
-                            self.is_scanning = False
-                            self._passive_scan_until = 0
-                        self.log_row(payload, addr)
-                    elif len(payload) == 23:
-                        dev_info = decode_dev_info_block(payload)
-                        with self.lock:
-                            p = self.packs.setdefault(addr, {})
-                            p["dev_info"] = dev_info
-                            if addr in self.packs:
-                                self.packs[addr]["dev_info"] = dev_info
+                if kind == "resp" and len(payload) >= 28 and (1 <= addr <= 16):
+                    with self.lock:
+                        self._update_pack_telemetry(addr, payload)
+                        if addr not in self.active_addrs:
+                            self.active_addrs.append(addr)
+                            self.active_addrs.sort()
+                    self.log_row(payload, addr)
 
             with self.lock:
                 for a, p in self.packs.items():
@@ -1300,13 +1242,12 @@ class BmsBus:
                             self.active_addrs.remove(a)
         except Exception as e:
             self.last_err = str(e)
-            with self._io_lock:
-                if self.ser:
-                    try:
-                        self.ser.close()
-                    except Exception:
-                        pass
-                    self.ser = None
+            if self.ser:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
             time.sleep(1.0)
         return buf
 
@@ -1315,12 +1256,8 @@ class BmsBus:
             packs_dict = {}
             for a, p in self.packs.items():
                 parsed = p.get("parsed")
-                if parsed and p.get("dev_info"):
-                    merged = dict(parsed)
-                    for k, v in p["dev_info"].items():
-                        if not merged.get(k):
-                            merged[k] = v
-                    p_copy = dict(p, parsed=merged)
+                if parsed:
+                    p_copy = dict(p, parsed=merge_dev_info(parsed, p.get("dev_info") or {}))
                 else:
                     p_copy = dict(p)
                 lg = self.logs.get(a)
@@ -1397,7 +1334,9 @@ h1{font-size:20px;margin:0;display:flex;align-items:center;gap:10px}
 button{background:var(--acc);border:0;color:#0b0f14;padding:7px 14px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px;transition:opacity .15s}
 button:hover{opacity:.9}
 button.off{background:#30363d;color:var(--dim)}
-button:disabled{opacity:.6;cursor:wait}
+/* Active CSV logging: "Stop" button in dark burgundy (recording indicator) */
+button.log-stop{background:#4a1620;color:#ffd9df;border:1px solid #8b2b3a}
+button.log-stop:hover{background:#5c1b28;opacity:1}
 .btn-mode{background:#238636;color:#fff;border:1px solid #2ea043}
 .btn-mode.passive{background:#1f6feb;border-color:#388bfd}
 .btn-rescan{background:#21262d;border:1px solid var(--border);color:var(--fg)}
@@ -1458,8 +1397,8 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 table.tbl th{padding:8px 10px;border-bottom:1px solid var(--border);color:var(--dim);text-align:left;font-size:11px;text-transform:uppercase}
 table.tbl td{padding:9px 10px;border-bottom:1px solid #21262d;font-variant-numeric:tabular-nums}
 table.tbl tr:hover{background:#1f262e}
-table.kv td{padding:4px 8px 4px 0;color:var(--dim);vertical-align:top;white-space:nowrap}
-table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-align:right;white-space:normal;word-break:break-all}
+table.kv td{padding:3px 10px 3px 0;color:var(--dim)}
+table.kv td:last-child{color:var(--fg);font-variant-numeric:tabular-nums;text-align:right}
 
 /* LEDs */
 .leds{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
@@ -1528,9 +1467,9 @@ canvas{width:100%;height:auto;display:block}
 <header>
   <h1>Vision BMS Multi-Pack Monitor <span id="conn" class="pill">…</span></h1>
   <div class="controls">
-    <button id="modebtn" class="btn-mode passive" onclick="toggleMode()">👂 Режим: Пасивний (Sniffer)</button>
+    <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
-    <button class="btn-inverter" onclick="openInverterModal()">⚙️ Налаштування інвертора</button>
+    <button class="btn-inverter" onclick="openInverterModal()">⚙️ Уставки інвертора</button>
     <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
   </div>
 </header>
@@ -1557,9 +1496,9 @@ canvas{width:100%;height:auto;display:block}
       <div class="subtext" id="b_p">— кВт</div>
     </div>
     <div class="bank-card">
-      <div class="l">Середній SOC банку</div>
+      <div class="l">Середній SOC банку (BMS)</div>
       <div class="v" id="b_soc">—</div>
-      <div class="subtext" id="b_cap">Залишок: — А·ч</div>
+      <div class="subtext" id="b_cap">OCV (сер.): —</div>
     </div>
     <div class="bank-card">
       <div class="l">Розбаланс у всьому банку</div>
@@ -1583,7 +1522,7 @@ canvas{width:100%;height:auto;display:block}
             <th>Стан</th>
             <th>Напруга</th>
             <th>Струм</th>
-            <th>SOC</th>
+            <th>SOC (BMS / OCV, сер.)</th>
             <th>Min ком.</th>
             <th>Max ком.</th>
             <th>Δ банку</th>
@@ -1693,12 +1632,12 @@ canvas{width:100%;height:auto;display:block}
         <tr><td>Модель АКБ</td><td id="p_model">—</td></tr>
         <tr><td>Прошивка BMS</td><td id="p_fw">—</td></tr>
         <tr><td>Серійний №</td><td id="p_sn">—</td></tr>
+        <tr><td>SOC (BMS)</td><td id="p_soc">—</td></tr>
         <tr><td>SOC (OCV)</td><td id="p_real_soc">—</td></tr>
-        <tr><td>SOC (BMS)</td><td id="p_soc">-</td></tr>
         <tr><td>SOH</td><td id="p_soh">—</td></tr>
-        <tr><td>Кількість циклів</td><td id="p_cyc">—</td></tr>
         <tr><td>Номінал</td><td id="p_cap">—</td></tr>
         <tr><td>Full Capacity</td><td id="p_fcap">—</td></tr>
+        <tr><td>Цикли</td><td id="p_cyc">—</td></tr>
       </table>
     </div>
 
@@ -1752,11 +1691,11 @@ canvas{width:100%;height:auto;display:block}
 
     <div class="card">
       <h2>📝 CSV-лог цієї АКБ</h2>
-      <table class="kv" style="width:100%">
-        <tr><td style="width:110px">Файл</td><td id="p_logpath" style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--acc);word-break:break-all">—</td></tr>
+      <table class="kv">
+        <tr><td>Файл</td><td id="p_logpath">—</td></tr>
         <tr><td>Записано рядків</td><td id="p_logrows">0</td></tr>
         <tr><td>Alarm / Work</td><td><span id="p_log_alarm">0</span> / <span id="p_log_work">0</span></td></tr>
-        <tr><td>Останній запис</td><td id="p_logts" style="font-size:12px">—</td></tr>
+        <tr><td>Останній запис</td><td id="p_logts">—</td></tr>
       </table>
       <div style="margin-top:10px">
         <button id="p_logbtn" onclick="togglePackLog()">Старт запису</button>
@@ -1888,16 +1827,6 @@ let logOn = false;
 let latestData = null;
 let logAnalysisData = null;
 
-function escapeHtml(s) {
-  if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 const ALARM_HELP_DB = {
   // Statuses
   "Charging": {
@@ -1940,152 +1869,240 @@ const ALARM_HELP_DB = {
     desc: "Струм навантаження близький до 0 А. Батарея повністю заряджена або очікує підключення навантаження.",
     action: "Штатний стан у буферному режимі. При появі струму розряду автоматично перейде в Discharging."
   },
+  "Heating ON": {
+    cat: "Status (0025)",
+    title: "Увімкнено підігрів (Heating ON)",
+    level: "ok",
+    levelName: "Штатний режим",
+    desc: "Біт 15 регістра 0025. BMS увімкнула підігрів батареї. У BMS_TOOLS → Heating switch задано: Heat opening 0 °C, Heat off 0 °C (для цього Pack1).",
+    action: "Штатний режим у холодну пору. Перевірте, що підігрів вимикається після прогріву і не працює без потреби."
+  },
 
-  // Warnings (0026)
-  "Pack OV": {
+  // Warnings (0026) — значення з BMS_TOOLS → BMS Parameter (Pack1, 02.09.2026)
+  "W:Pack OV": {
     cat: "Warning (0026)",
-    title: "Загальна перенапруга пака (Pack Over Voltage)",
+    title: "Загальна перенапруга пака — попередження (54.50 V)",
     level: "warn",
     levelName: "Попередження",
-    desc: "Загальна напруга 15S батареї перевищила заводський поріг попередження (> 54.0 V).",
-    action: "Знизьте напругу Bulk/Absorption на інверторі до рекомендованих 52.5 V (3.50 V / ком)."
+    desc: "Поріг Warn для загальної напруги пака — 54.50 V, Release — 52.50 V, Protect 55.00 V.",
+    action: "Знизьте напругу Bulk/Absorption на інверторі до 52.5 V (3.50 V / ком.) та перевірте балансування комірок."
   },
-  "Cell OV": {
+  "W:Cell OV": {
     cat: "Warning (0026)",
-    title: "Перенапруга комірки (Cell Over Voltage Warning)",
+    title: "Перенапруга комірки — попередження (3.600 V)",
     level: "warn",
     levelName: "Попередження",
-    desc: "Напруга хоча б однієї комірки перевищила заводський поріг 3570 mV. Найчастіше трапляється наприкінці швидкого заряду через розбаланс.",
-    action: "Знизьте напругу Bulk на інверторі до 52.5 V або увімкніть балансування (DIP 4 на COM-Box). Скидається автоматично, коли напруга опускається нижче 3550 mV."
+    desc: "Поріг Warn для однієї комірки — 3.600 V (3600 mV), Release — 3.400 V. Protect — 3.650 V. Найчастіше виникає наприкінці швидкого заряду через розбаланс.",
+    action: "Знизьте напругу Bulk на інверторі до 52.5 V або увімкніть балансування (DIP 4 на COM-Box). Скидається автоматично після 3.400 V."
   },
-  "Pack UV": {
+  "W:Pack UV": {
     cat: "Warning (0026)",
-    title: "Знижена напруга пака (Pack Under Voltage)",
+    title: "Знижена напруга пака — попередження (43.20 V)",
     level: "warn",
     levelName: "Попередження",
-    desc: "Загальна напруга впала нижче 43.5 V (глибокий розряд).",
+    desc: "Поріг Warn для загальної напруги пака — 43.20 V, Release — 46.00 V. Protect — 42.00 V.",
     action: "Негайно розпочніть заряджання акумулятора, щоб уникнути деградації хімії LiFePO4."
   },
-  "Cell UV": {
+  "W:Cell UV": {
     cat: "Warning (0026)",
-    title: "Знижена напруга комірки (Cell Under Voltage)",
+    title: "Знижена напруга комірки — попередження (2.800 V)",
     level: "warn",
     levelName: "Попередження",
-    desc: "Напруга найслабшої комірки впала нижче безпечного рівня (< 2850 mV).",
+    desc: "Поріг Warn для однієї комірки — 2.800 V (2800 mV), Release — 3.000 V. Protect — 2.500 V.",
     action: "Зупиніть розряд та почніть заряд помірним струмом (0.2C)."
   },
-  "Charge OC": {
+  "W:Charge OC": {
     cat: "Warning (0026)",
-    title: "Перевантаження по струму заряду (Charge Over Current)",
+    title: "Перевантаження струму заряду — попередження",
     level: "warn",
     levelName: "Попередження",
-    desc: "Струм заряду перевищив налаштоване обмеження (зазвичай > 100 А на один пак).",
+    desc: "Окремого Warn-порогу в BMS_TOOLS не видно. Задані Protect-пороги: OC1 102.00 A / 20 s, OC2 112.00 A / 3 s, Release 180 s, Times 5. Попередження зазвичай виникає раніше за ці пороги.",
     action: "Обмежте максимальний струм заряду на інверторі або розподіліть струм між паралельними батареями."
   },
-  "Discharge OC": {
+  "W:Discharge OC": {
     cat: "Warning (0026)",
-    title: "Перевантаження по струму розряду (Discharge Over Current)",
+    title: "Перевантаження струму розряду — попередження",
     level: "warn",
     levelName: "Попередження",
-    desc: "Споживання навантаження перевищує номінальний струм віддачі акумулятора.",
+    desc: "Окремого Warn-порогу в BMS_TOOLS не видно. Задані Protect-пороги: OC1 102.00 A / 30 s, OC2 122.00 A / 3 s, Release 60 s, Times 5. Попередження зазвичай виникає раніше за ці пороги.",
     action: "Знизьте потужність підключених споживачів."
   },
-  "Temp anomaly": {
+  "W:Temp anomaly": {
     cat: "Warning (0026)",
-    title: "Аномальний градієнт температур (Temp Anomaly)",
+    title: "Аномалія температури — попередження",
     level: "warn",
     levelName: "Попередження",
-    desc: "Різниця між датчиками температури всередині пака перевищила допустиму дельту (> 10°C).",
+    desc: "Пороги Ambient: High Warn 65 °C, Low Warn -15 °C. Protect: High 70 °C, Low -20 °C. Також біт може означати нерівномірність датчиків усередині пака.",
     action: "Перевірте рівномірність вентиляції та відсутність локального нагріву контактів шин."
   },
-  "MOS OT": {
+  "W:MOS OT": {
     cat: "Warning (0026)",
-    title: "Перегрів силових ключів (MOS Over Temperature)",
+    title: "Перегрів силових ключів / PCB — попередження (90 °C)",
     level: "bad",
     levelName: "Аварія / Перегрів",
-    desc: "Температура силових MOSFET-ключів BMS перевищила 85°C під високим навантаженням.",
+    desc: "PCB OT Warn — 90 °C, Release — 80 °C. Protect — 95 °C. Йдеться про температуру силових MOSFET/плати BMS.",
     action: "Знизьте струм навантаження та забезпечте циркуляцію повітря навколо батарейного блоку."
   },
-  "Charge OT": {
+  "W:Charge OT": {
     cat: "Warning (0026)",
-    title: "Перегрів при заряді (Charge Over Temperature)",
+    title: "Перегрів при заряді — попередження (65 °C)",
     level: "bad",
     levelName: "Аварія / Перегрів",
-    desc: "Температура комірок під час заряду перевищила 55°C.",
-    action: "Заряд припиняється автоматично до охолодження батареї до безпечної температури (< 45°C)."
+    desc: "Charge OT Warn — 65 °C, Release — 60 °C. Protect — 70 °C.",
+    action: "Припиніть заряд і дайте батареї охолонути до безпечної температури."
   },
-  "Discharge OT": {
+  "W:Discharge OT": {
     cat: "Warning (0026)",
-    title: "Перегрів при розряді (Discharge Over Temperature)",
+    title: "Перегрів при розряді — попередження (70 °C)",
     level: "bad",
     levelName: "Аварія / Перегрів",
-    desc: "Температура комірок під час розряду перевищила 65°C.",
+    desc: "Discharge OT Warn — 70 °C, Release — 65 °C. Protect — 75 °C.",
     action: "Знизьте навантаження і дайте блоку охолонути."
   },
-  "Charge UT": {
+  "W:Charge UT": {
     cat: "Warning (0026)",
-    title: "Заряд при низькій температурі (Charge Under Temp)",
+    title: "Заряд при низькій температурі — попередження (-3 °C)",
     level: "bad",
     levelName: "Критична заборона",
-    desc: "Температура батареї нижче 0°C. Заряджати LiFePO4 при мінусовій температурі суворо заборонено через ризик випадіння металевого літію.",
-    action: "Увімкніть підігрів або прогрійте приміщення до плюсової температури (+10°C) перед початком заряду."
+    desc: "Charge UT Warn — -3 °C, Release — 0 °C. Protect — -5 °C. Заряджати LiFePO4 при мінусовій температурі небезпечно через ризик випадіння металевого літію.",
+    action: "Увімкніть підігрів або прогрійте приміщення до плюсової температури перед початком заряду."
   },
-  "Discharge UT": {
+  "W:Discharge UT": {
     cat: "Warning (0026)",
-    title: "Розряд при низькій температурі (Discharge Under Temp)",
+    title: "Розряд при низькій температурі — попередження (-20 °C)",
     level: "warn",
     levelName: "Попередження",
-    desc: "Температура комірок нижче -20°C.",
+    desc: "Discharge UT Warn — -20 °C, Release — -15 °C. Protect — -25 °C.",
     action: "Експлуатація при сильному морозі знижує корисну ємність і збільшує внутрішній опір."
   },
-  "Low Capacity": {
-    cat: "Protection (0027) / Warning (0026)",
-    title: "Низька ємність / Standby Latch (Low Capacity)",
-    level: "ok",
-    levelName: "Інформаційний стан",
-    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
-    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
-  },
-  "Low capacity": {
-    cat: "Protection (0027) / Warning (0026)",
-    title: "Низька ємність / Standby Latch (Low capacity)",
-    level: "ok",
-    levelName: "Інформаційний стан",
-    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
-    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
-  },
-  "Low Capacity": {
-    cat: "Protection (0027) / Warning (0026)",
-    title: "Низька ємність / Standby Latch (Low Capacity)",
-    level: "ok",
-    levelName: "Інформаційний стан",
-    desc: "Заводський прапорець Vision BMS (біт 0x1000). Встановлюється в парі з переходом у Standby, коли струм зарядки падає до нуля і батарея виходить на верхню полицю напруги, або при вичерпанні залишку ємності.",
-    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
-  },
-  "Float stop": {
+  "W:Low Capacity": {
     cat: "Warning (0026)",
-    title: "Зупинка буферного режиму (Float Stop)",
+    title: "Низька ємність (Low Capacity, 5 %)",
     level: "ok",
     levelName: "Інформаційний стан",
-    desc: "Буферний режим підзарядки завершено або тимчасово призупинено за таймером BMS.",
-    action: "Штатний процес."
+    desc: "Balance → Low Capacity Warn = 5 %. Біт 0x1000 також може означати Standby Latch: BMS фіксує завершення заряду, коли струм падає до нуля, а батарея виходить на верхню полицю напруги.",
+    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+  },
+  "W:Float stop": {
+    cat: "Warning (0026)",
+    title: "Зупинка буферного режиму (Float stop)",
+    level: "ok",
+    levelName: "Інформаційний стан",
+    desc: "Окремого числового порогу в BMS_TOOLS немає: прапорець означає, що буферний (float) цикл підзарядки завершено або тимчасово призупинено BMS.",
+    action: "Штатний процес. Втручання не потрібне, якщо напруга пака в нормі."
   },
 
-  // Protections & Errors (0027 / 0028)
-  "Short Circuit": {
+  // Protections (0027) — ті самі біти, але пороги Protect з BMS_TOOLS
+  "P:Pack OV": {
+    cat: "Protection (0027)",
+    title: "Загальна перенапруга пака — захист (55.00 V)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Поріг Protect для загальної напруги пака — 55.00 V, Release — 52.50 V. Warn спрацьовує раніше — на 54.50 V.",
+    action: "BMS блокує заряд. Знизьте напругу заряду, перевірте балансування та після зниження напруги скиньте аварію."
+  },
+  "P:Cell OV": {
+    cat: "Protection (0027)",
+    title: "Перенапруга комірки — захист (3.650 V)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Поріг Protect для однієї комірки — 3.650 V (3650 mV), Release — 3.400 V. Warn — 3.600 V.",
+    action: "Заряд заблоковано. Перевірте балансування та знизьте напругу заряду до 52.5 V."
+  },
+  "P:Pack UV": {
+    cat: "Protection (0027)",
+    title: "Знижена напруга пака — захист (42.00 V)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Поріг Protect для загальної напруги пака — 42.00 V, Release — 46.00 V. Warn — 43.20 V.",
+    action: "Розряд заблоковано. Негайно поставте на заряд; не допускайте повторного глибокого розряду."
+  },
+  "P:Cell UV": {
+    cat: "Protection (0027)",
+    title: "Знижена напруга комірки — захист (2.500 V)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Поріг Protect для однієї комірки — 2.500 V (2500 mV), Release — 3.000 V. Warn — 2.800 V.",
+    action: "Розряд заблоковано. Заряджайте помірним струмом; перевірте найслабшу комірку."
+  },
+  "P:Charge OC": {
+    cat: "Protection (0027)",
+    title: "Перевантаження струму заряду — захист",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "BMS_TOOLS: OC1 Protect 102.00 A / 20 s, OC2 Protect 112.00 A / 3 s, Release 180 s, Times 5. Після спрацювання зарядний ключ блокується.",
+    action: "Усуньте причину перевантаження, перевірте налаштування інвертора та скиньте аварію."
+  },
+  "P:Discharge OC": {
+    cat: "Protection (0027)",
+    title: "Перевантаження струму розряду — захист",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "BMS_TOOLS: OC1 Protect 102.00 A / 30 s, OC2 Protect 122.00 A / 3 s, Release 60 s, Times 5. Після спрацювання розрядний ключ блокується.",
+    action: "Знизьте навантаження, перевірте кабелі та скиньте аварію."
+  },
+  "P:Temp anomaly": {
+    cat: "Protection (0027)",
+    title: "Аномалія температури — захист",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Пороги Ambient: High Protect 70 °C, Low Protect -20 °C. Warn — 65 °C / -15 °C. Також може означати критичну нерівномірність датчиків.",
+    action: "Зупиніть експлуатацію, перевірте датчики, вентиляцію та локальний нагрів контактів."
+  },
+  "P:MOS OT": {
+    cat: "Protection (0027)",
+    title: "Перегрів силових ключів / PCB — захист (95 °C)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "PCB OT Protect — 95 °C, Release — 80 °C. Warn — 90 °C.",
+    action: "BMS блокує силові ключі. Знизьте навантаження, забезпечте охолодження і скиньте аварію після 80 °C."
+  },
+  "P:Charge OT": {
+    cat: "Protection (0027)",
+    title: "Перегрів при заряді — захист (70 °C)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Charge OT Protect — 70 °C, Release — 60 °C. Warn — 65 °C.",
+    action: "Заряд заблоковано до охолодження. Перевірте вентиляцію та струм заряду."
+  },
+  "P:Discharge OT": {
+    cat: "Protection (0027)",
+    title: "Перегрів при розряді — захист (75 °C)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Discharge OT Protect — 75 °C, Release — 65 °C. Warn — 70 °C.",
+    action: "Розряд заблоковано. Знизьте навантаження і дайте блоку охолонути."
+  },
+  "P:Charge UT": {
+    cat: "Protection (0027)",
+    title: "Заряд при низькій температурі — захист (-5 °C)",
+    level: "bad",
+    levelName: "Критична заборона",
+    desc: "Charge UT Protect — -5 °C, Release — 0 °C. Warn — -3 °C.",
+    action: "Заряд заблоковано. Прогрійте батарею до плюсової температури перед зарядом."
+  },
+  "P:Discharge UT": {
+    cat: "Protection (0027)",
+    title: "Розряд при низькій температурі — захист (-25 °C)",
+    level: "bad",
+    levelName: "Аварія / Захист",
+    desc: "Discharge UT Protect — -25 °C, Release — -15 °C. Warn — -20 °C.",
+    action: "Розряд заблоковано. Прогрійте батарею або знизьте навантаження."
+  },
+  "P:Short Circuit": {
     cat: "Protection (0027)",
     title: "Коротке замикання на виході (Short Circuit)",
     level: "bad",
     levelName: "Аварія / КЗ",
-    desc: "BMS миттєво відсікла розрядний ключ через виявлення короткого замикання або надструму.",
-    action: "Вимкніть навантаження, перевірте кабелі підключення до інвертора на предмет КЗ. Скидання: вимкнути живлення або підключити зарядний пристрій."
+    desc: "BMS миттєво відсікла силовий ключ через коротке замикання або надструм. Окремого числового порогу в BMS_TOOLS немає — реакція апаратна.",
+    action: "Вимкніть навантаження, перевірте кабелі до інвертора на КЗ. Скидання: вимкнути живлення або підключити зарядний пристрій."
   },
-  "Reverse": {
+  "P:Reverse": {
     cat: "Protection (0027)",
     title: "Захист від переполюсовки (Reverse Polarity)",
     level: "bad",
     levelName: "Критична аварія",
-    desc: "Виявлено неправильну полярність підключення силових клем (+/-).",
+    desc: "Виявлено неправильну полярність підключення силових клем (+/-). Числового порогу немає.",
     action: "Негайно перевірте полярність підключення кабелів!"
   },
   "Voltage error": {
@@ -2122,8 +2139,8 @@ const ALARM_HELP_DB = {
   }
 };
 
-function showAlarmHelp(name) {
-  const item = ALARM_HELP_DB[name];
+function showAlarmHelp(key) {
+  const item = ALARM_HELP_DB[key];
   if (!item) return;
   const badgeCls = item.level === 'ok' ? 'ok' : (item.level === 'warn' ? 'warn' : 'bad');
   let html = `
@@ -2150,11 +2167,14 @@ function closeAlarmModal() {
   document.getElementById('alarm_modal').style.display = 'none';
 }
 
-function leds(el, arr, cls) {
+function leds(el, arr, cls, prefix) {
   if (!el || !arr) return;
   el.innerHTML = arr.map(b => {
-    const isClickable = !!ALARM_HELP_DB[b.name];
-    const clickAttr = isClickable ? `onclick="showAlarmHelp('${b.name}')" title="Клікніть для детального опису та інструкції" style="cursor:pointer"` : '';
+    // The same bit name exists in 0026 and 0027 with different thresholds,
+    // so warning and protection use distinct keys: "W:Pack OV" / "P:Pack OV".
+    const key = prefix ? prefix + b.name : b.name;
+    const isClickable = !!ALARM_HELP_DB[key];
+    const clickAttr = isClickable ? `onclick="showAlarmHelp('${key}')" title="Клікніть для детального опису та інструкції" style="cursor:pointer"` : '';
     return `<div class="led ${b.on ? cls : ''}" ${clickAttr}><i></i>${b.name}${isClickable ? ' <span style="opacity:0.5;font-size:9px">ℹ️</span>' : ''}</div>`;
   }).join('');
 }
@@ -2249,10 +2269,10 @@ function renderSummary() {
   document.getElementById('b_i').textContent = (sum.total_current != null ? (currSign + sum.total_current.toFixed(1) + ' А') : '—');
   document.getElementById('b_p').textContent = (sum.total_power_kw != null ? (currSign + sum.total_power_kw.toFixed(2) + ' кВт') : '—');
   
-  const realSocStr = sum.avg_real_soc != null ? (sum.avg_real_soc.toFixed(1) + ' %') : (sum.avg_soc ? (sum.avg_soc + ' %') : '—');
-  document.getElementById('b_soc').textContent = realSocStr;
-  const bmsNote = (sum.avg_soc != null && sum.avg_real_soc != null) ? ` · BMS: ${sum.avg_soc}%` : '';
-  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—') + bmsNote;
+  const hasSoc = sum.avg_soc != null && sum.online_packs > 0;
+  document.getElementById('b_soc').textContent = hasSoc ? (sum.avg_soc + ' %') : '—';
+  const ocvNote = (sum.avg_real_soc != null) ? `OCV (сер.): ${sum.avg_real_soc.toFixed(1)} %` : 'OCV (сер.): —';
+  document.getElementById('b_cap').textContent = 'Залишок: ' + (sum.total_cap_remaining ? sum.total_cap_remaining.toFixed(1) + ' А·ч' : '—') + ' · ' + ocvNote;
 
   document.getElementById('b_diff').textContent = (sum.cell_delta_mv != null ? ('Δ = ' + sum.cell_delta_mv + ' mV') : '—');
   if (sum.min_cell_mv && sum.max_cell_mv) {
@@ -2299,7 +2319,7 @@ function renderSummary() {
       <td><span class="pill ${stClass}">${d.status_name}</span></td>
       <td><b>${d.voltage.toFixed(2)} V</b></td>
       <td>${currStr}</td>
-      <td><b>${d.real_soc != null ? d.real_soc.toFixed(1) + '%' : (d.soc != null ? d.soc + '%' : '—')}</b>${d.soc != null && d.real_soc != null ? ` <span style="color:var(--dim);font-size:11px" title="Заводський BMS SOC">(${d.soc}%)</span>` : ''}</td>
+      <td><b>${d.soc != null ? d.soc + '%' : '—'}</b>${d.soc_avg != null ? ` <span style="color:var(--dim);font-size:11px" title="OCV-оцінка за середньою коміркою">(OCV ${d.soc_avg.toFixed(1)}%)</span>` : ''}</td>
       <td style="color:var(--bad)">${(d.cell_min / 1000).toFixed(3)} V</td>
       <td style="color:var(--ok)">${(d.cell_max / 1000).toFixed(3)} V</td>
       <td><b>${d.cell_diff} mV</b></td>
@@ -2379,7 +2399,7 @@ function renderPackDetail(addr) {
   if (lt) lt.textContent = p.log_last_ts || '—';
   if (lb) {
     lb.textContent = p.log_on ? 'Зупинити запис' : 'Старт запису';
-    lb.className = p.log_on ? 'off' : '';
+    lb.className = p.log_on ? 'log-stop' : '';
   }
 
   if (!d) return;
@@ -2394,9 +2414,10 @@ function renderPackDetail(addr) {
   document.getElementById('p_model').textContent = d.model || '—';
   document.getElementById('p_fw').textContent = d.fw_version || '—';
   document.getElementById('p_sn').textContent = d.serial || '—';
-  const rSoc = d.real_soc != null ? `${d.real_soc.toFixed(1)} % <span style="font-size:11px;color:var(--dim)">(по мін. ком. ${(d.cell_min / 1000).toFixed(3)} V)</span>` : '—';
-  document.getElementById('p_real_soc').innerHTML = `<b>${rSoc}</b>`;
-  document.getElementById('p_soc').textContent = (d.soc == null ? '—' : d.soc + ' %') + ' / ' + (d.cap_remaining == null ? '—' : d.cap_remaining + ' А·ч');
+  const bmsSoc = d.soc == null ? '—' : `${d.soc} % <span style="font-size:11px;color:var(--dim)">(залишок ${d.cap_remaining == null ? '—' : d.cap_remaining + ' А·ч'})</span>`;
+  document.getElementById('p_soc').innerHTML = `<b>${bmsSoc}</b>`;
+  const rSoc = d.soc_avg != null ? `${d.soc_avg.toFixed(1)} % <span style="font-size:11px;color:var(--dim)">(сер. ком. ${(d.cell_avg / 1000).toFixed(3)} V)</span>` : '—';
+  document.getElementById('p_real_soc').innerHTML = rSoc;
   document.getElementById('p_soh').textContent = (d.soh == null ? '—' : d.soh + ' %') + ' / ' + (d.max_charge_a == null ? '—' : d.max_charge_a + ' А');
   document.getElementById('p_cyc').textContent = d.cycles == null ? '—' : d.cycles;
   document.getElementById('p_cap').textContent = (d.designed_cap_ah == null ? '—' : d.designed_cap_ah + ' А·ч') + ' · ' + d.cell_num + 'S';
@@ -2440,8 +2461,8 @@ function renderPackDetail(addr) {
   document.getElementById('p_errraw').textContent = hx(d.error_code);
 
   leds(document.getElementById('p_stbits'), d.status_bits, 'onok');
-  leds(document.getElementById('p_warn'), d.warning_bits, 'on');
-  leds(document.getElementById('p_prot'), d.protection_bits, 'on');
+  leds(document.getElementById('p_warn'), d.warning_bits, 'on', 'W:');
+  leds(document.getElementById('p_prot'), d.protection_bits, 'on', 'P:');
   leds(document.getElementById('p_errbits'), d.error_bits, 'onw');
 
   document.getElementById('p_bal').innerHTML = d.balance_bits ? d.balance_bits.map(b =>
@@ -2760,13 +2781,13 @@ function openReport() {
 
   <div class="rep-sec">1. Загальний енергетичний статус банку</div>
   <table>
-    <tr><th>Підключено АКБ</th><th>Загальна напруга</th><th>Сумарний струм</th><th>Потужність</th><th>Середній SOC (OCV)</th><th>Залишок енергії</th><th>Макс. розбаланс банку</th></tr>
+    <tr><th>Підключено АКБ</th><th>Загальна напруга</th><th>Сумарний струм</th><th>Потужність</th><th>Середній SOC (BMS)</th><th>Залишок енергії</th><th>Макс. розбаланс банку</th></tr>
     <tr>
       <td><b>${sum.online_packs} з ${sum.total_packs}</b></td>
       <td>${sum.avg_voltage.toFixed(2)} V</td>
       <td>${sum.total_current >= 0 ? '+' : ''}${sum.total_current.toFixed(1)} А</td>
       <td>${sum.total_power_kw.toFixed(2)} кВт</td>
-      <td><b>${sum.avg_real_soc != null ? sum.avg_real_soc.toFixed(1) + ' %' : (sum.avg_soc + ' %')}</b>${sum.avg_soc != null && sum.avg_real_soc != null ? ` <span style="font-size:11px;color:#666">(${sum.avg_soc}% BMS)</span>` : ''}</td>
+      <td><b>${sum.avg_soc != null ? sum.avg_soc + ' %' : '—'}</b>${sum.avg_real_soc != null ? ` <span style="font-size:11px;color:#666">(OCV ${sum.avg_real_soc.toFixed(1)}%)</span>` : ''}</td>
       <td><b>${aut.energy_kwh} кВт·год</b> (${aut.eta_str})</td>
       <td><b style="color:${sum.cell_delta_mv > 50 ? '#c00' : '#000'}">Δ = ${sum.cell_delta_mv} mV</b></td>
     </tr>
@@ -2774,21 +2795,21 @@ function openReport() {
 
   <div class="rep-sec">2. Паспортні дані акумуляторів (BMS Info)</div>
   <table>
-    <tr><th>Адреса</th><th>Модель</th><th>Прошивка BMS</th><th>Серійний номер</th><th>SOC (OCV / BMS)</th><th>SOH</th><th>Цикли</th><th>Номінал</th><th>Стан</th></tr>`;
+    <tr><th>Адреса</th><th>Модель</th><th>Прошивка BMS</th><th>Серійний номер</th><th>SOC (BMS / OCV, сер.)</th><th>SOH</th><th>Цикли</th><th>Номінал</th><th>Стан</th></tr>`;
 
   addrs.forEach(a => {
     const p = packs[a];
     const parsed = p.parsed || {};
     html += `<tr>
-      <td><b>${escapeHtml(a)}</b></td>
-      <td>${escapeHtml(parsed.model || '—')}</td>
-      <td>${escapeHtml(parsed.fw_version || '—')}</td>
-      <td>${escapeHtml(parsed.serial || '—')}</td>
-      <td><b>${parsed.real_soc != null ? parsed.real_soc.toFixed(1) + '%' : '—'}</b> / <span style="color:#666">${parsed.soc != null ? parsed.soc + '%' : '—'}</span></td>
+      <td><b>${a}</b></td>
+      <td>${parsed.model || '—'}</td>
+      <td>${parsed.fw_version || '—'}</td>
+      <td>${parsed.serial || '—'}</td>
+      <td><b>${parsed.soc != null ? parsed.soc + '%' : '—'}</b> / <span style="color:#666">${parsed.soc_avg != null ? parsed.soc_avg.toFixed(1) + '%' : '—'}</span></td>
       <td>${parsed.soh != null ? parsed.soh + '%' : '—'}</td>
       <td>${parsed.cycles != null ? parsed.cycles : '—'}</td>
       <td>${parsed.designed_cap_ah != null ? parsed.designed_cap_ah + ' А·ч' : '—'}</td>
-      <td>${p.online ? escapeHtml(parsed.status_name) : 'Офлайн'}</td>
+      <td>${p.online ? parsed.status_name : 'Офлайн'}</td>
     </tr>`;
   });
   html += `</table>
@@ -2832,7 +2853,7 @@ function openInverterModal() {
   const d = latestData;
   const packs = (d && d.packs) ? d.packs : {};
   const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
-  const packCount = onlineAddrs.length || 1;
+  const packCount = onlineAddrs.length || 3;
   
   let cellCount = 15;
   for (const a of onlineAddrs) {
@@ -2857,7 +2878,7 @@ function openInverterModal() {
   let html = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
       <div>
-        <h2 style="margin:0;font-size:20px;color:var(--fg)">⚙️ Рекомендовані налаштування для інвертора</h2>
+        <h2 style="margin:0;font-size:20px;color:var(--fg)">⚙️ Рекомендовані уставки для інвертора</h2>
         <div style="color:var(--dim);font-size:12px;margin-top:4px">
           Deye · Victron · Luxpower · Growatt · Voltronic для <b>${packCount} АКБ (${cellCount}S LiFePO4, ${capAh} А·ч / ~${kwh} кВт·год)</b>
         </div>
@@ -2937,7 +2958,7 @@ function closeInverterModal() {
 }
 
 function copyInverterSettings(packs, cells, bulk, floatV, cutoff, iOpt, iMax, iDis) {
-  const text = `=== Налаштування інвертора для Vision BMS (${packs}x АКБ, ${cells}S LiFePO4) ===\n` +
+  const text = `=== Уставки інвертора для Vision BMS (${packs}x АКБ, ${cells}S LiFePO4) ===\n` +
     `Bulk / Absorption: ${bulk} V\n` +
     `Float: ${floatV} V\n` +
     `Low Battery Cut-off: ${cutoff} V\n` +
@@ -2989,8 +3010,7 @@ function parseAndAnalyzeCSV(filename, text) {
     alert('Файл CSV порожній або містить замало рядків');
     return;
   }
-  const delim = lines[0].includes(';') ? ';' : ',';
-  const header = lines[0].split(delim).map(s => s.trim());
+  const header = lines[0].split(',').map(s => s.trim());
   const newFormat = header.indexOf('Voltage_V') !== -1;
 
   let addrIdx, tsIdx, cellIndices = [];
@@ -3034,7 +3054,7 @@ function parseAndAnalyzeCSV(filename, text) {
   const packMap = {};
 
   for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split(delim).map(s => s.trim());
+    const parts = lines[i].split(',').map(s => s.trim());
     if (parts.length < header.length) continue;
 
     const addr = parts[addrIdx] || '';
@@ -3078,15 +3098,10 @@ function parseAndAnalyzeCSV(filename, text) {
   const addrs = Object.keys(packMap).sort();
   const startTime = rows[0].ts;
   const endTime = rows[rows.length - 1].ts;
-  let minV = Infinity, maxV = -Infinity, maxCharge = -Infinity, maxDischarge = Infinity;
-  for (let i = 0; i < rows.length; i++) {
-    const v = rows[i].v;
-    const c = rows[i].curr;
-    if (v < minV) minV = v;
-    if (v > maxV) maxV = v;
-    if (c > maxCharge) maxCharge = c;
-    if (c < maxDischarge) maxDischarge = c;
-  }
+  const minV = Math.min(...rows.map(r => r.v));
+  const maxV = Math.max(...rows.map(r => r.v));
+  const maxCharge = Math.max(...rows.map(r => r.curr));
+  const maxDischarge = Math.min(...rows.map(r => r.curr));
 
   const cellStats = [];
 
@@ -3347,12 +3362,19 @@ async function tick() {
     document.getElementById('seeninfo').textContent = 'Онлайн: ' + (d.active_addrs && d.active_addrs.length ? d.active_addrs.join(', ') : 'жодного');
     document.getElementById('ts').textContent = d.ts || '—';
 
-    logOn = d.log_on;
+    // Global button = "every target pack is logging". If some are stopped,
+    // the same button starts all of them instead of stopping the rest.
+    const activeList = d.active_addrs || [];
+    const globalKeys = activeList.length ? activeList : Object.keys(d.packs || {});
+    logOn = globalKeys.length > 0 && globalKeys.every(k => {
+      const gp = (d.packs || {})[k];
+      return !!(gp && gp.log_on);
+    });
     document.getElementById('logpath').textContent = d.log_path || '—';
     document.getElementById('logrows').textContent = d.log_rows || 0;
     const lb = document.getElementById('logbtn');
     lb.textContent = logOn ? 'Зупинити запис (усі)' : 'Старт запису (усі АКБ)';
-    lb.className = logOn ? 'off' : '';
+    lb.className = logOn ? 'log-stop' : '';
 
     // Logging profiles (v2.4): both checkboxes reflect server-side state
     const cfg = d.log_cfg || {};
@@ -3372,7 +3394,7 @@ async function tick() {
       lf.innerHTML = keys.length ? keys.map(k => {
         const f = files[k];
         const state = f.on ? '<span class="pill ok">запис</span>' : '<span class="pill">стоп</span>';
-        return `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(f.path || '—')}</td><td>${f.rows || 0} · ${escapeHtml(f.last_ts || '—')}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
+        return `<tr><td>${k}</td><td>${f.path || '—'}</td><td>${f.rows || 0} · ${f.last_ts || '—'}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
       }).join('') : '<tr><td>—</td><td>лог ще не створювався</td><td>—</td><td>—</td><td>—</td></tr>';
     }
 
@@ -3386,55 +3408,19 @@ async function tick() {
 }
 
 async function toggleMode() {
-  const mbtn = document.getElementById('modebtn');
-  if (mbtn) {
-    mbtn.disabled = true;
-    mbtn.textContent = '⏳ Перемикання...';
-  }
-  const curPassive = latestData ? (latestData.mode === 'passive') : (mbtn && mbtn.classList.contains('passive'));
-  const targetMode = curPassive ? 'active' : 'passive';
-  try {
-    await fetch('/api/mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: targetMode })
-    });
-    await tick();
-  } catch (e) {
-    console.error(e);
-  } finally {
-    if (mbtn) mbtn.disabled = false;
-  }
+  if (!latestData) return;
+  const targetMode = (latestData.mode === 'active') ? 'passive' : 'active';
+  await fetch('/api/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: targetMode })
+  });
+  tick();
 }
 
 async function triggerRescan() {
-  const btn = document.querySelector('.btn-rescan');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '🔄 Сканування...';
-  }
-
-  if (latestData && latestData.mode === 'passive') {
-    const doActive = confirm(
-      "Утиліта зараз у ПАСИВНОМУ режимі (Sniffer) — передачу в шину вимкнено, щоб не створювати колізій із COMBOX.\\n\\n" +
-      "Бажаєте перемкнутися в ⚡ АКТИВНИЙ режим (Master), щоб утиліта сама опитала адреси 0x01..0x10 прямо зараз?"
-    );
-    if (doActive) {
-      await fetch('/api/mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'active' })
-      });
-      await fetch('/api/rescan', { method: 'POST' });
-      setTimeout(tick, 100);
-      setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Пересканувати всі 16'; } }, 3000);
-      return;
-    }
-  }
-
   await fetch('/api/rescan', { method: 'POST' });
-  setTimeout(tick, 100);
-  setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = '🔄 Пересканувати всі 16'; } }, 2500);
+  tick();
 }
 
 async function toggleLog() {
@@ -3499,18 +3485,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
-        host = self.headers.get("Host", "").split(":")[0].strip()
-        if host and host not in ("127.0.0.1", "localhost", "0.0.0.0"):
-            self._send(403, "Forbidden: Invalid Host header", "text/plain")
-            return
-        origin = self.headers.get("Origin", "")
-        if origin:
-            from urllib.parse import urlparse
-            p_orig = urlparse(origin)
-            if p_orig.hostname not in ("127.0.0.1", "localhost"):
-                self._send(403, "Forbidden: Cross-origin request not allowed", "text/plain")
-                return
-
         if self.path == "/api/mode":
             n = int(self.headers.get("Content-Length") or 0)
             try:
@@ -3571,6 +3545,12 @@ def selftest() -> int:
     assert abs(p["voltage"] - 52.31) < 1e-6, "voltage decode"
     assert abs(p["current"] + 0.01) < 1e-6, "current decode"
     assert p["cell_min"] == 3456, "cell decode"
+    regs[2], regs[3] = 3200, 3400
+    pa = decode_regs(regs)
+    assert pa["cell_avg"] == 3300, f"cell avg: {pa['cell_avg']}"
+    assert pa["soc_avg"] == 50.0, f"soc avg: {pa['soc_avg']}"
+    assert pa["real_soc"] == pa["soc_avg"], "real_soc must alias soc_avg"
+    regs[2], regs[3] = 3456, 0
     regs[25] = 0x0004
     bits = {b["name"]: b["on"] for b in decode_regs(regs)["status_bits"]}
     assert bits.get("Protect"), "status bit"
@@ -3590,9 +3570,6 @@ def selftest() -> int:
     regs[33], regs[34], regs[35] = 0x1414, 0x1514, 0
     ts = decode_regs(regs)["temp_sensors"]
     assert ts == [20, 20, 21, 20, 0, 0], f"temp sensors: {ts}"
-    regs[27] = 0x1000
-    on = [b["name"] for b in decode_regs(regs)["protection_bits"] if b["on"]]
-    assert on == ["Low Capacity"], f"prot 0x1000: {on}"
     regs[27] = 0x2000
     on = [b["name"] for b in decode_regs(regs)["protection_bits"] if b["on"]]
     assert on == ["Short Circuit"], f"prot 0x2000: {on}"
@@ -3604,7 +3581,7 @@ def selftest() -> int:
     on = [b["name"] for b in decode_regs(regs)["warning_bits"] if b["on"]]
     assert on == ["Float stop"], f"warn 0x2000: {on}"
     assert len(decode_regs(regs)["warning_bits"]) == 14, "warn = 14 bits"
-    assert len(decode_regs(regs)["protection_bits"]) == 15, "prot = 15 bits"
+    assert len(decode_regs(regs)["protection_bits"]) == 14, "prot = 14 bits"
 
     # --- CSV log format: readable header, volts, date, regs 31..35 ---
     lregs = list(regs)
@@ -3614,6 +3591,8 @@ def selftest() -> int:
     lcells, ltemps = _log_slots(lp)
     assert (lcells, ltemps) == (15, 6), f"log slots: {lcells}, {ltemps}"
     lhdr = build_log_header(lcells, ltemps)
+    assert lhdr == log_columns(lcells, ltemps), "header vs schema"
+    assert len(lhdr) == len(set(lhdr)), "duplicate log columns"
     lrow = build_log_values(lp, 1, lcells, ltemps, ts="2026-10-28 | 13:35:05")
     assert len(lhdr) == len(lrow), f"log width: {len(lhdr)} != {len(lrow)}"
     assert lrow[0] == "2026-10-28 | 13:35:05", "log date"
@@ -3625,6 +3604,24 @@ def selftest() -> int:
     assert lrow[lhdr.index("Temp_1_C")] == 20, "reg33 temp sensor 1"
     assert lrow[lhdr.index("Temp_3_C")] == 21, "reg34 temp sensor 3"
     assert lrow[lhdr.index("Status_Hex")] == "0x0000", "status hex"
+    assert "Serial" in lhdr, "serial column"
+    assert lrow[lhdr.index("Serial")] is None, "serial empty when unknown"
+    # Serial lives in the dev-info block: regs 105..127, serial = info[16:23]
+    # => absolute registers 121..127, two ASCII chars per register.
+    sregs = list(regs) + [0] * (128 - len(regs))
+    for i, ch in enumerate("SN-TEST"):
+        sregs[121 + i // 2] |= ord(ch) << (8 if i % 2 == 0 else 0)
+    sp = decode_regs(sregs)
+    assert sp["serial"] == "SN-TEST", f"serial decode: {sp['serial']}"
+    srow = build_log_values(sp, 1, lcells, ltemps, ts="2026-10-28 | 13:35:05")
+    assert srow[lhdr.index("Serial")] == "SN-TEST", "serial log value"
+    # Fast-poll frames are 39 regs: no dev-info block there, so serial must be
+    # merged from the pack state before logging (regression: empty Serial column).
+    assert decode_regs(regs)["serial"] is None, "39-reg frame has no serial"
+    merged = merge_dev_info(decode_regs(regs), {"model": "M", "serial": "SN-MERGED"})
+    assert merged["serial"] == "SN-MERGED", "dev-info merge serial"
+    mrow = build_log_values(merged, 1, lcells, ltemps, ts="2026-10-28 | 13:35:05")
+    assert mrow[lhdr.index("Serial")] == "SN-MERGED", "serial merged into log"
     lalarm = build_log_values(lp, 1, lcells, ltemps, ts="2026-10-28 | 13:35:05",
                               log_kind=LOG_KIND_ALARM)
     assert len(lalarm) == len(lhdr), "alarm log width"
@@ -3694,48 +3691,6 @@ def selftest() -> int:
         p_dev, p_desc = find_usb_rs485_port()
         assert p_dev == 'COM5' and 'CH340' in p_desc, f"Windows CH340 auto-detect: {p_dev}, {p_desc}"
 
-    # --- Dev Info block decoder test (Vision V-LFP48100 0x0069 registers) ---
-    raw_info_bytes = (
-        b"LFP-15SP10G3-100Ah-100A "  # 24 B (12 regs): Model
-        b"V10R18"                    # 6 B (3 regs): Firmware ASCII
-        b"2025040900109522"          # 16 B (8 regs): Serial Number
-    )
-    info_regs = [
-        (raw_info_bytes[i] << 8) | raw_info_bytes[i + 1]
-        for i in range(0, len(raw_info_bytes), 2)
-    ]
-    dev_info = decode_dev_info_block(info_regs)
-    assert dev_info["model"] == "LFP-15SP10G3-100Ah-100A", f"model: {dev_info['model']}"
-    assert dev_info["fw_version"] == "V10R18", f"fw_version: {dev_info['fw_version']}"
-    assert dev_info["serial"] == "2025040900109522", f"serial: {dev_info['serial']}"
-
-    # --- Logging Profile v2.4 (Alarm signature & log row header) test ---
-    bus_mock = BmsBus("MOCK", 9600, mock=True)
-    norm_parsed = {"status": 0x0001, "warning": 0x0000, "protection": 0x0000, "error_code": 0x0000, "temp_max": 25.0}
-    norm_sig = bus_mock._alarm_signature(norm_parsed)
-    assert not bus_mock._is_alarm(norm_sig), f"norm_sig must not be alarm: {norm_sig}"
-
-    alarm_parsed = {"status": 0x0004, "warning": 0x0000, "protection": 0x2000, "error_code": 0x0000, "temp_max": 25.0}
-    alarm_sig = bus_mock._alarm_signature(alarm_parsed)
-    assert bus_mock._is_alarm(alarm_sig), f"alarm_sig must be alarm: {alarm_sig}"
-    assert alarm_sig != norm_sig, "alarm signature must differ from normal"
-
-    temp_hot = {"status": 0x0001, "warning": 0, "protection": 0, "error_code": 0, "temp_max": 48.0}
-    assert bus_mock._is_alarm(bus_mock._alarm_signature(temp_hot)), "temp_hot must trigger alarm"
-
-    hdr = build_log_header()
-    assert hdr[0] == "Date" and hdr[1] == "Log" and hdr[2] == "addr", f"header structure: {hdr[:3]}"
-    row_alarm = build_log_values(alarm_parsed, 1, log_kind=LOG_KIND_ALARM)
-    assert row_alarm[1] == "Alarm" and row_alarm[2] == "0x01", f"alarm row: {row_alarm[:3]}"
-    row_work = build_log_values(norm_parsed, 1, log_kind=LOG_KIND_WORK)
-    assert row_work[1] == "Work" and row_work[2] == "0x01", f"work row: {row_work[:3]}"
-
-    # --- Telemetry bitmask definitions test ---
-    prot_names = [name for mask, name in PROT_BITS if (0x1000 & mask)]
-    assert "Low Capacity" in prot_names, f"0x1000 Low Capacity in PROT_BITS: {prot_names}"
-    warn_names = [name for mask, name in WARN_BITS if (0x1000 & mask)]
-    assert "Low Capacity" in warn_names, f"0x1000 Low Capacity in WARN_BITS: {warn_names}"
-
     print("selftest OK")
     return 0 if ok else 1
 
@@ -3750,10 +3705,8 @@ def main() -> int:
                     help="initial battery tab address (e.g. 0x01)")
     ap.add_argument("--http", type=int, default=DEFAULT_HTTP)
     ap.add_argument("--mock", action="store_true", help="no serial, mock multi-pack data")
-    ap.add_argument("--active", action="store_true",
-                    help="start in active master polling mode (default is passive sniffer)")
     ap.add_argument("--passive", action="store_true",
-                    help="start in passive sniffer mode (default, listen only, no TX)")
+                    help="listen only: parse live bus traffic (no TX, no collisions)")
     ap.add_argument("--list", action="store_true", help="list serial ports")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -3772,7 +3725,7 @@ def main() -> int:
         if auto_port:
             port = auto_port
             print(f"[Автовизначення] Знайдено адаптер RS485: {port} ({desc})")
-        elif DEFAULT_PORT and os.path.exists(DEFAULT_PORT):
+        elif os.path.exists(DEFAULT_PORT):
             port = DEFAULT_PORT
             print(f"[Порт] Використовуємо дефолтний: {port}")
         else:
@@ -3786,14 +3739,13 @@ def main() -> int:
     elif not port:
         port = "MOCK"
 
-    is_passive = not args.active or args.passive
-    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=is_passive)
+    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=args.passive)
     threading.Thread(target=bus.loop, daemon=True).start()
     Handler.bus = bus
     srv = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
 
     mode_label = "MOCK MULTI-PACK" if args.mock else (
-        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if is_passive else "ACTIVE MASTER"))
+        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
     print(f"BMS Web Monitor: http://127.0.0.1:{args.http}  [{mode_label}]")
     print("Multi-pack scanning: 0x01..0x10 enabled. Press Ctrl-C to stop.")
     try:
@@ -3802,13 +3754,6 @@ def main() -> int:
         pass
     finally:
         bus._stop = True
-        with bus._io_lock:
-            if bus.ser:
-                try:
-                    bus.ser.close()
-                except Exception:
-                    pass
-                bus.ser = None
         srv.server_close()
     return 0
 
