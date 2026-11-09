@@ -1268,12 +1268,18 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   uint8_t pack_idx = expected_addr - 1;
 
-  // Latch per-pack hardware Cell OV until cell voltage relaxes below BMS release threshold (3.42V):
+  // Latch per-pack hardware Cell OV until cell voltage relaxes below BMS release threshold (3.42V)
+  // OR until discharge current starts flowing (raw_current < -200, i.e. < -2.0 A) with cell < 3.55V:
   if (((reg_protect & 0x0002) && pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV) ||
       pack_max_cell_mv >= 3650) {
     pack_ov_protect_latched[pack_idx] = true;
-  } else if (pack_ov_protect_latched[pack_idx] && pack_max_cell_mv <= CELL_OV_RELEASE_BMS_MV) {
-    pack_ov_protect_latched[pack_idx] = false;
+  } else if (pack_ov_protect_latched[pack_idx]) {
+    if (pack_max_cell_mv <= CELL_OV_RELEASE_BMS_MV) {
+      pack_ov_protect_latched[pack_idx] = false;
+    } else if (raw_current < -200 && pack_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV) {
+      // Discharge-triggered release: BMS hardware closes FET on discharge; release latch proactively
+      pack_ov_protect_latched[pack_idx] = false;
+    }
   }
 
   // Cross-validate with physical measurements to reject transient Boot Latch flags (Q17):

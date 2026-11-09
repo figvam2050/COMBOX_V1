@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.5: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.6: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 Version-3
-Features (v2.5):
+Features (v2.6):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
   - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
@@ -44,6 +44,19 @@ Recent changes:
               and row order cannot drift. Reorder columns only there.
   2026-11-04  UI: active log button uses .log-stop (dark burgundy) instead
               of grey .off, so "Stop" no longer looks disabled.
+  2026-11-09  COM port: ported from bms_webX.py. Silent autodetect prefers
+              FTDI -> CH340/CH341 -> CP210x -> Prolific -> generic USB-serial;
+              internal COM1/ACPI, Bluetooth and debug consoles are ignored in
+              auto mode (use --port to force one). --allow-no-port starts the
+              web server without a dongle and retries every PORT_RETRY_S = 3 s.
+              Unplug/replug is recovered even when Windows keeps a stale
+              is_open handle. A working port is never replaced just because a
+              second dongle appeared: PORT_RESCAN_S = 5 s only verifies that
+              the current port still exists and is USB-serial.
+  2026-11-09  Offline UI: when the port is lost all known packs are marked
+              offline (_mark_offline). The header shows "No Dongle", pack
+              cards show OFFLINE and a neutral "—" status instead of a stale
+              green Standby; the next successful poll restores ONLINE.
 Journal: tools/HystoryMod.md
 
 Usage:
@@ -51,6 +64,7 @@ Usage:
   python3 tools/bms_web.py --mock
   python3 tools/bms_web.py --passive
   python3 tools/bms_web.py --port COM3
+  python3 tools/bms_web.py --allow-no-port
   python3 tools/bms_web.py --selftest
 """
 
@@ -71,13 +85,34 @@ try:
 except ImportError:
     serial = None
 
-DEFAULT_PORT = None
+DEFAULT_PORT = "/dev/cu.usbserial-A5069RR4"
 DEFAULT_BAUD = 9600
 DEFAULT_ADDR = 0x01
 DEFAULT_HTTP = 8080
 POLL_S = 0.35
 RESP_TIMEOUT_S = 0.4
 PROBE_TIMEOUT_S = 0.12
+# Background port retry: how often open() re-runs autodetect when the
+# USB-RS485 dongle is not connected yet.
+PORT_RETRY_S = 3.0
+# While connected in auto mode, how often to check that the current port
+# still exists and is still a USB-serial device. A working port is not
+# replaced just because another dongle was plugged in.
+PORT_RESCAN_S = 5.0
+# Preferred USB-RS485 chips, highest priority first. Used by the silent
+# background autodetect; unknown USB-serial adapters come after these.
+DONGLE_PREFERENCE = (
+    ("ftdi", "ft232", "ft2232"),
+    ("ch340", "ch341", "ch34x"),
+    ("cp210", "cp2102", "cp210x"),
+    ("prolific", "pl2303"),
+)
+USB_SERIAL_HINTS = (
+    "usb", "ch340", "ch341", "cp210", "cp2102", "cp210x", "ftdi", "ft232",
+    "prolific", "pl2303", "uart", "serial", "rs485", "rs-485", "ch34x",
+    # Linux/macOS device names.
+    "ttyusb", "ttyacm", "usbserial",
+)
 
 # 0025 Status: enum in the low byte (0/1/2/4/8) + heating flag 0x8000, per MODBUS V01.01.
 STATUS_STATES = [
@@ -112,68 +147,142 @@ ERROR_BITS = [
 ]
 
 
-def find_usb_rs485_port() -> tuple:
-    """Auto-detects USB-to-RS485/UART converter port across Windows, macOS, and Linux.
-    Returns (port_device, description) or (None, reason)."""
+# --------------------------------------------------------------------------
+# USB-RS485 port detection (ported from bms_webX.py)
+# --------------------------------------------------------------------------
+def _port_info_dict(p) -> dict:
+    return {
+        "device": p.device,
+        "description": getattr(p, "description", "") or "",
+        "hwid": getattr(p, "hwid", "") or "",
+        "manufacturer": getattr(p, "manufacturer", "") or "",
+    }
+
+
+def _looks_like_usb_serial(info: dict) -> bool:
+    blob = " ".join((
+        info.get("device") or "",
+        info.get("description") or "",
+        info.get("hwid") or "",
+        info.get("manufacturer") or "",
+    )).lower()
+    return any(h in blob for h in USB_SERIAL_HINTS)
+
+
+def list_ports_report() -> list:
+    """Snapshot of OS serial ports with USB-serial classification."""
     if serial is None:
-        return None, "pySerial not installed"
+        return []
     try:
         from serial.tools import list_ports
         ports = list(list_ports.comports())
-    except Exception as e:
-        return None, str(e)
-
-    if not ports:
-        return None, "жодного COM-порту не знайдено (перевірте USB-перехідник)"
-
-    KNOWN_VIDS = {
-        0x0403: "FTDI",
-        0x1A86: "CH340/CH341",
-        0x10C4: "CP210x",
-        0x067B: "PL2303",
-    }
-
-    candidates = []
+    except Exception:
+        return []
+    rows = []
     for p in ports:
-        desc = (p.description or "").lower()
-        mfg = (getattr(p, "manufacturer", "") or "").lower()
-        vid = getattr(p, "vid", None)
-        hwid = (getattr(p, "hwid", "") or "").lower()
-        dev = p.device
+        info = _port_info_dict(p)
+        info["usb_like"] = _looks_like_usb_serial(info)
+        rows.append(info)
+    return rows
 
-        if any(ign in dev.lower() for ign in ("bluetooth", "debug-console", "wlan-debug")):
-            continue
 
-        is_usb = (
-            vid in KNOWN_VIDS
-            or any(k in desc for k in ("ftdi", "ft232", "ch340", "ch341", "cp210", "prolific", "usb-serial", "usb serial", "uart", "rs485", "rs-485"))
-            or any(k in mfg for k in ("ftdi", "wch", "silicon labs", "prolific"))
-            or "usb" in hwid
-            or "usbserial" in dev.lower()
-            or "ttyusb" in dev.lower()
-            or "ttyacm" in dev.lower()
-        )
-        if is_usb:
-            chip = KNOWN_VIDS.get(vid) or p.description
-            candidates.append((dev, f"{p.description} [{chip}]" if chip != p.description else p.description))
+def _port_ignored(info: dict) -> bool:
+    """Bluetooth / debug consoles / ACPI ports are never a USB-RS485 dongle."""
+    blob = " ".join((info.get("device") or "", info.get("description") or "",
+                     info.get("hwid") or "")).lower()
+    return any(ign in blob
+               for ign in ("bluetooth", "debug-console", "wlan-debug", "acpi"))
 
-    if len(candidates) == 1:
-        return candidates[0]
-    elif len(candidates) > 1:
-        for dev, desc in candidates:
-            if "ftdi" in desc.lower() or "ft232" in desc.lower():
-                return dev, f"{desc} (обрано FTDI)"
-        return candidates[0][0], f"{candidates[0][1]} (перший з {len(candidates)} знайдених)"
 
-    win_coms = [p for p in ports if not p.device.startswith("/dev/") and p.device.upper() != "COM1"]
-    if len(win_coms) == 1:
-        return win_coms[0].device, win_coms[0].description
+def _port_rank(info: dict) -> tuple:
+    """Priority key for the silent port choice (lower is better).
 
-    non_dbg = [p for p in ports if not any(ign in p.device.lower() for ign in ("bluetooth", "debug-console", "wlan-debug"))]
-    if len(non_dbg) == 1:
-        return non_dbg[0].device, non_dbg[0].description
+    Order: FTDI -> CH340/CH341 -> CP210x -> Prolific -> other USB-serial.
+    Non-USB ports (internal COM1/ACPI) are ranked last and are normally
+    filtered out by choose_port_from_rows(). The device name breaks ties.
+    """
+    blob = " ".join((
+        info.get("description") or "",
+        info.get("hwid") or "",
+        info.get("manufacturer") or "",
+    )).lower()
+    device = info.get("device") or ""
+    for rank, hints in enumerate(DONGLE_PREFERENCE):
+        if any(hint in blob for hint in hints):
+            return (rank, device)
+    if info.get("usb_like"):
+        return (len(DONGLE_PREFERENCE), device)
+    if device.upper() == "COM1":
+        return (len(DONGLE_PREFERENCE) + 2, device)
+    return (len(DONGLE_PREFERENCE) + 1, device)
 
-    return None, f"доступні порти: {', '.join(p.device for p in ports)}"
+
+def choose_port_from_rows(rows: list) -> str:
+    """Pick a USB-serial port without prompting (safe for a background thread).
+
+    Prefers FTDI/CH340/CP210x/Prolific, then any USB-serial. Non-USB ports
+    (internal COM1/ACPI, Bluetooth, debug consoles) are ignored: connecting
+    to one would block a later hot-plugged USB-RS485 adapter. Use --port to
+    force such a port explicitly. Returns "" when no USB-serial is present.
+    """
+    if not rows:
+        return ""
+    pool = [
+        row for row in rows
+        if _looks_like_usb_serial(row) and not _port_ignored(row)
+    ]
+    if not pool:
+        return ""
+    return min(pool, key=_port_rank).get("device") or ""
+
+
+def autodetect_port_silent() -> str:
+    """Non-interactive autodetect used by the background retry loop."""
+    if serial is None:
+        return ""
+    return choose_port_from_rows(list_ports_report())
+
+
+def _chip_label(info: dict) -> str:
+    blob = " ".join((
+        info.get("description") or "",
+        info.get("hwid") or "",
+        info.get("manufacturer") or "",
+    )).lower()
+    for label, hints in (
+        ("FTDI", ("ftdi", "ft232", "ft2232")),
+        ("CH340/CH341", ("ch340", "ch341", "ch34x")),
+        ("CP210x", ("cp210", "cp2102", "cp210x")),
+        ("Prolific", ("prolific", "pl2303")),
+    ):
+        if any(h in blob for h in hints):
+            return label
+    return ""
+
+
+def find_usb_rs485_port() -> tuple:
+    """Auto-detects a USB-to-RS485/UART converter across Windows/macOS/Linux.
+
+    Uses the same silent selection as the background retry loop:
+    FTDI -> CH340/CH341 -> CP210x -> Prolific -> other USB-serial.
+    Internal COM1/ACPI, Bluetooth and debug consoles are ignored in auto
+    mode; an explicit --port is still allowed to target them.
+    Returns (port_device, description) or (None, reason).
+    """
+    if serial is None:
+        return None, "pySerial not installed"
+    rows = list_ports_report()
+    if not rows:
+        return None, "жодного COM-порту не знайдено (перевірте USB-перехідник)"
+    port = choose_port_from_rows(rows)
+    if not port:
+        return None, f"доступні порти: {', '.join(r['device'] for r in rows)}"
+    row = next((r for r in rows if r.get("device") == port), None)
+    desc = (row.get("description") if row else "") or ""
+    chip = _chip_label(row) if row else ""
+    if chip and chip.lower() not in desc.lower():
+        desc = f"{desc} [{chip}]"
+    return port, desc
 
 
 def modbus_crc16(data: bytes) -> int:
@@ -381,8 +490,8 @@ LOG_TEMP_SLOTS = 6
 # v2.4: two independent logging profiles (may run together; Alarm has priority).
 LOG_KIND_ALARM = "Alarm"
 LOG_KIND_WORK = "Work"
-DEFAULT_WORK_INTERVAL_S = 0.0
-MIN_WORK_INTERVAL_S = 0.0
+DEFAULT_WORK_INTERVAL_S = 5.0
+MIN_WORK_INTERVAL_S = 1.0
 MAX_WORK_INTERVAL_S = 3600.0
 # Temperature events for the Alarm profile (degrees C).
 ALARM_TEMP_HIGH_C = 45.0
@@ -617,7 +726,8 @@ class BmsBus:
     PASSIVE_GAP_S = 0.15
 
     def __init__(self, port: str, baud: int, initial_addr: int = DEFAULT_ADDR,
-                 mock: bool = False, passive: bool = False):
+                 mock: bool = False, passive: bool = False,
+                 auto_port: bool = False):
         self.port = port
         self.baud = baud
         self.focus_addr = initial_addr
@@ -631,6 +741,12 @@ class BmsBus:
         self.is_scanning = False
         self.scan_msg = ""
         self.last_err = None
+        # auto_port=True: the port came from autodetect (or is still unknown)
+        # and may be re-detected in the background after a USB replug.
+        # auto_port=False: --port was given explicitly; retry that name only.
+        self.auto_port = bool(auto_port)
+        self.port_source = "auto" if self.auto_port else "cli"
+        self._last_port_check = 0.0
 
         self._rescan_requested = True
         self._bg_probe_idx = 0
@@ -665,11 +781,111 @@ class BmsBus:
         self.log_auto = False
         self._log_write_lock = threading.Lock()
 
+    @staticmethod
+    def _port_gone(e: Exception) -> bool:
+        """True when the error means the USB-serial device is absent/unplugged."""
+        msg = str(e).lower()
+        return any(key in msg for key in (
+            "could not open port", "filenotfounderror", "no such file",
+            "cannot find", "clearcommerror", "device not configured",
+            "input/output error", "the device does not recognize",
+            "i/o operation has been aborted", "writefile failed",
+            "readfile failed", "write failed", "read failed",
+            "the parameter is incorrect", "invalid handle",
+            "a device attached to the system is not functioning",
+            "the semaphore timeout period has expired",
+            "the system cannot find the file specified",
+            # Localized Windows messages (RU).
+            "не удается найти", "системе не удается найти",
+            "отказано в доступе", "неверный дескриптор",
+            "устройство не распознает", "параметр задан неверно",
+        ))
+
+    def _port_missing_now(self) -> bool:
+        """True when self.port is no longer enumerated (USB unplugged).
+
+        Windows often keeps a stale serial handle with is_open == True after
+        a USB unplug, so read/write only time out. Comparing the current
+        port list is the reliable signal that the device is gone.
+        """
+        if not self.port or serial is None:
+            return False
+        try:
+            devices = {row.get("device") for row in list_ports_report()}
+        except Exception:
+            return False
+        return self.port not in devices
+
+    def _drop_serial(self) -> None:
+        """Close and forget the serial handle so the next cycle re-opens it."""
+        try:
+            if self.ser is not None:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
+
+    def _mark_offline(self, reason: str = None) -> None:
+        """Mark every known pack offline without forgetting its address.
+
+        Called when the serial port is lost. The pack state and its last
+        values stay in the snapshot, but online=False makes the UI show
+        OFFLINE and stops rendering a stale green status. On reconnect the
+        next successful poll sets online=True again.
+        """
+        reason = reason or "немає зв'язку з донглом"
+        with self.lock:
+            for p in self.packs.values():
+                p["online"] = False
+                p["err"] = reason
+
+    def _maybe_switch_port(self) -> None:
+        """Auto mode: verify that the currently open port is still usable.
+
+        Called from the loop, throttled by PORT_RESCAN_S. Never touches an
+        explicit --port (auto_port=False). It only drops the port when the
+        device disappeared or stopped being a USB-serial adapter. A working
+        port is never replaced just because another (higher-priority) dongle
+        was plugged in: switching is deliberate — unplug/replug the current
+        one, or start with an explicit --port.
+        """
+        if not self.auto_port or self.mock or not self.port:
+            return
+        now = time.monotonic()
+        if now - self._last_port_check < PORT_RESCAN_S:
+            return
+        self._last_port_check = now
+        rows = list_ports_report()
+        cur = next((r for r in rows if r.get("device") == self.port), None)
+        if cur is None or _port_ignored(cur) or not _looks_like_usb_serial(cur):
+            # The device is gone (USB unplugged) or the port is no longer a
+            # USB-serial adapter. Windows may keep a stale handle with
+            # is_open == True, so close it explicitly; otherwise the next
+            # loop never calls open() and the bus stays dead.
+            self._drop_serial()
+            self.port = ""
+            self.last_err = ("No Dongle: USB-RS485 не знайдено "
+                             f"(повтор кожні {PORT_RETRY_S:.0f} с)")
+            self._mark_offline(self.last_err)
+
     def open(self) -> bool:
         if self.mock:
             return True
         if serial is None:
             self.last_err = "pySerial not installed (pip3 install pyserial)"
+            self._mark_offline(self.last_err)
+            return False
+        # Background autodetect: the dongle may be plugged in after start.
+        # Only in auto mode; an explicit --port is never overridden.
+        if self.auto_port and not self.port:
+            detected = autodetect_port_silent()
+            if detected:
+                self.port = detected
+                print(f"[auto] вибрано порт: {detected}")
+        if not self.port:
+            self.last_err = ("No Dongle: USB-RS485 не знайдено "
+                             f"(повтор кожні {PORT_RETRY_S:.0f} с)")
+            self._mark_offline(self.last_err)
             return False
         try:
             to = self.PASSIVE_GAP_S if self.mode == "passive" else RESP_TIMEOUT_S
@@ -691,9 +907,16 @@ class BmsBus:
                 self.ser.reset_input_buffer()
             except Exception:
                 pass
+            self.last_err = None
             return True
         except Exception as e:
             self.last_err = f"open {self.port}: {e}"
+            self._mark_offline(self.last_err)
+            # Forget a stale COM name only when the device disappeared; a busy
+            # port keeps its name and is retried as is.
+            if self.auto_port and (self._port_gone(e) or
+                                   self._port_missing_now()):
+                self.port = ""
             return False
 
     def set_mode(self, new_mode: str) -> None:
@@ -1099,6 +1322,9 @@ class BmsBus:
     def loop(self) -> None:
         buf = b""
         while not self._stop:
+            # Auto mode: drop the port only if it vanished or stopped being
+            # USB-serial. A working port is never replaced by another dongle.
+            self._maybe_switch_port()
             if self.mode == "active":
                 self.active_step()
             else:
@@ -1108,7 +1334,8 @@ class BmsBus:
     def active_step(self) -> None:
         if not self.mock and (self.ser is None or not self.ser.is_open):
             if not self.open():
-                time.sleep(2.5)
+                # No dongle yet: keep the web UI alive and retry.
+                time.sleep(PORT_RETRY_S)
                 return
 
         # 1. Full auto-discovery sweep
@@ -1116,6 +1343,8 @@ class BmsBus:
             self._rescan_requested = False
             self.is_scanning = True
             found = []
+            port_lost = False
+            port_checked = False
 
             for a in range(1, 17):
                 if self._stop or self.mode != "active":
@@ -1144,20 +1373,37 @@ class BmsBus:
                     with self.lock:
                         self._update_pack_telemetry(a, regs, dev_info)
                     self.log_row(regs, a)
-                except Exception:
+                except Exception as e:
                     with self.lock:
                         if a in self.packs:
                             self.packs[a]["online"] = False
+                    if not self.mock:
+                        lost = self._port_gone(e)
+                        if not lost and not port_checked:
+                            port_checked = True
+                            lost = self._port_missing_now()
+                        if lost:
+                            self.last_err = str(e)
+                            self._drop_serial()
+                            if self.auto_port:
+                                self.port = ""
+                            port_lost = True
+                            break
 
             with self.lock:
                 self.active_addrs = sorted(found)
                 self.is_scanning = False
                 self.scan_msg = f"Знайдено АКБ: {len(self.active_addrs)}"
-                self.last_err = None if self.active_addrs else "Жодного АКБ не знайдено на адресах 0x01..0x10"
+                if not port_lost:
+                    self.last_err = None if self.active_addrs else "Жодного АКБ не знайдено на адресах 0x01..0x10"
+            if port_lost:
+                self._mark_offline(self.last_err)
             return
 
         # 2. Fast cyclic poll of active packs
         current_active = list(self.active_addrs)
+        had_packs = bool(self.active_addrs)
+        port_checked = False
         for a in current_active:
             if self._stop or self.mode != "active" or self._rescan_requested:
                 break
@@ -1175,7 +1421,29 @@ class BmsBus:
                             self.packs[a]["online"] = False
                             if a in self.active_addrs:
                                 self.active_addrs.remove(a)
+                if not self.mock:
+                    lost = self._port_gone(e)
+                    if not lost and not port_checked:
+                        port_checked = True
+                        lost = self._port_missing_now()
+                    if lost:
+                        self.last_err = str(e)
+                        self._drop_serial()
+                        if self.auto_port:
+                            self.port = ""
+                        self._mark_offline(self.last_err)
+                        break
             time.sleep(POLL_S)
+
+        # All known packs stopped answering: the USB handle may be stale after
+        # a replug (Windows keeps is_open == True). Drop it so the next loop
+        # re-detects the port. Only in auto mode.
+        if self.auto_port and had_packs and not self.active_addrs:
+            self._drop_serial()
+            self.port = ""
+            self.last_err = ("No Dongle: немає відповіді від АКБ "
+                             f"(повтор кожні {PORT_RETRY_S:.0f} с)")
+            self._mark_offline(self.last_err)
 
         # 3. Background hot-plug discovery of 1 inactive address per cycle
         inactive = [a for a in range(1, 17) if a not in self.active_addrs]
@@ -1195,13 +1463,19 @@ class BmsBus:
                             self.active_addrs.append(probe_a)
                             self.active_addrs.sort()
                     self.log_row(regs, probe_a)
-            except Exception:
-                pass
+            except Exception as e:
+                if not self.mock and self._port_gone(e):
+                    self.last_err = str(e)
+                    self._drop_serial()
+                    if self.auto_port:
+                        self.port = ""
+                    self._mark_offline(self.last_err)
 
     def passive_step(self, buf: bytes) -> bytes:
         if not self.mock and (self.ser is None or not self.ser.is_open):
             if not self.open():
-                time.sleep(2.5)
+                # No dongle yet: keep the web UI alive and retry.
+                time.sleep(PORT_RETRY_S)
                 return b""
 
         if self.mock:
@@ -1242,12 +1516,11 @@ class BmsBus:
                             self.active_addrs.remove(a)
         except Exception as e:
             self.last_err = str(e)
-            if self.ser:
-                try:
-                    self.ser.close()
-                except Exception:
-                    pass
-                self.ser = None
+            self._drop_serial()
+            if self.auto_port and (self._port_gone(e) or
+                                   self._port_missing_now()):
+                self.port = ""
+            self._mark_offline(self.last_err)
             time.sleep(1.0)
         return buf
 
@@ -1301,6 +1574,11 @@ class BmsBus:
                 "packs": packs_dict,
                 "focus_addr": f"0x{self.focus_addr:02X}",
                 "port": self.port,
+                "port_source": self.port_source,
+                # True when the serial handle is open (mock counts as connected).
+                "port_connected": bool(
+                    self.mock or (self.ser is not None and self.ser.is_open)),
+                "mock": self.mock,
                 "baud": self.baud,
                 "log_on": bool(active_logs),
                 "log_path": log_path,
@@ -1773,14 +2051,14 @@ canvas{width:100%;height:auto;display:block}
   <div class="log-profiles">
     <div class="log-profiles-title">Профілі запису <span style="font-weight:400;color:var(--dim)">(можна увімкнути обидва одночасно)</span></div>
     <label class="log-profile-row">
-      <input type="checkbox" id="cfg_alarm" checked onchange="saveLogCfg()">
+      <input type="checkbox" id="cfg_alarm" onchange="saveLogCfg()">
       <span><b>🚨 Лише аварійні події</b> — регістри 0025–0028 (статус, попередження, захист, помилка) + температура (поріг 0…45&nbsp;°C).
         Запис виконується лише при зміні стану: поява, зміна або зняття аварії. Без змін — файл не пишеться.</span>
     </label>
     <label class="log-profile-row">
-      <input type="checkbox" id="cfg_work" checked onchange="saveLogCfg()">
+      <input type="checkbox" id="cfg_work" onchange="saveLogCfg()">
       <span><b>🔬 Аналіз / тест комірок</b> — періодичний запис повної телеметрії з інтервалом
-        <input type="number" id="cfg_interval" min="0" max="3600" step="1" value="0" onchange="saveLogCfg()"> с (0 = кожен пакет).</span>
+        <input type="number" id="cfg_interval" min="1" max="3600" step="1" value="5" onchange="saveLogCfg()"> с.</span>
     </label>
     <div class="log-profiles-note">
       Колонка <b>Log</b> у файлі позначає тип рядка: <b>Alarm</b> або <b>Work</b>.
@@ -2313,16 +2591,22 @@ function renderSummary() {
     const balActive = d.balance_bits && d.balance_bits.some(b => b.on);
     const hasAlarm = (d.warning || d.protection || d.error_code);
     const currStr = (d.current >= 0 ? '+' : '') + d.current.toFixed(1) + ' А';
+    let diffPill = `<b style="color:var(--ok)">${d.cell_diff} mV</b>`;
+    if (d.cell_diff > 80) {
+      diffPill = `<b style="color:var(--bad)">${d.cell_diff} mV ⚠️</b>`;
+    } else if (d.cell_diff > 35) {
+      diffPill = `<b style="color:var(--warn)">${d.cell_diff} mV</b>`;
+    }
 
     return `<tr>
       <td><b>${addr}</b> ${on ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--bad)">○</span>'}</td>
-      <td><span class="pill ${stClass}">${d.status_name}</span></td>
+      <td><span class="pill ${stClass}">${on ? d.status_name : 'OFFLINE'}</span></td>
       <td><b>${d.voltage.toFixed(2)} V</b></td>
       <td>${currStr}</td>
       <td><b>${d.soc != null ? d.soc + '%' : '—'}</b>${d.soc_avg != null ? ` <span style="color:var(--dim);font-size:11px" title="OCV-оцінка за середньою коміркою">(OCV ${d.soc_avg.toFixed(1)}%)</span>` : ''}</td>
       <td style="color:var(--bad)">${(d.cell_min / 1000).toFixed(3)} V</td>
       <td style="color:var(--ok)">${(d.cell_max / 1000).toFixed(3)} V</td>
-      <td><b>${d.cell_diff} mV</b></td>
+      <td>${diffPill}</td>
       <td>${balActive ? '<span class="b-tag">BAL</span>' : '—'}</td>
       <td>${d.temp_pcb}/${d.temp_avg}/${d.temp_max} °C</td>
       <td>${hasAlarm ? '<span class="pill bad">Увага</span>' : '<span class="pill ok">Норма</span>'}</td>
@@ -2382,8 +2666,15 @@ function renderPackDetail(addr) {
   currentPackAddr = addr;
 
   const d = p.parsed;
+  const offline = (latestData.port_connected === false) || !p.online;
   document.getElementById('p_addr').textContent = addr + (p.online ? ' (Онлайн)' : ' (Офлайн)');
   document.getElementById('p_err').textContent = p.err || '';
+  // Dongle lost / pack offline: never keep a stale green "Standby".
+  const stEl = document.getElementById('p_st');
+  if (stEl && (!d || offline)) {
+    stEl.textContent = '—';
+    stEl.className = 'pill';
+  }
 
   // Per-pack CSV logging card (works even when the pack is offline)
   const lp = document.getElementById('p_logpath');
@@ -2407,9 +2698,11 @@ function renderPackDetail(addr) {
   document.getElementById('p_v').textContent = d.voltage.toFixed(2) + ' V';
   document.getElementById('p_i').textContent = (d.current == null ? '—' : d.current.toFixed(1) + ' А');
   
-  const st = document.getElementById('p_st');
-  st.textContent = d.status_name;
-  st.className = 'pill ' + (statusBitOn(d, 'Protect') ? 'bad' : 'ok');
+  if (!offline) {
+    const st = document.getElementById('p_st');
+    st.textContent = d.status_name;
+    st.className = 'pill ' + (statusBitOn(d, 'Protect') ? 'bad' : 'ok');
+  }
 
   document.getElementById('p_model').textContent = d.model || '—';
   document.getElementById('p_fw').textContent = d.fw_version || '—';
@@ -2422,7 +2715,18 @@ function renderPackDetail(addr) {
   document.getElementById('p_cyc').textContent = d.cycles == null ? '—' : d.cycles;
   document.getElementById('p_cap').textContent = (d.designed_cap_ah == null ? '—' : d.designed_cap_ah + ' А·ч') + ' · ' + d.cell_num + 'S';
   document.getElementById('p_fcap').textContent = d.full_cap_ah == null ? '—' : d.full_cap_ah.toFixed(1) + ' А·ч';
-  document.getElementById('p_difft').textContent = 'Δ = ' + d.cell_diff + ' mV';
+  let diffLabel = 'Δ = ' + d.cell_diff + ' mV';
+  if (d.cell_diff > 80) {
+    diffLabel += ' ⚠️ [Критичний перекіс]';
+    document.getElementById('p_difft').style.color = 'var(--bad)';
+  } else if (d.cell_diff > 35) {
+    diffLabel += ' [Потрібне вирівнювання]';
+    document.getElementById('p_difft').style.color = 'var(--warn)';
+  } else {
+    diffLabel += ' [Ідеально]';
+    document.getElementById('p_difft').style.color = 'var(--ok)';
+  }
+  document.getElementById('p_difft').textContent = diffLabel;
   if (d.cell_min != null) document.getElementById('p_vmin').textContent = (d.cell_min / 1000).toFixed(3);
   if (d.cell_max != null) document.getElementById('p_vmax').textContent = (d.cell_max / 1000).toFixed(3);
 
@@ -3341,7 +3645,10 @@ async function tick() {
     const c = document.getElementById('conn');
     const onlineCnt = d.summary ? d.summary.online_packs : 0;
 
-    if (d.is_scanning) {
+    if (d.port_connected === false) {
+      c.textContent = 'No Dongle';
+      c.className = 'pill bad';
+    } else if (d.is_scanning) {
       c.textContent = d.scan_msg || 'СКАНУВАННЯ...';
       c.className = 'pill warn';
     } else if (onlineCnt > 0) {
@@ -3357,7 +3664,7 @@ async function tick() {
     mbtn.textContent = isPassive ? '👂 Режим: Пасивний (Sniffer)' : '⚡ Режим: Активний (Master)';
     mbtn.className = 'btn-mode' + (isPassive ? ' passive' : '');
 
-    document.getElementById('portinfo').textContent = d.port + ' @ ' + d.baud;
+    document.getElementById('portinfo').textContent = (d.port || 'No Dongle') + ' @ ' + d.baud;
     document.getElementById('modedesc').textContent = isPassive ? 'Пасивний (слухає шину без передачі)' : 'Активний (автопошук та опитування FC03)';
     document.getElementById('seeninfo').textContent = 'Онлайн: ' + (d.active_addrs && d.active_addrs.length ? d.active_addrs.join(', ') : 'жодного');
     document.getElementById('ts').textContent = d.ts || '—';
@@ -3446,8 +3753,7 @@ async function togglePackLog() {
 async function saveLogCfg() {
   const alarm = !!(document.getElementById('cfg_alarm') || {}).checked;
   const work = !!(document.getElementById('cfg_work') || {}).checked;
-  const rawIv = (document.getElementById('cfg_interval') || {}).value;
-  const interval = (rawIv !== '' && !isNaN(rawIv)) ? Math.max(0, parseFloat(rawIv)) : 0;
+  const interval = parseFloat((document.getElementById('cfg_interval') || {}).value) || 5;
   await fetch('/api/logcfg', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -3691,6 +3997,64 @@ def selftest() -> int:
         p_dev, p_desc = find_usb_rs485_port()
         assert p_dev == 'COM5' and 'CH340' in p_desc, f"Windows CH340 auto-detect: {p_dev}, {p_desc}"
 
+    # Internal COM1/ACPI must never win over a real USB-serial dongle.
+    with patch('serial.tools.list_ports.comports', return_value=[
+        FakePort('COM1', 'Communications Port (COM1)', '(Standard port types)',
+                 None, None, 'ACPI\\PNP0501'),
+        FakePort('COM5', 'USB-SERIAL CH340 (COM5)', 'wch.cn', 0x1A86, 0x7523,
+                 'USB VID:PID=1A86:7523'),
+    ]):
+        p_dev, p_desc = find_usb_rs485_port()
+        assert p_dev == 'COM5', f"internal COM1 must be ignored: {p_dev}"
+
+    # Silent choice: FTDI -> CH340 -> CP210x -> generic; COM1 ignored.
+    port_rows = [
+        {"device": "COM7", "description": "USB Serial Port",
+         "hwid": "USB VID:PID=0403:6001", "manufacturer": "FTDI"},
+        {"device": "COM5", "description": "USB-SERIAL CH340",
+         "hwid": "USB VID:PID=1A86:7523", "manufacturer": "wch.cn"},
+        {"device": "COM3", "description": "Silicon Labs CP210x USB to UART",
+         "hwid": "USB VID:PID=10C4:EA60", "manufacturer": "Silicon Labs"},
+        {"device": "COM1", "description": "Communications Port",
+         "hwid": "ACPI\\PNP0501", "manufacturer": "(Standard port types)"},
+    ]
+    for row in port_rows:
+        row["usb_like"] = _looks_like_usb_serial(row)
+    assert choose_port_from_rows(port_rows) == "COM7", "FTDI priority"
+    assert choose_port_from_rows(port_rows[1:]) == "COM5", "CH340 priority"
+    assert choose_port_from_rows(port_rows[2:]) == "COM3", "CP210x priority"
+    assert choose_port_from_rows([port_rows[3]]) == "", "COM1 ignored"
+    assert choose_port_from_rows([]) == "", "no ports -> empty"
+
+    # Port loss marks every known pack offline; a second dongle does not
+    # replace a working port.
+    class _FakeSer:
+        is_open = True
+        def close(self):
+            self.is_open = False
+
+    saved_rows = globals()["list_ports_report"]
+    try:
+        globals()["list_ports_report"] = lambda: [port_rows[0], port_rows[1]]
+        keep_bus = BmsBus("COM5", 9600, mock=False, auto_port=True)
+        keep_bus.ser = _FakeSer()
+        keep_bus._last_port_check = 0.0
+        keep_bus._maybe_switch_port()
+        assert keep_bus.port == "COM5", "working port must be kept"
+        assert keep_bus.ser is not None, "working serial must be kept"
+
+        globals()["list_ports_report"] = lambda: [port_rows[3]]
+        gone_bus = BmsBus("COM5", 9600, mock=False, auto_port=True)
+        gone_bus.ser = _FakeSer()
+        gone_bus.packs[1] = {"online": True, "parsed": {}}
+        gone_bus._last_port_check = 0.0
+        gone_bus._maybe_switch_port()
+        assert gone_bus.port == "", "unplugged port must be cleared"
+        assert gone_bus.packs[1]["online"] is False, "pack marked offline"
+        assert "No Dongle" in (gone_bus.last_err or ""), "No Dongle reason"
+    finally:
+        globals()["list_ports_report"] = saved_rows
+
     print("selftest OK")
     return 0 if ok else 1
 
@@ -3708,26 +4072,39 @@ def main() -> int:
     ap.add_argument("--passive", action="store_true",
                     help="listen only: parse live bus traffic (no TX, no collisions)")
     ap.add_argument("--list", action="store_true", help="list serial ports")
+    ap.add_argument("--allow-no-port", action="store_true",
+                    help="не виходити, якщо USB-RS485 донгл не знайдено: підняти "
+                         "веб-сервер і шукати порт у фоні (кожні 3 с)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
     if args.list:
-        from serial.tools import list_ports
-        for p in list_ports.comports():
-            print(p.device, p.description)
+        rows = list_ports_report()
+        if not rows:
+            print("Послідовних портів не знайдено.")
+            return 0
+        for r in rows:
+            mark = "  [USB-serial]" if r["usb_like"] else ""
+            print(f"{r['device']:<10} {r['description']}{mark}")
         return 0
 
     port = args.port
+    # An explicit --port is authoritative: never silently replaced.
+    auto_port = not bool(port) and not args.mock
     if not args.mock and not port:
-        auto_port, desc = find_usb_rs485_port()
-        if auto_port:
-            port = auto_port
+        detected, desc = find_usb_rs485_port()
+        if detected:
+            port = detected
             print(f"[Автовизначення] Знайдено адаптер RS485: {port} ({desc})")
         elif os.path.exists(DEFAULT_PORT):
             port = DEFAULT_PORT
             print(f"[Порт] Використовуємо дефолтний: {port}")
+        elif args.allow_no_port:
+            print(f"[auto] порт не знайдено ({desc}); стартую без донгла, "
+                  f"пошук кожні {PORT_RETRY_S:.0f} с")
+            port = ""
         else:
             print("Помилка: не вдалося автоматично визначити COM-порт адаптера RS485.")
             print(f"Статус пошуку: {desc}")
@@ -3735,17 +4112,20 @@ def main() -> int:
             print("  Windows:  python tools/bms_web.py --port COM3")
             print("  macOS:    python3 tools/bms_web.py --port /dev/cu.usbserial-XXXX")
             print("  Список доступних портів: python3 tools/bms_web.py --list")
-            return 1
+            print("  Або запустіть з --allow-no-port, щоб сервер піднявся без донгла.")
+            return 2
     elif not port:
         port = "MOCK"
 
-    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock, passive=args.passive)
+    bus = BmsBus(port, args.baud, initial_addr=args.addr, mock=args.mock,
+                 passive=args.passive, auto_port=auto_port)
     threading.Thread(target=bus.loop, daemon=True).start()
     Handler.bus = bus
     srv = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
 
     mode_label = "MOCK MULTI-PACK" if args.mock else (
-        f"{port} @ {args.baud} " + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
+        f"{port or 'No Dongle'} @ {args.baud} "
+        + ("PASSIVE SNIFFER" if args.passive else "ACTIVE MASTER"))
     print(f"BMS Web Monitor: http://127.0.0.1:{args.http}  [{mode_label}]")
     print("Multi-pack scanning: 0x01..0x10 enabled. Press Ctrl-C to stop.")
     try:
