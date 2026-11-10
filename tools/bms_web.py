@@ -3,7 +3,7 @@
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
-Version-3
+Version-3.4 (v2.6 COM engine + balance inspector + offline status reset)
 Features (v2.6):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
@@ -57,6 +57,28 @@ Recent changes:
               offline (_mark_offline). The header shows "No Dongle", pack
               cards show OFFLINE and a neutral "—" status instead of a stale
               green Standby; the next successful poll restores ONLINE.
+  2026-11-10  Offline reason: silence of every pack is no longer treated as a
+              dongle loss. If the RS485 cable to the BMS is unplugged while
+              the USB dongle stays connected, packs show OFFLINE with
+              "немає відповіді 0xNN" (same as bms_webX.py) instead of a false
+              "No Dongle". Real port loss is still detected only by
+              _port_gone() / _port_missing_now() / _maybe_switch_port().
+              The COM/offline algorithm is now identical in both scripts:
+              loop() has the same outer guard (drop serial, keep an explicit
+              --port, mark packs offline), and passive mode also writes the
+              stale reason "немає кадрів 0xNN >N с" per pack.
+              UI: the pack detail "Стан" field shows a red "OFFLINE" pill
+              when the pack is offline (no dongle or cable to the BMS
+              unplugged); the next successful poll restores the real status.
+              While offline, the Status (0025), Warning (0026),
+              Protection (0027) and Error (0028) lamps are all put out and
+              their raw hex is cleared to "—", so a stale "Standby" does not
+              stay lit when the battery is gone. Same behaviour as
+              bms_webX.py.
+              Fast poll: an unplugged pack reports "немає відповіді 0xNN"
+              instead of the raw "bad response header ..." (same wording as
+              a full rescan), so one dead pack out of two does not leave a
+              protocol error in the UI while the other pack keeps polling.
 Journal: tools/HystoryMod.md
 
 Usage:
@@ -73,6 +95,7 @@ import collections
 import csv
 import json
 import os
+import platform
 import random
 import sys
 import threading
@@ -85,6 +108,7 @@ try:
 except ImportError:
     serial = None
 
+IS_WINDOWS = platform.system() == "Windows"
 DEFAULT_PORT = "/dev/cu.usbserial-A5069RR4"
 DEFAULT_BAUD = 9600
 DEFAULT_ADDR = 0x01
@@ -781,6 +805,24 @@ class BmsBus:
         self.log_auto = False
         self._log_write_lock = threading.Lock()
 
+    def _open_error(self, e: Exception) -> str:
+        """Human-readable open() failure (same mapping as bms_webX.py)."""
+        msg = str(e)
+        low = msg.lower()
+        if isinstance(e, PermissionError) or "access is denied" in low \
+                or "permission" in low or "errno 13" in low:
+            if IS_WINDOWS:
+                return (f"порт {self.port} зайнятий іншою програмою "
+                        f"(закрийте BMS Tools / інший екземпляр bms_web). "
+                        f"Якщо система жива — використовуйте --passive.")
+            return (f"немає доступу до {self.port} "
+                    f"(зайнятий іншим процесом або немає прав).")
+        if "could not open port" in low or "filenotfounderror" in low \
+                or "no such file" in low:
+            return (f"порт {self.port} не знайдено. "
+                    f"Перевірте підключення донгла (--list).")
+        return f"open {self.port}: {e}"
+
     @staticmethod
     def _port_gone(e: Exception) -> bool:
         """True when the error means the USB-serial device is absent/unplugged."""
@@ -910,8 +952,9 @@ class BmsBus:
             self.last_err = None
             return True
         except Exception as e:
-            self.last_err = f"open {self.port}: {e}"
-            self._mark_offline(self.last_err)
+            msg = self._open_error(e)
+            self.last_err = msg
+            self._mark_offline(msg)
             # Forget a stale COM name only when the device disappeared; a busy
             # port keeps its name and is retried as is.
             if self.auto_port and (self._port_gone(e) or
@@ -1325,10 +1368,19 @@ class BmsBus:
             # Auto mode: drop the port only if it vanished or stopped being
             # USB-serial. A working port is never replaced by another dongle.
             self._maybe_switch_port()
-            if self.mode == "active":
-                self.active_step()
-            else:
-                buf = self.passive_step(buf)
+            try:
+                if self.mode == "active":
+                    self.active_step()
+                else:
+                    buf = self.passive_step(buf)
+            except Exception as e:
+                self.last_err = str(e)
+                self._drop_serial()
+                if self.auto_port and (self._port_gone(e) or
+                                       self._port_missing_now()):
+                    self.port = ""
+                self._mark_offline(self.last_err)
+                time.sleep(1.0)
             self._sample_history()
 
     def active_step(self) -> None:
@@ -1377,6 +1429,9 @@ class BmsBus:
                     with self.lock:
                         if a in self.packs:
                             self.packs[a]["online"] = False
+                            # Same wording as bms_webX.py: the pack (not the
+                            # dongle) is the one that stopped answering.
+                            self.packs[a]["err"] = f"немає відповіді 0x{a:02X}"
                     if not self.mock:
                         lost = self._port_gone(e)
                         if not lost and not port_checked:
@@ -1402,7 +1457,6 @@ class BmsBus:
 
         # 2. Fast cyclic poll of active packs
         current_active = list(self.active_addrs)
-        had_packs = bool(self.active_addrs)
         port_checked = False
         for a in current_active:
             if self._stop or self.mode != "active" or self._rescan_requested:
@@ -1416,7 +1470,10 @@ class BmsBus:
                 with self.lock:
                     if a in self.packs:
                         self.packs[a]["consecutive_fails"] = self.packs[a].get("consecutive_fails", 0) + 1
-                        self.packs[a]["err"] = str(e)
+                        # Same wording as a full rescan: the pack stopped
+                        # answering. Do not leak the raw protocol error
+                        # ("bad response header ...") into the UI.
+                        self.packs[a]["err"] = f"немає відповіді 0x{a:02X}"
                         if self.packs[a]["consecutive_fails"] >= 3:
                             self.packs[a]["online"] = False
                             if a in self.active_addrs:
@@ -1435,15 +1492,10 @@ class BmsBus:
                         break
             time.sleep(POLL_S)
 
-        # All known packs stopped answering: the USB handle may be stale after
-        # a replug (Windows keeps is_open == True). Drop it so the next loop
-        # re-detects the port. Only in auto mode.
-        if self.auto_port and had_packs and not self.active_addrs:
-            self._drop_serial()
-            self.port = ""
-            self.last_err = ("No Dongle: немає відповіді від АКБ "
-                             f"(повтор кожні {PORT_RETRY_S:.0f} с)")
-            self._mark_offline(self.last_err)
+        # Note: silence of every pack is NOT a dongle loss. The cable to the
+        # BMS may be unplugged while the USB-RS485 adapter stays connected.
+        # Real port loss is detected by _port_gone() / _port_missing_now()
+        # above and by _maybe_switch_port() in loop().
 
         # 3. Background hot-plug discovery of 1 inactive address per cycle
         inactive = [a for a in range(1, 17) if a not in self.active_addrs]
@@ -1512,6 +1564,8 @@ class BmsBus:
                 for a, p in self.packs.items():
                     if p.get("online") and (now - p.get("last_seen", 0) > self.PASSIVE_STALE_S):
                         p["online"] = False
+                        p["err"] = (f"немає кадрів 0x{a:02X} "
+                                    f">{int(self.PASSIVE_STALE_S)} с")
                         if a in self.active_addrs:
                             self.active_addrs.remove(a)
         except Exception as e:
@@ -2600,7 +2654,7 @@ function renderSummary() {
 
     return `<tr>
       <td><b>${addr}</b> ${on ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--bad)">○</span>'}</td>
-      <td><span class="pill ${stClass}">${on ? d.status_name : 'OFFLINE'}</span></td>
+      <td><span class="pill ${stClass}">${on ? d.status_name : 'Offline'}</span></td>
       <td><b>${d.voltage.toFixed(2)} V</b></td>
       <td>${currStr}</td>
       <td><b>${d.soc != null ? d.soc + '%' : '—'}</b>${d.soc_avg != null ? ` <span style="color:var(--dim);font-size:11px" title="OCV-оцінка за середньою коміркою">(OCV ${d.soc_avg.toFixed(1)}%)</span>` : ''}</td>
@@ -2669,11 +2723,26 @@ function renderPackDetail(addr) {
   const offline = (latestData.port_connected === false) || !p.online;
   document.getElementById('p_addr').textContent = addr + (p.online ? ' (Онлайн)' : ' (Офлайн)');
   document.getElementById('p_err').textContent = p.err || '';
-  // Dongle lost / pack offline: never keep a stale green "Standby".
+  // Dongle lost / pack offline: show Offline in the "Стан" field,
+  // never keep a stale green "Standby".
   const stEl = document.getElementById('p_st');
   if (stEl && (!d || offline)) {
-    stEl.textContent = '—';
-    stEl.className = 'pill';
+    stEl.textContent = 'Offline';
+    stEl.className = 'pill bad';
+  }
+  if (offline) {
+    // The pack is gone: no live 0025-0028 data. Put out every status lamp
+    // and clear the raw hex, so a stale Standby / warning / protection /
+    // error does not stay lit.
+    const offBits = arr => (arr || []).map(b => ({name: b.name, on: false}));
+    leds(document.getElementById('p_stbits'), offBits(d && d.status_bits), 'onok');
+    leds(document.getElementById('p_warn'), offBits(d && d.warning_bits), 'on', 'W:');
+    leds(document.getElementById('p_prot'), offBits(d && d.protection_bits), 'on', 'P:');
+    leds(document.getElementById('p_errbits'), offBits(d && d.error_bits), 'onw');
+    for (const pfx of ['p_straw', 'p_warnraw', 'p_protraw', 'p_errraw']) {
+      const el = document.getElementById(pfx);
+      if (el) el.textContent = '—';
+    }
   }
 
   // Per-pack CSV logging card (works even when the pack is offline)
@@ -2759,15 +2828,17 @@ function renderPackDetail(addr) {
   }
 
   const hx = v => '0x' + (v == null ? '????' : v.toString(16).toUpperCase().padStart(4, '0'));
-  document.getElementById('p_straw').textContent = hx(d.status);
-  document.getElementById('p_warnraw').textContent = hx(d.warning);
-  document.getElementById('p_protraw').textContent = hx(d.protection);
-  document.getElementById('p_errraw').textContent = hx(d.error_code);
+  if (!offline) {
+    document.getElementById('p_straw').textContent = hx(d.status);
+    document.getElementById('p_warnraw').textContent = hx(d.warning);
+    document.getElementById('p_protraw').textContent = hx(d.protection);
+    document.getElementById('p_errraw').textContent = hx(d.error_code);
 
-  leds(document.getElementById('p_stbits'), d.status_bits, 'onok');
-  leds(document.getElementById('p_warn'), d.warning_bits, 'on', 'W:');
-  leds(document.getElementById('p_prot'), d.protection_bits, 'on', 'P:');
-  leds(document.getElementById('p_errbits'), d.error_bits, 'onw');
+    leds(document.getElementById('p_stbits'), d.status_bits, 'onok');
+    leds(document.getElementById('p_warn'), d.warning_bits, 'on', 'W:');
+    leds(document.getElementById('p_prot'), d.protection_bits, 'on', 'P:');
+    leds(document.getElementById('p_errbits'), d.error_bits, 'onw');
+  }
 
   document.getElementById('p_bal').innerHTML = d.balance_bits ? d.balance_bits.map(b =>
     `<span class="${b.on ? 'on' : ''}">${b.n}</span>`).join('') : '—';
@@ -4053,6 +4124,76 @@ def selftest() -> int:
         assert gone_bus.packs[1]["online"] is False, "pack marked offline"
         assert "No Dongle" in (gone_bus.last_err or ""), "No Dongle reason"
     finally:
+        globals()["list_ports_report"] = saved_rows
+
+    # Cable to the BMS unplugged while the USB dongle stays connected: packs
+    # must go OFFLINE with "немає відповіді 0xNN", NOT "No Dongle".
+    saved_poll = globals()["POLL_S"]
+    try:
+        globals()["POLL_S"] = 0.0
+        globals()["list_ports_report"] = lambda: [port_rows[1]]  # COM5 alive
+        cable_bus = BmsBus("COM5", 9600, mock=False, auto_port=True)
+        cable_bus.ser = _FakeSer()
+        cable_bus._last_port_check = 0.0
+        cable_bus.packs[2] = {
+            "addr": 2, "addr_hex": "0x02", "online": True,
+            "parsed": {"voltage": 49.27}, "consecutive_fails": 0, "err": None,
+        }
+        cable_bus.active_addrs = [2]
+        cable_bus._rescan_requested = False
+        cable_bus.read_regs = lambda *a, **k: (_ for _ in ()).throw(
+            IOError("bad response header "))
+        for _ in range(3):
+            cable_bus.active_step()
+        assert cable_bus.port == "COM5", "dongle must stay connected"
+        assert cable_bus.ser is not None and cable_bus.ser.is_open
+        assert cable_bus.packs[2]["online"] is False, "pack must be offline"
+        # The fast poll must already use the same wording as a rescan:
+        # no raw "bad response header ..." leaks into the UI.
+        assert cable_bus.packs[2]["err"] == "немає відповіді 0x02", \
+            cable_bus.packs[2]["err"]
+        cable_bus.active_step()  # rescan refreshes the per-pack reason
+        assert cable_bus.packs[2]["err"] == "немає відповіді 0x02", \
+            cable_bus.packs[2]["err"]
+        snap = cable_bus.snapshot()
+        assert snap["port_connected"] is True, "port still connected"
+        assert snap["packs"]["0x02"]["online"] is False
+        assert snap["packs"]["0x02"]["err"] == "немає відповіді 0x02"
+        assert "No Dongle" not in (cable_bus.last_err or ""), \
+            cable_bus.last_err
+    finally:
+        globals()["POLL_S"] = saved_poll
+        globals()["list_ports_report"] = saved_rows
+
+    # Only one of two packs unplugged: the dead pack must show
+    # "немає відповіді 0xNN" right away (not "bad response header ..."),
+    # while the live pack stays online and no full rescan is needed.
+    try:
+        globals()["POLL_S"] = 0.0
+        globals()["list_ports_report"] = lambda: [port_rows[1]]
+        two_bus = BmsBus("COM5", 9600, mock=False, auto_port=True)
+        two_bus.ser = _FakeSer()
+        two_bus._last_port_check = 0.0
+        for a in (1, 2):
+            two_bus.packs[a] = {
+                "addr": a, "addr_hex": f"0x{a:02X}", "online": True,
+                "parsed": {"voltage": 49.27}, "consecutive_fails": 0,
+                "err": None,
+            }
+        two_bus.active_addrs = [1, 2]
+        two_bus._rescan_requested = False
+        two_bus.read_regs = lambda a, timeout=None: (
+            two_bus.mock_regs(a) if a == 1 else
+            (_ for _ in ()).throw(IOError("bad response header ")))
+        for _ in range(3):
+            two_bus.active_step()
+        assert two_bus.packs[1]["online"] is True, "live pack stays online"
+        assert two_bus.packs[2]["online"] is False, "dead pack goes offline"
+        assert two_bus.packs[2]["err"] == "немає відповіді 0x02", \
+            two_bus.packs[2]["err"]
+        assert two_bus.active_addrs == [1], two_bus.active_addrs
+    finally:
+        globals()["POLL_S"] = saved_poll
         globals()["list_ports_report"] = saved_rows
 
     print("selftest OK")
