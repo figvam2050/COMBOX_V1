@@ -1896,6 +1896,8 @@ canvas{width:100%;height:auto;display:block}
 .modal-close-btn:hover{background:#3c444d}
 .btn-inverter{background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer}
 .btn-inverter:hover{background:#388bfd}
+.btn-dip{background:#8957e5;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer}
+.btn-dip:hover{background:#a371f7}
 
 /* Offline Log Viewer styles */
 .drop-zone{border:2px dashed var(--border);border-radius:10px;padding:36px;text-align:center;cursor:pointer;background:#0d1117;transition:all 0.2s}
@@ -1924,6 +1926,7 @@ canvas{width:100%;height:auto;display:block}
   <div class="controls">
     <button id="modebtn" class="btn-mode" onclick="toggleMode()">⚡ Режим: Активний</button>
     <button class="btn-rescan" onclick="triggerRescan()">🔄 Пересканувати всі 16</button>
+    <button class="btn-dip" onclick="openDipModal()">🎛️ Режим COM-Box (DIP)</button>
     <button class="btn-inverter" onclick="openInverterModal()">⚙️ Уставки інвертора</button>
     <button class="btn-report" onclick="openReport()">📄 Діагностичний звіт</button>
   </div>
@@ -1964,6 +1967,22 @@ canvas{width:100%;height:auto;display:block}
       <div class="l">Статус системи</div>
       <div class="v" id="b_status" style="font-size:18px">—</div>
       <div class="subtext" id="b_alarm_status">Тривоги: —</div>
+    </div>
+  </div>
+
+  <!-- DIP CONFIGURATION STATUS BANNER -->
+  <div class="card" style="margin-bottom:16px;background:#0d1117;border-left:4px solid #8957e5;cursor:pointer" onclick="openDipModal()">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+      <div>
+        <div style="font-weight:700;font-size:14px;color:var(--fg);display:flex;align-items:center;gap:8px">
+          <span>🎛️ Конфігурація COM-Box (DIP 1..5):</span>
+          <span id="dip_banner_badges" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+        </div>
+        <div id="dip_banner_desc" style="font-size:12px;color:var(--dim);margin-top:4px">
+          Розрахункові ліміти інвертора CAN: завантаження...
+        </div>
+      </div>
+      <button class="btn-dip" style="padding:4px 12px;font-size:12px" onclick="event.stopPropagation();openDipModal()">Налаштувати / Довідка ⚙️</button>
     </div>
   </div>
 
@@ -2263,6 +2282,11 @@ canvas{width:100%;height:auto;display:block}
   <div class="modal-box" id="inverter_modal_content"></div>
 </div>
 
+<!-- DIP SWITCHES CONFIGURATION MODAL -->
+<div id="dip_modal" class="modal-overlay">
+  <div class="modal-box" id="dip_modal_content"></div>
+</div>
+
 <!-- ALARM & PROTECTION HELPER MODAL -->
 <div id="alarm_modal" class="modal-overlay">
   <div class="modal-box" id="alarm_modal_content"></div>
@@ -2285,6 +2309,24 @@ let currentPackAddr = null;
 let logOn = false;
 let latestData = null;
 let logAnalysisData = null;
+
+// User-configurable or auto-detected COM-Box DIP switch states (stored in localStorage)
+let comboxDips = {
+  dip1: (localStorage.getItem('combox_dip1') !== null) ? (localStorage.getItem('combox_dip1') === 'true') : true,  // DIP1: ON (51.8V Eco, default in recent setups)
+  dip2: (localStorage.getItem('combox_dip2') !== null) ? (localStorage.getItem('combox_dip2') === 'true') : false, // DIP2: OFF (Mirror, standard)
+  dip3: (localStorage.getItem('combox_dip3') !== null) ? (localStorage.getItem('combox_dip3') === 'true') : false, // DIP3: OFF (Smart Fast Poll 800ms)
+  dip4: (localStorage.getItem('combox_dip4') !== null) ? (localStorage.getItem('combox_dip4') === 'true') : true,  // DIP4: ON (15A/pack eco current limit)
+  dip5: (localStorage.getItem('combox_dip5') !== null) ? (localStorage.getItem('combox_dip5') === 'true') : false  // DIP5: OFF (Auto-balance mode)
+};
+
+function saveDip(key, val) {
+  comboxDips[key] = val;
+  localStorage.setItem('combox_' + key, val);
+  updateDipBanner();
+  if (document.getElementById('dip_modal').style.display === 'block') {
+    renderDipModalContent();
+  }
+}
 
 const ALARM_HELP_DB = {
   // Statuses
@@ -2747,6 +2789,8 @@ function renderSummary() {
   const alEl = document.getElementById('b_alarm_status');
   alEl.textContent = sum.alarm_count > 0 ? `⚠️ Активних тривог: ${sum.alarm_count}` : 'Усі захисти та попередження в нормі';
   alEl.style.color = sum.alarm_count > 0 ? 'var(--bad)' : 'var(--dim)';
+
+  updateDipBanner();
 
   // Summary Table
   const tbody = document.getElementById('summary_rows');
@@ -3341,7 +3385,7 @@ function openReport() {
   <div style="background:#f9f9f9;padding:12px;border:1px solid #ddd;border-radius:6px;font-size:12px;line-height:1.6">
     • <b>Стан розбалансу:</b> ${diag.weak_cell}<br>
     • <b>Оцінка внутрішнього опору:</b> ${diag.rint_summary}<br>
-    • <b>Рекомендації:</b> ${sum.cell_delta_mv > 50 ? 'Рекомендується увімкнути режим балансування (DIP 4 на COM-Box) для вирівнювання відстаючих комірок під час буферного заряду.' : 'Банк збалансований, відхилення напруг у межах норми.'}
+    • <b>Рекомендації:</b> ${sum.cell_delta_mv > 50 ? 'Рекомендується увімкнути режим балансування (DIP 5 на COM-Box) для вирівнювання відстаючих комірок під час буферного заряду.' : 'Банк збалансований, відхилення напруг у межах норми.'}
   </div>`;
 
   document.getElementById('report_content').innerHTML = html;
@@ -3350,6 +3394,185 @@ function openReport() {
 
 function closeReport() {
   document.getElementById('report_modal').style.display = 'none';
+}
+
+/* --- DIP SWITCHES & COM-BOX CONFIGURATION MODAL --- */
+function updateDipBanner() {
+  const packs = (latestData && latestData.packs) ? latestData.packs : {};
+  const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
+  const packCount = onlineAddrs.length || 1;
+
+  const dip1 = comboxDips.dip1; // ON = 51.8V 90% Eco, OFF = 54.0V 100%
+  const dip2 = comboxDips.dip2; // ON = Bridge, OFF = Mirror
+  const dip3 = comboxDips.dip3; // ON = 16-addr full, OFF = Plug & Play 800ms
+  const dip4 = comboxDips.dip4; // ON = 15A/pack, OFF = 50A/pack
+  const dip5 = comboxDips.dip5; // ON = Forced Float Hold 52.5V, OFF = Auto
+
+  const cvl = dip5 ? '52.5 В (Float Hold)' : (dip1 ? '51.8 В (90% Eco)' : '54.0 В (100% Standart)');
+  const cclPerPack = dip4 ? 15 : 50;
+  const cclBank = packCount * cclPerPack;
+  const finishCcl = packCount * 2.5;
+  const dclBank = packCount * 100;
+
+  const bEl = document.getElementById('dip_banner_badges');
+  if (bEl) {
+    bEl.innerHTML = `
+      <span class="pill ${dip1 ? 'ok' : 'acc'}" style="font-size:11px">DIP1: ${dip1 ? '51.8V (90% Eco)' : '54.0V (100%)'}</span>
+      <span class="pill ${dip2 ? 'bad' : 'ok'}" style="font-size:11px">DIP2: ${dip2 ? 'Міст (Lab)' : 'Дзеркало'}</span>
+      <span class="pill ${dip3 ? 'warn' : 'ok'}" style="font-size:11px">DIP3: ${dip3 ? '16 адрес' : 'Fast Poll 800ms'}</span>
+      <span class="pill ${dip4 ? 'ok' : 'acc'}" style="font-size:11px">DIP4: ${cclPerPack}A/АКБ (Банк: ${cclBank}A)</span>
+      <span class="pill ${dip5 ? 'warn' : 'ok'}" style="font-size:11px">DIP5: ${dip5 ? 'Примусове 52.5V' : 'Авто-баланс'}</span>
+    `;
+  }
+
+  const dEl = document.getElementById('dip_banner_desc');
+  if (dEl) {
+    dEl.innerHTML = `Розрахункові уставки CAN (для ${packCount} підключених АКБ): ` +
+      `<b>Напруга (CVL): ${cvl}</b> · ` +
+      `<b>Струм заряду (CCL): ${cclBank} А</b> (дозаряд: <b>${finishCcl.toFixed(1)} А</b> → Standby: <b>0 А</b>) · ` +
+      `<b>Струм розряду (DCL): ${dclBank} А</b>`;
+  }
+}
+
+function openDipModal() {
+  renderDipModalContent();
+  document.getElementById('dip_modal').style.display = 'block';
+}
+
+function closeDipModal() {
+  document.getElementById('dip_modal').style.display = 'none';
+}
+
+function renderDipModalContent() {
+  const packs = (latestData && latestData.packs) ? latestData.packs : {};
+  const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
+  const packCount = onlineAddrs.length || 1;
+
+  const dip1 = comboxDips.dip1;
+  const dip2 = comboxDips.dip2;
+  const dip3 = comboxDips.dip3;
+  const dip4 = comboxDips.dip4;
+  const dip5 = comboxDips.dip5;
+
+  const cvl = dip5 ? '52.5 В' : (dip1 ? '51.8 В' : '54.0 В');
+  const cclPerPack = dip4 ? 15 : 50;
+  const cclBank = packCount * cclPerPack;
+  const finishCcl = packCount * 2.5;
+  const dclBank = packCount * 100;
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+      <div>
+        <h2 style="margin:0;font-size:20px;color:var(--fg)">🎛️ Конфігуратор перемикачів COM-Box (DIP 1..5)</h2>
+        <div style="color:var(--dim);font-size:12px;margin-top:4px">
+          Вкажіть положення важелів на вашому пристрої COM-Box для розрахунку точних параметрів банку (${packCount} активних АКБ)
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeDipModal()">✕ Закрити</button>
+    </div>
+
+    <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:12px;line-height:1.5">
+      ℹ️ Перемикачі DIP розташовані на торці пристрою COM-Box. Важіль <b>ВГОРУ = ON</b>, <b>ВНИЗ = OFF</b>. Виберіть положення нижче, щоб система показала активні алгоритми, цільову напругу та струми для інвертора Deye.
+    </div>
+
+    <table class="tbl" style="margin-bottom:16px">
+      <tr>
+        <th style="width:110px">Перемикач</th>
+        <th style="width:120px">Ваш стан</th>
+        <th>OFF (Важіль ВНИЗ)</th>
+        <th>ON (Важіль ВГОРУ)</th>
+        <th>Поточний ефект</th>
+      </tr>
+      <tr>
+        <td><b>DIP 1 (SW1)</b><br><span style="font-size:11px;color:var(--dim)">PB12 (вага 1)</span></td>
+        <td>
+          <select onchange="saveDip('dip1', this.value==='true')" style="background:#21262d;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-weight:700">
+            <option value="false" ${!dip1?'selected':''}>OFF (Вниз)</option>
+            <option value="true" ${dip1?'selected':''}>ON (Вгору)</option>
+          </select>
+        </td>
+        <td>100% заряд (CVL 54.0 В, 3.60 В/ком)</td>
+        <td><b>90% ощадливий (CVL 51.8 В)</b> + авто-баланс 52.5 В раз на 14 днів</td>
+        <td><span class="pill ${dip1?'ok':'acc'}">${dip1 ? '51.8 В (90% Eco)' : '54.0 В (100% Standart)'}</span></td>
+      </tr>
+      <tr>
+        <td><b>DIP 2 (SW2)</b><br><span style="font-size:11px;color:var(--dim)">PB13 (вага 2)</span></td>
+        <td>
+          <select onchange="saveDip('dip2', this.value==='true')" style="background:#21262d;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-weight:700">
+            <option value="false" ${!dip2?'selected':''}>OFF (Вниз)</option>
+            <option value="true" ${dip2?'selected':''}>ON (Вгору)</option>
+          </select>
+        </td>
+        <td><b>Пасивне дзеркало (Норма)</b> для моніторингу</td>
+        <td>Прозорий міст інвертор ↔ АКБ (⚠️ Лабораторний)</td>
+        <td><span class="pill ${dip2?'bad':'ok'}">${dip2 ? '⚠️ Міст (Заборонено для роботи)' : 'Пасивне дзеркало'}</span></td>
+      </tr>
+      <tr>
+        <td><b>DIP 3 (SW3)</b><br><span style="font-size:11px;color:var(--dim)">PB14 (вага 4)</span></td>
+        <td>
+          <select onchange="saveDip('dip3', this.value==='true')" style="background:#21262d;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-weight:700">
+            <option value="false" ${!dip3?'selected':''}>OFF (Вниз)</option>
+            <option value="true" ${dip3?'selected':''}>ON (Вгору)</option>
+          </select>
+        </td>
+        <td><b>Smart Plug & Play</b> (800 мс на 2 АКБ, швидкий старт)</td>
+        <td>Повне сканування 16 адрес (6.4 с, сервісний скан)</td>
+        <td><span class="pill ${dip3?'warn':'ok'}">${dip3 ? 'Повне сканування 16 адрес' : 'Plug & Play (800 мс)'}</span></td>
+      </tr>
+      <tr>
+        <td><b>DIP 4 (SW4)</b><br><span style="font-size:11px;color:var(--dim)">PB15 (вага 8)</span></td>
+        <td>
+          <select onchange="saveDip('dip4', this.value==='true')" style="background:#21262d;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-weight:700">
+            <option value="false" ${!dip4?'selected':''}>OFF (Вниз)</option>
+            <option value="true" ${dip4?'selected':''}>ON (Вгору)</option>
+          </select>
+        </td>
+        <td>50 А на модуль (0.5C, швидкий заряд)</td>
+        <td><b>15 А на модуль (0.15C)</b> — тиша, холодні кабелі</td>
+        <td><span class="pill ${dip4?'ok':'acc'}">${cclPerPack} А/блок (Банк: ${cclBank} А)</span></td>
+      </tr>
+      <tr>
+        <td><b>DIP 5 (SW5)</b><br><span style="font-size:11px;color:var(--dim)">PC6 (вага 16)</span></td>
+        <td>
+          <select onchange="saveDip('dip5', this.value==='true')" style="background:#21262d;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-weight:700">
+            <option value="false" ${!dip5?'selected':''}>OFF (Вниз)</option>
+            <option value="true" ${dip5?'selected':''}>ON (Вгору)</option>
+          </select>
+        </td>
+        <td><b>Штатний авто-режим</b> (нічний баланс за потреби)</td>
+        <td><b>Примусове вирівнювання (Float Hold 52.5 В)</b></td>
+        <td><span class="pill ${dip5?'warn':'ok'}">${dip5 ? '⚡ ПРИМУСОВЕ БАЛАНСУВАННЯ 52.5V' : 'Штатне авто-керування'}</span></td>
+      </tr>
+    </table>
+
+    <div style="background:#161b22;border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px">
+      <h3 style="margin:0 0 8px 0;font-size:14px;color:var(--fg)">📊 Розрахункові робочі параметри інвертора CAN (для ${packCount} АКБ):</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:10px;font-size:12px">
+        <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
+          <span style="color:var(--dim)">Напруга заряду (CVL):</span><br>
+          <b style="font-size:16px;color:var(--ok)">${cvl}</b>
+        </div>
+        <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
+          <span style="color:var(--dim)">Макс. струм заряду (CCL):</span><br>
+          <b style="font-size:16px;color:var(--acc)">${cclBank} А</b> (${packCount} × ${cclPerPack} А)
+        </div>
+        <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
+          <span style="color:var(--dim)">Фінальний дозаряд:</span><br>
+          <b style="font-size:16px;color:#a371f7">${finishCcl.toFixed(1)} А</b> → Standby: <b>0 А</b>
+        </div>
+        <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
+          <span style="color:var(--dim)">Макс. струм розряду (DCL):</span><br>
+          <b style="font-size:16px;color:var(--fg)">${dclBank} А</b> (${packCount} × 100 А)
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px">
+      <button class="modal-close-btn" onclick="closeDipModal()">Зберегти та закрити</button>
+    </div>
+  `;
+
+  document.getElementById('dip_modal_content').innerHTML = html;
 }
 
 /* --- INVERTER SETTINGS MODAL --- */
