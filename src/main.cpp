@@ -305,12 +305,12 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define TEMP_DISCHARGE_MAX_C 60.0f
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
-// ===== Balance session engine (17.10.2026) =====
+// ===== Balance session engine (17.10.2026, updated 11.11.2026) =====
 // DIP1 OFF (standard): CVL 54.0 V; auto balance windows (BAL_AUTO_ENABLED)
 // open on cell-spread analysis: full thresholds + 2 A per pack cap.
-// DIP1 ON (51.8 V option): auto logic disabled, profile holds 51.8 V with
-// the same 2 A trickle from 3400 mV (~90%) so passive balancing has gentle
-// CV time.
+// DIP1 ON (51.8 V option): 90% profile (51.8 V) with gentle 2 A trickle from 3400 mV;
+// adaptive balance Float Hold (52.5 V) runs at most once per 14 days (90 min cap)
+// only when spread >= 40 mV.
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 40       // regular spread bucket (40..100 mV): retry in 72 h
@@ -1633,13 +1633,14 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
   return (uint16_t)max_current_x10;
 }
 
-// ===== Balance session engine (17.10.2026) =====
+// ===== Balance session engine (17.10.2026, updated 11.11.2026) =====
 // DIP1 OFF (standard 54.0 V): auto sessions (BAL_AUTO_ENABLED) driven by
 // cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
 // full; current capped at 2 A per pack once min cell >= 3400 mV).
-// DIP1 ON (51.8 V option): auto logic disabled; the same 2 A trickle from
-// 3400 mV applies. Sessions exit on spread convergence (<= 40 mV), BMS loss,
-// sustained discharge (grid outage > 60 s -> Smart Pause up to 30 min), no progress or an 8 h timeout.
+// DIP1 ON (51.8 V option): 90% profile (51.8 V) with 2 A trickle from 3400 mV;
+// adaptive Float Hold (52.5 V) runs at most once per 14 days (90 min cap).
+// Sessions exit on spread convergence (<= 40 mV), BMS loss,
+// sustained discharge (grid outage > 60 s -> Smart Pause up to 30 min), no progress or timeout.
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
   bal_session_active = false;
