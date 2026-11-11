@@ -2775,7 +2775,7 @@ function renderSummary() {
     let diffPill = `<b style="color:var(--ok)">${d.cell_diff} mV</b>`;
     if (d.cell_diff > 80) {
       diffPill = `<b style="color:var(--bad)">${d.cell_diff} mV ⚠️</b>`;
-    } else if (d.cell_diff > 35) {
+    } else if (d.cell_diff > 40) {
       diffPill = `<b style="color:var(--warn)">${d.cell_diff} mV</b>`;
     }
 
@@ -2917,7 +2917,7 @@ function renderPackDetail(addr) {
   if (d.cell_diff > 80) {
     diffLabel += ' ⚠️ [Критичний перекіс]';
     document.getElementById('p_difft').style.color = 'var(--bad)';
-  } else if (d.cell_diff > 35) {
+  } else if (d.cell_diff > 40) {
     diffLabel += ' [Потрібне вирівнювання]';
     document.getElementById('p_difft').style.color = 'var(--warn)';
   } else {

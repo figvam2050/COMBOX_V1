@@ -314,7 +314,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 40       // regular spread bucket (40..100 mV): retry in 72 h
-#define BAL_SPREAD_EXIT_MV 35      // session success target (spread <= 35 mV, matches BMS 40 mV comparator)
+#define BAL_SPREAD_EXIT_MV 40      // session success target (spread <= 40 mV, matches hardware BMS 40 mV comparator threshold)
 #define BAL_TREND_DELTA_MV_12H 5   // 5 mV over 12 h == 10 mV/24 h -> HIGH
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_MED_MS (72UL * 3600UL * 1000UL)
@@ -1638,7 +1638,7 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 // cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
 // full; current capped at 2 A per pack once min cell >= 3400 mV).
 // DIP1 ON (51.8 V option): auto logic disabled; the same 2 A trickle from
-// 3400 mV applies. Sessions exit on spread convergence (<= 35 mV), BMS loss,
+// 3400 mV applies. Sessions exit on spread convergence (<= 40 mV), BMS loss,
 // sustained discharge (grid outage > 60 s -> Smart Pause up to 30 min), no progress or an 8 h timeout.
 
 static void balance_session_end(bool success, uint32_t cooldown_until) {
@@ -1865,7 +1865,7 @@ static void balance_update(uint8_t packs) {
     }
 
   // In-session duration limit:
-  // In DIP1 90% mode: strict 90 min window prevents eternal 52.5V float if a weak pack cannot converge to 35mV.
+  // In DIP1 90% mode: strict 90 min window prevents eternal 52.5V float if a weak pack cannot converge to 40mV.
   uint32_t session_max_ms = manual ? BAL_SESSION_DIP1_MAX_MS : BAL_SESSION_MAX_MS;
   uint32_t cooldown_fail_ms = manual ? (now + BAL_COOLDOWN_DIP1_MS) : (now + BAL_COOLDOWN_TRY_MS);
   if ((now - bal_session_start_ms) >= session_max_ms) {
