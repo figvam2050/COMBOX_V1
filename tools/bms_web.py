@@ -3,7 +3,7 @@
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
-Version-3.4 (v2.6 COM engine + balance inspector + offline status reset)
+Version 3.5
 Features (v2.6):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
@@ -19,17 +19,22 @@ Features (v2.6):
     pack serial number in the "Serial" column, registers 31..35 decoded
     (Full Capacity, temp sensors), cell voltages in volts,
     full date/time column. Offline analyzer reads both new and legacy logs.
-  - Dual logging profiles (v2.4), selectable independently in the log card:
-      * Alarm - logs only alarm events from registers 0025..0028
-        (status / warning / protection / error) and temperature thresholds.
-        Nothing is written while the register state is unchanged; a row is
-        written on activation, on any change and on recovery.
-      * Work  - periodic cell-analysis / test samples, interval set in the
+  - Two logging profiles, selectable independently in the log card:
+      * "Лише події" (events) - registers 0025..0028 + temperature.
+        Nothing is written while the signature is unchanged. On a change:
+        warning (0026), protection (0027), error (0028) and temperature
+        (outside 0..45 C) are written as Alarm; the whole Status register
+        (0025) - any mode, including Protect, the heating bit and unknown
+        values - is written as State. A cycle may produce two event rows:
+        Alarm first, then State.
+      * Work - periodic cell-analysis / test samples, interval set in the
         log card (default 5 s).
-    Both profiles may run at once, sharing one CSV file per pack. Writes are
-    serialized and Alarm rows always take priority over the periodic Work row
-    (the Work sample is postponed, never duplicated). Column "Log" marks every
-    row as Alarm or Work.
+    Both profiles may run at once, sharing one CSV file per pack. Event rows
+    (Alarm/State) are written in addition to the periodic Work row and never
+    postpone it: when both are due, rows with the same timestamp are appended
+    in the order Alarm, State, Work, so Work keeps its exact cadence.
+    Column "Log" marks every row as Alarm, State or Work; column "Changes"
+    records the per-cycle delta (e.g. "W: 0x0000->0x0002; P: 0x1000->0x0000").
   - Zero external dependencies beyond standard Python and pySerial.
 
 Recent changes:
@@ -79,6 +84,28 @@ Recent changes:
               instead of the raw "bad response header ..." (same wording as
               a full rescan), so one dead pack out of two does not leave a
               protocol error in the UI while the other pack keeps polling.
+  2026-11-11  Logging v3.5: the whole Status register (0025) is State.
+              Alarm is only warning (0026), protection (0027), error (0028)
+              and temperature (outside 0..45 C), including their recovery.
+              A cycle may write two event rows (Alarm first, then State) and
+              the independent Work row (Alarm, State, Work order). New
+              "Changes" column stores the per-cycle delta, e.g.
+              "W: 0x0000->0x0002; P: 0x1000->0x0000". A Protect transition
+              is no longer an Alarm by itself; the cause is in 0027.
+              Same behaviour as bms_webX.py.
+  2026-11-11  Console window: a direct launch (.py double-click / Enter in
+              Explorer) waits for Enter before closing, so the error message
+              stays readable; terminal, CI, harness and --selftest runs are
+              never paused. A direct launch is detected by having no
+              command-line arguments (_launched_from_explorer), not by
+              GetConsoleProcessList: .py is associated with py.exe, which
+              starts python.exe as a child, so the console holds two
+              processes and the "<= 1" check never matched. The __main__
+              wrapper catches SystemExit, KeyboardInterrupt and exceptions,
+              prints the traceback and only then pauses. Non-interactive
+              stdin (pipe, service, CI) is never paused; BMS_NO_PAUSE=1
+              disables the pause for a no-argument terminal run.
+              Same behaviour as bms_webX.py.
 Journal: tools/HystoryMod.md
 
 Usage:
@@ -511,8 +538,11 @@ def parse_bus(buf: bytes):
 LOG_CELL_SLOTS = 16
 LOG_TEMP_SLOTS = 6
 
-# v2.4: two independent logging profiles (may run together; Alarm has priority).
+# Logging profiles (may run together; event rows are written in addition
+# to the periodic Work sample). "Alarm"/"State" come from the combined
+# "Лише події" profile; Work is the periodic telemetry profile.
 LOG_KIND_ALARM = "Alarm"
+LOG_KIND_STATE = "State"
 LOG_KIND_WORK = "Work"
 DEFAULT_WORK_INTERVAL_S = 5.0
 MIN_WORK_INTERVAL_S = 1.0
@@ -551,7 +581,8 @@ def log_columns(cell_slots: int = 15, temp_slots: int = 6) -> list:
     ]
     cols += [f"Cell_{i}_V" for i in range(1, cell_slots + 1)]
     cols += [f"Temp_{i}_C" for i in range(1, temp_slots + 1)]
-    cols += ["Status_Hex", "Warning_Hex", "Protection_Hex", "Error_Hex", "Balance_Hex", "Serial"]
+    cols += ["Status_Hex", "Warning_Hex", "Protection_Hex", "Error_Hex",
+             "Balance_Hex", "Serial", "Changes"]
     return cols
 
 
@@ -566,10 +597,13 @@ def _mv_to_v(mv):
 
 def build_log_values(parsed: dict, addr: int, cell_slots: int = 15,
                      temp_slots: int = 6, ts: str = None,
-                     log_kind: str = LOG_KIND_WORK) -> list:
+                     log_kind: str = LOG_KIND_WORK,
+                     changes: str = "") -> list:
     """One CSV data row: volts for cells, decoded regs 31..35, ISO-like date.
 
-    log_kind is written into the "Log" column: Alarm or Work (see logging profiles).
+    log_kind is written into the "Log" column: Alarm, State or Work.
+    changes is the per-cycle delta for event rows (empty for Work), e.g.
+    "W: 0x0000->0x0002; P: 0x1000->0x0000".
     Values are keyed by column name and ordered by log_columns(), so changing
     the schema order in one place keeps header and data aligned.
     """
@@ -610,6 +644,7 @@ def build_log_values(parsed: dict, addr: int, cell_slots: int = 15,
         "Protection_Hex": hx(parsed.get("protection")),
         "Error_Hex": hx(parsed.get("error_code")),
         "Balance_Hex": hx(parsed.get("balance")),
+        "Changes": changes,
     }
     for i in range(cell_slots):
         values[f"Cell_{i + 1}_V"] = _mv_to_v(cells[i]) if i < len(cells) else None
@@ -617,6 +652,54 @@ def build_log_values(parsed: dict, addr: int, cell_slots: int = 15,
         values[f"Temp_{i + 1}_C"] = temps[i] if i < len(temps) else None
 
     return [values[name] for name in log_columns(cell_slots, temp_slots)]
+
+
+def _hx4(v) -> str:
+    """Hex register value for the Changes column (0x0000 .. 0xFFFF)."""
+    return f"0x{v:04X}"
+
+
+def _temp_label(sig: tuple) -> str:
+    """Temperature bucket from an Alarm & State signature."""
+    if sig[4]:
+        return "high"
+    if sig[5]:
+        return "low"
+    return "normal"
+
+
+def _alarm_changes(prev_sig, sig: tuple) -> str:
+    """Per-cycle delta for an Alarm row: W/P/E/T only.
+
+    Status (0025) is deliberately absent: the whole register is State.
+    prev_sig is None on the first sample, which is written as init->value.
+    """
+    out = []
+    for name, idx in (("W", 1), ("P", 2), ("E", 3)):
+        new = sig[idx]
+        if prev_sig is None:
+            # Baseline: list only registers that are active at start.
+            if new:
+                out.append(f"{name}: init->{_hx4(new)}")
+            continue
+        old = prev_sig[idx]
+        if old != new:
+            out.append(f"{name}: {_hx4(old)}->{_hx4(new)}")
+    if prev_sig is None:
+        if sig[4]:
+            out.append("T: init->high")
+        elif sig[5]:
+            out.append("T: init->low")
+    else:
+        old_t, new_t = _temp_label(prev_sig), _temp_label(sig)
+        if old_t != new_t:
+            out.append(f"T: {old_t}->{new_t}")
+    return "; ".join(out)
+
+
+def _state_changes(prev_sig, sig: tuple) -> str:
+    """Per-cycle delta for a State row: Status (0025) only."""
+    return f"S: {_hx4(prev_sig[0])}->{_hx4(sig[0])}"
 
 
 def calculate_autonomy(avg_voltage: float, total_current: float, cap_remaining: float, full_cap: float) -> dict:
@@ -788,7 +871,8 @@ class BmsBus:
 
         # CSV logging (per pack: own file, readable header, volts, date)
         # addr -> {"on", "path", "rows", "last_ts", "cell_slots", "temp_slots",
-        #          "alarm_sig", "work_next_t", "alarm_rows", "work_rows"}
+        #          "alarm_sig", "work_next_t",
+        #          "alarm_rows", "state_rows", "work_rows"}
         self.logs = {}
         # v2.4: independent logging profiles; one shared file per pack.
         # alarm=True -> write on r25..r28/temperature state change only
@@ -986,7 +1070,7 @@ class BmsBus:
             st = {"on": False, "path": None, "rows": 0, "last_ts": None,
                   "cell_slots": 15, "temp_slots": 6,
                   "alarm_sig": None, "work_next_t": None,
-                  "alarm_rows": 0, "work_rows": 0}
+                  "alarm_rows": 0, "state_rows": 0, "work_rows": 0}
             self.logs[addr] = st
         return st
 
@@ -999,6 +1083,7 @@ class BmsBus:
         st["alarm_sig"] = None
         st["work_next_t"] = None
         st["alarm_rows"] = 0
+        st["state_rows"] = 0
         st["work_rows"] = 0
 
     def set_log(self, on: bool, addrs=None) -> list:
@@ -1270,10 +1355,11 @@ class BmsBus:
         }
 
     def _alarm_signature(self, parsed: dict) -> tuple:
-        """Alarm-profile state: registers 0025..0028 + temperature thresholds.
+        """Event-profile state: registers 0025..0028 + temperature thresholds.
 
-        Rows are written only when this signature changes, so a stable state
-        produces no repeated records.
+        The same signature drives both Alarm and State rows and is stored in
+        alarm_sig (Alarm & State). Rows are written only when this signature
+        changes, so a stable state produces no repeated records.
         """
         status = parsed.get("status") or 0
         warning = parsed.get("warning") or 0
@@ -1286,16 +1372,26 @@ class BmsBus:
 
     @staticmethod
     def _is_alarm(sig: tuple) -> bool:
+        """True for a real alarm: warning, protection, error or temperature.
+
+        Status (0025) is a state register: the whole register, including the
+        Protect value, the heating bit and unknown values, is logged as State.
+        Its alarm cause is in 0027 (protection), not in 0025 itself.
+        """
         status, warning, protection, error, temp_high, temp_low = sig
-        return bool(warning or protection or error or (status & 0x04)
-                    or temp_high or temp_low)
+        return bool(warning or protection or error or temp_high or temp_low)
 
     def log_row(self, regs: list, addr: int) -> None:
-        """Append one sample to this pack's CSV file using the active profiles.
+        """Append samples to this pack's CSV file using the active profiles.
 
-        Alarm profile: only on alarm-state change (activation/change/recovery).
-        Work profile: periodic sample every work_interval seconds.
-        Alarm has priority; when both are due, the Work sample is postponed.
+        Events profile ("Лише події"):
+          - warning/protection/error/temperature change -> Alarm row;
+          - any Status (0025) change, including Protect, heating and unknown
+            values -> State row.
+        Both rows may be written in one cycle (Alarm first, then State).
+        Work profile: periodic sample every work_interval seconds. It is
+        independent of events: event rows never postpone it, so Work keeps
+        its exact period (row order: Alarm, State, Work).
         """
         parsed = decode_regs(regs)
         now = time.monotonic()
@@ -1312,25 +1408,38 @@ class BmsBus:
             if not st["on"] or not st["path"]:
                 return
             cfg = dict(self.log_cfg)
-            kind = None
             sig = self._alarm_signature(parsed)
             prev_sig = st["alarm_sig"]
+            event_rows = []
 
-            if cfg["alarm"] and sig != prev_sig:
-                # Activation, any change while active, or recovery.
-                if self._is_alarm(sig) or (prev_sig is not None and self._is_alarm(prev_sig)):
-                    kind = LOG_KIND_ALARM
-                st["alarm_sig"] = sig
+            if cfg["alarm"]:
+                if prev_sig is None:
+                    # Baseline: an already active alarm is still recorded.
+                    if self._is_alarm(sig):
+                        event_rows.append(
+                            (LOG_KIND_ALARM, _alarm_changes(None, sig)))
+                else:
+                    # Alarm and State are independent: 0025 is always State,
+                    # 0026/0027/0028/temperature are Alarm.
+                    if sig[1:] != prev_sig[1:]:
+                        event_rows.append(
+                            (LOG_KIND_ALARM, _alarm_changes(prev_sig, sig)))
+                    if sig[0] != prev_sig[0]:
+                        event_rows.append(
+                            (LOG_KIND_STATE, _state_changes(prev_sig, sig)))
 
-            if kind is None and cfg["work"]:
-                if st["work_next_t"] is None or now >= st["work_next_t"]:
-                    kind = LOG_KIND_WORK
-
-            if kind is None:
+            # Work is independent: event rows never postpone it, so every
+            # periodic sample still lands at its own interval.
+            work_due = bool(
+                cfg["work"] and
+                (st["work_next_t"] is None or now >= st["work_next_t"]))
+            if not event_rows and not work_due:
+                # Keep the baseline current even when no row is written.
+                if cfg["alarm"] and sig != prev_sig:
+                    st["alarm_sig"] = sig
                 return
-
-            # Alarm supersedes the periodic sample: no two rows for one cycle.
-            if cfg["work"]:
+            old_next = st["work_next_t"]
+            if work_due:
                 st["work_next_t"] = now + cfg["work_interval"]
 
             path = st["path"]
@@ -1347,20 +1456,32 @@ class BmsBus:
                     w = csv.writer(f)
                     if new_file:
                         w.writerow(build_log_header(cell_slots, temp_slots))
-                    w.writerow(build_log_values(parsed, addr, cell_slots, temp_slots,
-                                                log_kind=kind))
+                    # Event rows first (Alarm, then State), Work last.
+                    for kind, changes in event_rows:
+                        w.writerow(build_log_values(
+                            parsed, addr, cell_slots, temp_slots,
+                            log_kind=kind, changes=changes))
+                    if work_due:
+                        w.writerow(build_log_values(
+                            parsed, addr, cell_slots, temp_slots,
+                            log_kind=LOG_KIND_WORK))
             with self.lock:
-                st["rows"] += 1
-                if kind == LOG_KIND_ALARM:
-                    st["alarm_rows"] += 1
-                else:
+                st["rows"] += len(event_rows) + (1 if work_due else 0)
+                for kind, _ in event_rows:
+                    if kind == LOG_KIND_ALARM:
+                        st["alarm_rows"] += 1
+                    elif kind == LOG_KIND_STATE:
+                        st["state_rows"] += 1
+                if work_due:
                     st["work_rows"] += 1
                 st["last_ts"] = datetime.now().strftime("%Y-%m-%d | %H:%M:%S")
+                if cfg["alarm"]:
+                    st["alarm_sig"] = sig
         except Exception as e:
             self.last_err = f"log {path}: {e}"
-            if kind == LOG_KIND_ALARM:
-                with self.lock:
-                    st["alarm_sig"] = prev_sig
+            with self.lock:
+                st["alarm_sig"] = prev_sig
+                st["work_next_t"] = old_next
 
     def loop(self) -> None:
         buf = b""
@@ -1593,6 +1714,7 @@ class BmsBus:
                     "log_path": lg["path"] if lg else None,
                     "log_rows": lg["rows"] if lg else 0,
                     "log_alarm_rows": lg["alarm_rows"] if lg else 0,
+                    "log_state_rows": lg["state_rows"] if lg else 0,
                     "log_work_rows": lg["work_rows"] if lg else 0,
                     "log_last_ts": lg["last_ts"] if lg else None,
                 })
@@ -1604,7 +1726,8 @@ class BmsBus:
             log_files = {
                 f"0x{a:02X}": {
                     "on": st["on"], "path": st["path"], "rows": st["rows"],
-                    "alarm_rows": st["alarm_rows"], "work_rows": st["work_rows"],
+                    "alarm_rows": st["alarm_rows"], "state_rows": st["state_rows"],
+                    "work_rows": st["work_rows"],
                     "last_ts": st["last_ts"],
                 }
                 for a, st in self.logs.items()
@@ -2026,7 +2149,7 @@ canvas{width:100%;height:auto;display:block}
       <table class="kv">
         <tr><td>Файл</td><td id="p_logpath">—</td></tr>
         <tr><td>Записано рядків</td><td id="p_logrows">0</td></tr>
-        <tr><td>Alarm / Work</td><td><span id="p_log_alarm">0</span> / <span id="p_log_work">0</span></td></tr>
+        <tr><td>Alarm / State / Work</td><td><span id="p_log_alarm">0</span> / <span id="p_log_state">0</span> / <span id="p_log_work">0</span></td></tr>
         <tr><td>Останній запис</td><td id="p_logts">—</td></tr>
       </table>
       <div style="margin-top:10px">
@@ -2106,8 +2229,10 @@ canvas{width:100%;height:auto;display:block}
     <div class="log-profiles-title">Профілі запису <span style="font-weight:400;color:var(--dim)">(можна увімкнути обидва одночасно)</span></div>
     <label class="log-profile-row">
       <input type="checkbox" id="cfg_alarm" onchange="saveLogCfg()">
-      <span><b>🚨 Лише аварійні події</b> — регістри 0025–0028 (статус, попередження, захист, помилка) + температура (поріг 0…45&nbsp;°C).
-        Запис виконується лише при зміні стану: поява, зміна або зняття аварії. Без змін — файл не пишеться.</span>
+      <span><b>🚨 Лише події</b> — регістри 0025–0028 (статус, попередження, захист, помилка) + температура (поріг 0…45&nbsp;°C).
+        Запис при зміні стану: попередження (0026) / захист (0027) / помилка (0028) / температура пишуться як <b>Alarm</b>,
+        будь-яка зміна статусу (0025) — включно з Protect, бітом нагріву та невідомими значеннями — як <b>State</b>.
+        За цикл може бути дві строки: спочатку <b>Alarm</b>, потім <b>State</b>. Без змін — файл не пишеться.</span>
     </label>
     <label class="log-profile-row">
       <input type="checkbox" id="cfg_work" onchange="saveLogCfg()">
@@ -2115,8 +2240,10 @@ canvas{width:100%;height:auto;display:block}
         <input type="number" id="cfg_interval" min="1" max="3600" step="1" value="5" onchange="saveLogCfg()"> с.</span>
     </label>
     <div class="log-profiles-note">
-      Колонка <b>Log</b> у файлі позначає тип рядка: <b>Alarm</b> або <b>Work</b>.
-      Аварійні записи мають пріоритет: якщо в циклі є аварія, плановий запис Work переноситься (без дублювання рядків).
+      Колонка <b>Log</b> у файлі позначає тип рядка: <b>Alarm</b>, <b>State</b> або <b>Work</b>;
+      колонка <b>Changes</b> — дельта за цикл (напр. <code>W: 0x0000-&gt;0x0002; P: 0x1000-&gt;0x0000</code>).
+      Події (Alarm/State) пишуться <b>додатково</b> до планового Work: якщо в циклі є подія і настав час Work,
+      у файл потраплять усі рядки в порядку Alarm → State → Work, тому Work-рядки не зсуваються зі свого періоду.
       Обидва профілі пишуть в один файл кожної АКБ, тому колізій немає.
     </div>
   </div>
@@ -2753,8 +2880,10 @@ function renderPackDetail(addr) {
   if (lp) lp.textContent = p.log_path || '—';
   if (lr) lr.textContent = p.log_rows || 0;
   const la = document.getElementById('p_log_alarm');
+  const ls = document.getElementById('p_log_state');
   const lw = document.getElementById('p_log_work');
   if (la) la.textContent = p.log_alarm_rows || 0;
+  if (ls) ls.textContent = p.log_state_rows || 0;
   if (lw) lw.textContent = p.log_work_rows || 0;
   if (lt) lt.textContent = p.log_last_ts || '—';
   if (lb) {
@@ -3772,7 +3901,7 @@ async function tick() {
       lf.innerHTML = keys.length ? keys.map(k => {
         const f = files[k];
         const state = f.on ? '<span class="pill ok">запис</span>' : '<span class="pill">стоп</span>';
-        return `<tr><td>${k}</td><td>${f.path || '—'}</td><td>${f.rows || 0} · ${f.last_ts || '—'}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
+        return `<tr><td>${k}</td><td>${f.path || '—'}</td><td>${f.rows || 0} · ${f.last_ts || '—'}</td><td>${state}</td><td style="color:var(--dim);font-size:12px">A ${f.alarm_rows || 0} / S ${f.state_rows || 0} / W ${f.work_rows || 0}</td></tr>`;
       }).join('') : '<tr><td>—</td><td>лог ще не створювався</td><td>—</td><td>—</td><td>—</td></tr>';
     }
 
@@ -4196,8 +4325,241 @@ def selftest() -> int:
         globals()["POLL_S"] = saved_poll
         globals()["list_ports_report"] = saved_rows
 
+    # Status (0025) change must be logged immediately regardless of the Work
+    # interval, but as State (not Alarm): Standby -> Charging is a normal
+    # state change, not an alarm.
+    import tempfile
+    bus_log = BmsBus("", 9600, mock=True)
+    bus_log.set_log_cfg(alarm=True, work=True, work_interval=15)
+    bus_log.set_log(True, [1])
+    st_log = bus_log._log_state(1)
+    with tempfile.TemporaryDirectory() as td:
+        st_log["path"] = os.path.join(td, "status.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = None
+        st_log["work_next_t"] = None
+        calm_regs = [0] * 39
+        calm_regs[0] = 5300
+        for i in range(15):
+            calm_regs[2 + i] = 3450
+        calm_regs[18] = calm_regs[19] = calm_regs[20] = 25
+        calm_regs[24] = 80
+        calm_regs[36] = 15
+        calm_regs[25] = 0  # Standby
+        charging_regs = list(calm_regs)
+        charging_regs[25] = 1  # Charging
+        bus_log.log_row(calm_regs, 1)      # Work (first sample)
+        bus_log.log_row(calm_regs, 1)      # not due -> nothing
+        bus_log.log_row(charging_regs, 1)  # Status change -> State
+        bus_log.log_row(charging_regs, 1)  # unchanged -> nothing
+        with open(st_log["path"], encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln]
+        assert len(lines) == 3, f"status log lines {len(lines)}: {lines}"
+        kinds = [ln.split(",")[1] for ln in lines[1:]]
+        assert kinds == ["Work", "State"], f"status log kinds {kinds}"
+        assert st_log["alarm_rows"] == 0 and st_log["state_rows"] == 1 \
+            and st_log["work_rows"] == 1, \
+            (st_log["alarm_rows"], st_log["state_rows"], st_log["work_rows"])
+
+        # Alarm vs State classification: warning/protection/error/temperature
+        # -> Alarm; the whole Status register (0025), including Protect,
+        # heating and unknown values -> State.
+        import time as _time
+        bus_log.set_log_cfg(alarm=True, work=False)
+        st_log["path"] = os.path.join(td, "events.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = None
+        st_log["work_next_t"] = None
+        changes_idx = log_columns(15, 6).index("Changes")
+        heating_regs = list(calm_regs)
+        heating_regs[25] = 0x8000  # heating bit
+        unknown_regs = list(calm_regs)
+        unknown_regs[25] = 0x0003  # unknown enum -> State
+        protect_regs = list(calm_regs)
+        protect_regs[25] = 0x0004  # Protect is part of 0025 -> State
+        warning_regs = list(calm_regs)
+        warning_regs[26] = 0x0002  # warning -> Alarm
+        protection_regs = list(calm_regs)
+        protection_regs[27] = 0x1000  # protection -> Alarm
+        bus_log.log_row(calm_regs, 1)        # baseline, no event
+        bus_log.log_row(charging_regs, 1)    # State
+        bus_log.log_row(calm_regs, 1)        # State (back to Standby)
+        bus_log.log_row(heating_regs, 1)     # State (heating bit)
+        bus_log.log_row(calm_regs, 1)        # State (heating off)
+        bus_log.log_row(unknown_regs, 1)     # State (unknown enum)
+        bus_log.log_row(calm_regs, 1)        # State (unknown -> Standby)
+        bus_log.log_row(warning_regs, 1)     # Alarm (warning)
+        bus_log.log_row(calm_regs, 1)        # Alarm (warning recovery)
+        bus_log.log_row(protect_regs, 1)     # State (Protect is 0025)
+        bus_log.log_row(calm_regs, 1)        # State (Protect recovery)
+        bus_log.log_row(protection_regs, 1)  # Alarm (protection)
+        bus_log.log_row(calm_regs, 1)        # Alarm (protection recovery)
+        with open(st_log["path"], encoding="utf-8") as f:
+            elines = [ln for ln in f.read().splitlines() if ln]
+        ekinds = [ln.split(",")[1] for ln in elines[1:]]
+        assert ekinds == ["State", "State", "State", "State", "State",
+                          "State", "Alarm", "Alarm", "State", "State",
+                          "Alarm", "Alarm"], \
+            f"event log kinds {ekinds}"
+        echanges = [ln.split(",")[changes_idx] for ln in elines[1:]]
+        assert echanges == [
+            "S: 0x0000->0x0001",
+            "S: 0x0001->0x0000",
+            "S: 0x0000->0x8000",
+            "S: 0x8000->0x0000",
+            "S: 0x0000->0x0003",
+            "S: 0x0003->0x0000",
+            "W: 0x0000->0x0002",
+            "W: 0x0002->0x0000",
+            "S: 0x0000->0x0004",
+            "S: 0x0004->0x0000",
+            "P: 0x0000->0x1000",
+            "P: 0x1000->0x0000",
+        ], f"event changes {echanges}"
+        assert st_log["state_rows"] == 8 and st_log["alarm_rows"] == 4 \
+            and st_log["work_rows"] == 0, \
+            (st_log["state_rows"], st_log["alarm_rows"], st_log["work_rows"])
+
+        # Alarm recovery and Status change in one cycle -> two rows,
+        # Alarm first, then State, with the same timestamp.
+        st_log["path"] = os.path.join(td, "both.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = bus_log._alarm_signature(
+            decode_regs(warning_regs))
+        st_log["work_next_t"] = None
+        both_regs = list(charging_regs)  # warning cleared + Charging
+        bus_log.log_row(both_regs, 1)
+        with open(st_log["path"], encoding="utf-8") as f:
+            blines = [ln for ln in f.read().splitlines() if ln]
+        bkinds = [ln.split(",")[1] for ln in blines[1:]]
+        assert bkinds == ["Alarm", "State"], f"both log kinds {bkinds}"
+        bchanges = [ln.split(",")[changes_idx] for ln in blines[1:]]
+        assert bchanges == ["W: 0x0002->0x0000", "S: 0x0000->0x0001"], \
+            f"both changes {bchanges}"
+        assert blines[1].split(",")[0] == blines[2].split(",")[0], \
+            "both rows must share the timestamp"
+
+        # First sample with an active alarm -> Alarm with init->value.
+        st_log["path"] = os.path.join(td, "init.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = None
+        st_log["work_next_t"] = None
+        bus_log.log_row(warning_regs, 1)
+        with open(st_log["path"], encoding="utf-8") as f:
+            ilines = [ln for ln in f.read().splitlines() if ln]
+        assert [ln.split(",")[1] for ln in ilines[1:]] == ["Alarm"], \
+            f"init log kinds {ilines}"
+        assert ilines[1].split(",")[changes_idx] == "W: init->0x0002", \
+            f"init changes {ilines[1].split(',')[changes_idx]}"
+
+        # Temperature crossing the threshold -> Alarm with a T delta.
+        st_log["path"] = os.path.join(td, "temp.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = bus_log._alarm_signature(
+            decode_regs(calm_regs))
+        st_log["work_next_t"] = None
+        hot_regs = list(calm_regs)
+        hot_regs[20] = 46  # temp_max >= 45 C
+        bus_log.log_row(hot_regs, 1)
+        bus_log.log_row(calm_regs, 1)
+        with open(st_log["path"], encoding="utf-8") as f:
+            tlines = [ln for ln in f.read().splitlines() if ln]
+        assert [ln.split(",")[1] for ln in tlines[1:]] == ["Alarm", "Alarm"], \
+            f"temp log kinds {tlines}"
+        tchanges = [ln.split(",")[changes_idx] for ln in tlines[1:]]
+        assert tchanges == ["T: normal->high", "T: high->normal"], \
+            f"temp changes {tchanges}"
+
+        # Event + due Work in one cycle: three rows, same timestamp, in
+        # Alarm -> State -> Work order. An event must not postpone Work.
+        bus_log.set_log_cfg(alarm=True, work=True, work_interval=15)
+        st_log["path"] = os.path.join(td, "dual.csv")
+        st_log["rows"] = 0
+        st_log["alarm_rows"] = 0
+        st_log["state_rows"] = 0
+        st_log["work_rows"] = 0
+        st_log["alarm_sig"] = bus_log._alarm_signature(
+            decode_regs(calm_regs))
+        st_log["work_next_t"] = 0.0  # Work is due now
+        dual_regs = list(warning_regs)
+        dual_regs[25] = 0x0001  # warning + Status change + Work due
+        bus_log.log_row(dual_regs, 1)
+        with open(st_log["path"], encoding="utf-8") as f:
+            dlines = [ln for ln in f.read().splitlines() if ln]
+        dkinds = [ln.split(",")[1] for ln in dlines[1:]]
+        assert dkinds == ["Alarm", "State", "Work"], \
+            f"dual log kinds {dkinds}"
+        ddates = [ln.split(",")[0] for ln in dlines[1:]]
+        assert len(set(ddates)) == 1, f"dual timestamps {ddates}"
+        dchanges = [ln.split(",")[changes_idx] for ln in dlines[1:]]
+        assert dchanges == ["W: 0x0000->0x0002",
+                            "S: 0x0000->0x0001", ""], \
+            f"dual changes {dchanges}"
+        assert st_log["rows"] == 3 and st_log["state_rows"] == 1 \
+            and st_log["alarm_rows"] == 1 and st_log["work_rows"] == 1, \
+            (st_log["rows"], st_log["state_rows"],
+             st_log["alarm_rows"], st_log["work_rows"])
+
+        # A State/Alarm event does not move work_next_t: Work keeps its
+        # exact period even when events happen in between.
+        st_log["alarm_sig"] = bus_log._alarm_signature(
+            decode_regs(charging_regs))
+        st_log["work_next_t"] = _time.monotonic() + 15
+        saved_next = st_log["work_next_t"]
+        bus_log.log_row(heating_regs, 1)  # State only, Work not due
+        assert st_log["work_next_t"] == saved_next, "event moved Work timer"
+        assert st_log["state_rows"] == 2 and st_log["work_rows"] == 1, \
+            (st_log["state_rows"], st_log["work_rows"])
+
     print("selftest OK")
     return 0 if ok else 1
+
+
+def _launched_from_explorer() -> bool:
+    """True for a direct launch (double-click / Enter in Explorer).
+
+    .py files are associated with C:\\WINDOWS\\py.exe, which starts python.exe
+    as a child: the console then has two attached processes, so
+    GetConsoleProcessList cannot tell a double-click from a shell. A direct
+    launch always has no command-line arguments; terminal usage normally
+    passes options (--port, --mock, --allow-no-port, --selftest).
+    """
+    if os.name != "nt":
+        return False
+    return len(sys.argv) == 1
+
+
+def _pause_if_double_click() -> None:
+    """Keep the console open after a direct launch so errors stay visible."""
+    if not _launched_from_explorer():
+        return
+    if os.environ.get("BMS_NO_PAUSE"):
+        return
+    try:
+        interactive = bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        interactive = False
+    if not interactive:
+        return
+    try:
+        input("\nНатисніть Enter, щоб закрити вікно...")
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def main() -> int:
@@ -4280,4 +4642,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Keep the console open on a direct launch even if main() crashes or
+    # argparse raises SystemExit: otherwise the reason disappears with it.
+    try:
+        exit_code = main()
+    except SystemExit as exc:
+        code = exc.code
+        exit_code = code if isinstance(code, int) else (0 if code is None else 1)
+    except KeyboardInterrupt:
+        exit_code = 130
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        exit_code = 1
+    _pause_if_double_click()
+    sys.exit(exit_code)

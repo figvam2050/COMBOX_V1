@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Алгоритм записи CSV-лога — Alarm / State / Work (v3.5)</title>
+<style>
+:root{
+  --bg:#111417; --card:#1a1f24; --card-hi:#21262d; --fg:#d8dee4; --dim:#8b96a2;
+  --ok:#3fb950; --bad:#f85149; --warn:#d29922; --acc:#58a6ff;
+  --border:#30363d; --code:#0d1117; --violet:#a371f7;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--fg); padding:28px 18px 60px;
+  font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+}
+.wrap{max-width:1180px;margin:0 auto}
+header{border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:22px}
+h1{font-size:26px;margin:0 0 10px;line-height:1.3}
+h2{font-size:21px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:17px;margin:26px 0 10px;color:var(--acc)}
+h4{font-size:14px;margin:18px 0 8px;color:var(--fg);text-transform:uppercase;letter-spacing:.04em}
+p{margin:10px 0}
+ul,ol{margin:10px 0 10px 24px;padding:0}
+li{margin:6px 0}
+code{background:var(--code);border:1px solid #21262d;border-radius:4px;padding:1px 5px;
+  font:13px/1.45 Consolas,"Cascadia Mono",monospace;color:#79c0ff;word-break:break-word}
+pre{background:var(--code);border:1px solid var(--border);border-radius:8px;
+  padding:14px 16px;overflow:auto;margin:14px 0;tab-size:4}
+pre code{background:none;border:0;padding:0;color:#c9d1d9;white-space:pre;word-break:normal}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;background:var(--card)}
+th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--card-hi);font-weight:600}
+tbody tr:nth-child(even) td{background:#161b22}
+td code{font-size:12px}
+.sub{color:var(--dim);font-size:14px}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700;
+  background:#1a3d24;color:var(--ok);border:1px solid #2ea043;vertical-align:middle}
+.badge.grey{background:#21262d;color:var(--dim);border-color:var(--border)}
+.toc{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 22px;margin:22px 0}
+.toc b{display:block;margin-bottom:6px}
+.toc ol{margin:6px 0 0 20px;columns:2;column-gap:34px}
+.toc a{color:var(--acc);text-decoration:none}
+.toc a:hover{text-decoration:underline}
+.note{border-left:3px solid var(--acc);background:#161f2b;padding:11px 15px;border-radius:0 8px 8px 0;margin:14px 0}
+.note.warn{border-left-color:var(--warn);background:#241f12}
+.note.ok{border-left-color:var(--ok);background:#13231a}
+.note.bad{border-left-color:var(--bad);background:#241416}
+.note b{color:var(--fg)}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:700}
+.pill.a{background:#1a3d24;color:#8ee79f}
+.pill.s{background:#1b2b3f;color:#9ecbff}
+.pill.w{background:#423213;color:#f0c96a}
+.pill.v{background:#2b1e45;color:#d2b6ff}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.panel h4{margin-top:0}
+.panel.before{border-top:3px solid var(--bad)}
+.panel.after{border-top:3px solid var(--ok)}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;font-size:13px}
+.flow .step{background:var(--card-hi);border:1px solid var(--border);border-radius:7px;padding:5px 10px}
+.flow .arr{color:var(--dim)}
+.mini{font-size:13px;color:var(--dim)}
+.center{text-align:center}
+footer{margin-top:46px;padding-top:16px;border-top:1px solid var(--border);color:var(--dim);font-size:13px}
+@media (max-width:760px){
+  .cols{grid-template-columns:1fr}
+  .toc ol{columns:1}
+  body{padding:16px 10px 44px}
+  h1{font-size:21px}
+  table{font-size:13px}
+  th,td{padding:6px 7px}
+}
+@media print{
+  body{background:#fff;color:#000;padding:0}
+  .toc{display:none}
+  pre,table,.panel,.note{break-inside:avoid}
+  h2{break-after:avoid}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Алгоритм записи CSV-лога<br><span class="sub">Alarm / State / Work — версия 3.5</span></h1>
+  <p class="sub">Руководство перед реализацией. Описывает целевое поведение
+  <code>tools/bms_web3.py</code> и <code>tools/bms_webX.py</code>. Оба скрипта должны
+  работать одинаково; различия допустимы только в языке сообщений и именах полей
+  модели данных (<code>ok</code> / <code>online</code>).</p>
+  <div class="note ok">
+    <b>Ключевое решение:</b> весь регистр <code>0025</code> считается регистром
+    состояния BMS и пишется как <b>State</b>. <b>Alarm</b> формируется только по
+    <code>0026</code> (Warning), <code>0027</code> (Protection), <code>0028</code>
+    (Error) и температуре. Одновременно могут быть записаны две независимые
+    строки: <b>Alarm</b> и <b>State</b>.
+  </div>
+</header>
+
+<nav class="toc">
+  <b>Содержание</b>
+  <ol>
+    <li><a href="#s1">Назначение и область</a></li>
+    <li><a href="#s2">Регистры и термины</a></li>
+    <li><a href="#s3">Профили записи</a></li>
+    <li><a href="#s4">Подпись состояния</a></li>
+    <li><a href="#s5">Классификация Alarm / State</a></li>
+    <li><a href="#s6">Один цикл опроса</a></li>
+    <li><a href="#s7">Формат CSV и колонка Changes</a></li>
+    <li><a href="#s8">Примеры</a></li>
+    <li><a href="#s9">Work: независимый период</a></li>
+    <li><a href="#s10">Счётчики и UI</a></li>
+    <li><a href="#s11">Ошибки записи</a></li>
+    <li><a href="#s12">Псевдокод</a></li>
+    <li><a href="#s13">Чек-лист selftest</a></li>
+    <li><a href="#s14">Совместимость и миграция</a></li>
+  </ol>
+</nav>
+
+<h2 id="s1">1. Назначение и область</h2>
+
+<p>CSV-лог — это телеметрия АКБ с отметкой типа строки в колонке <code>Log</code>.
+Он должен решать две задачи одновременно:</p>
+
+<ul>
+  <li><b>Анализ телеметрии</b> — периодические полные срезы (профиль <b>Work</b>).</li>
+  <li><b>Журнал событий</b> — изменения состояния BMS и аварийных регистров
+      (профиль <b>«Лише події»</b>, строки <b>Alarm</b> и <b>State</b>).</li>
+</ul>
+
+<p>Оба профиля могут быть включены одновременно и пишут в один файл каждой АКБ.
+Событийные строки <b>не заменяют</b> и <b>не сдвигают</b> плановую строку Work:
+если событие и Work совпали в одном цикле, в файл попадают две или три строки
+с одинаковым временем.</p>
+
+<div class="note">
+  <b>Документ — руководство, а не описание текущего кода.</b> Текущая реализация
+  будет приведена к этому алгоритму следующим шагом. Все примеры ниже — целевые.
+</div>
+
+<h2 id="s2">2. Регистры и термины</h2>
+
+<table>
+  <thead>
+    <tr><th>Обозначение</th><th>Регистр</th><th>Смысл</th><th>Тип события</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>S</code></td><td><code>0025</code></td>
+      <td>Status / режим BMS: <code>0x00</code> Standby, <code>0x01</code> Charging,
+          <code>0x02</code> Discharging, <code>0x04</code> Protect,
+          <code>0x08</code> Charging Lmt, бит <code>0x8000</code> Heating.</td>
+      <td><span class="pill s">State</span> — любое изменение</td>
+    </tr>
+    <tr>
+      <td><code>W</code></td><td><code>0026</code></td>
+      <td>Warning: предупреждения BMS.</td>
+      <td><span class="pill a">Alarm</span></td>
+    </tr>
+    <tr>
+      <td><code>P</code></td><td><code>0027</code></td>
+      <td>Protection: срабатывания защит.</td>
+      <td><span class="pill a">Alarm</span></td>
+    </tr>
+    <tr>
+      <td><code>E</code></td><td><code>0028</code></td>
+      <td>Error: ошибки BMS.</td>
+      <td><span class="pill a">Alarm</span></td>
+    </tr>
+    <tr>
+      <td><code>T</code></td><td>производное</td>
+      <td>Температура <code>Temp_Max_C</code>: высокий порог
+          <code>&gt;= 45.0 °C</code>, низкий <code>&lt;= 0.0 °C</code>.</td>
+      <td><span class="pill a">Alarm</span></td>
+    </tr>
+    <tr>
+      <td><code>Work</code></td><td>—</td>
+      <td>Периодический полный срез телеметрии.</td>
+      <td><span class="pill w">Work</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<p><b>Protect — это режим, а не отдельный аварийный регистр.</b> Значение
+<code>0x04</code> в <code>0025</code> означает, что BMS находится в состоянии
+защиты. Причина защиты находится в <code>0027</code>. Поэтому:</p>
+
+<ul>
+  <li>вход в <code>Protect</code> и выход из него — это <b>State</b>;</li>
+  <li>срабатывание/снятие самой защиты — это <b>Alarm</b> по <code>0027</code>.</li>
+</ul>
+
+<h2 id="s3">3. Профили записи</h2>
+
+<table>
+  <thead>
+    <tr><th>Профиль</th><th>UI</th><th>Что пишет</th><th>Когда пишет</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>«Лише події»</b></td>
+      <td><code>cfg_alarm</code>, JSON <code>alarm</code></td>
+      <td><code>Alarm</code> и <code>State</code></td>
+      <td>При изменении подписи состояния. Без изменений — ничего.</td>
+    </tr>
+    <tr>
+      <td><b>Анализ / тест комірок</b></td>
+      <td><code>cfg_work</code>, JSON <code>work</code></td>
+      <td><code>Work</code></td>
+      <td>Периодически, каждые <code>work_interval</code> секунд
+          (по умолчанию 5 с, минимум 1 с, максимум 3600 с).</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Оба профиля независимы. Событийные строки <b>дополнительные</b>: они не
+отменяют и не переносят Work. Если в одном цикле есть событие и наступил Work,
+пишутся все строки, каждая со своим <code>Log</code>.</p>
+
+<h2 id="s4">4. Подпись состояния</h2>
+
+<p>Для обнаружения изменений используется кортеж из шести элементов:</p>
+
+<pre><code>sig = (
+    status,       # 0025, целое 0x0000..0xFFFF
+    warning,      # 0026
+    protection,   # 0027
+    error,        # 0028
+    temp_high,    # bool: Temp_Max_C &gt;= 45.0
+    temp_low,     # bool: Temp_Max_C &lt;= 0.0
+)</code></pre>
+
+<p>Последняя записанная подпись хранится в <code>alarm_sig</code>. Несмотря на
+имя, это подпись <b>Alarm &amp; State</b>: она покрывает и аварийные регистры, и
+регистр состояния. Имя оставлено для совместимости и документируется в коде.</p>
+
+<p>Подпись меняется, если изменился хотя бы один элемент. Сравнение всегда идёт
+с <b>предыдущим опросом</b>, а не с предыдущей событийной строкой:</p>
+
+<pre><code>prev = state["alarm_sig"]   # или st["alarm_sig"] в bms_web3.py
+sig  = _alarm_signature(parsed)</code></pre>
+
+<h2 id="s5">5. Классификация Alarm / State</h2>
+
+<table>
+  <thead>
+    <tr><th>Что изменилось</th><th>Строка</th><th>Пояснение</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>0025</code> — любое изменение, включая вход/выход из <code>Protect</code>,
+          бит Heating и неизвестные значения</td>
+      <td><span class="pill s">State</span></td>
+      <td>Это регистр состояния BMS.</td>
+    </tr>
+    <tr>
+      <td><code>0026</code> Warning изменился</td>
+      <td><span class="pill a">Alarm</span></td>
+      <td>Появление, изменение или снятие предупреждения.</td>
+    </tr>
+    <tr>
+      <td><code>0027</code> Protection изменился</td>
+      <td><span class="pill a">Alarm</span></td>
+      <td>Появление, изменение или снятие защиты.</td>
+    </tr>
+    <tr>
+      <td><code>0028</code> Error изменился</td>
+      <td><span class="pill a">Alarm</span></td>
+      <td>Появление, изменение или снятие ошибки.</td>
+    </tr>
+    <tr>
+      <td>Температура пересекла порог <code>45 °C</code> или <code>0 °C</code></td>
+      <td><span class="pill a">Alarm</span></td>
+      <td>В любую сторону, включая возврат в норму.</td>
+    </tr>
+    <tr>
+      <td>Одновременно изменились <code>0026/0027/0028/T</code> и <code>0025</code></td>
+      <td><span class="pill a">Alarm</span> + <span class="pill s">State</span></td>
+      <td>Две независимые строки с одинаковым временем.</td>
+    </tr>
+    <tr>
+      <td>Первый опрос после старта лога, авария уже активна</td>
+      <td><span class="pill a">Alarm</span></td>
+      <td>Пишется с <code>init-&gt;...</code>, чтобы обозначить состояние на старте.</td>
+    </tr>
+    <tr>
+      <td>Первый опрос после старта лога, аварии нет</td>
+      <td>ничего</td>
+      <td>Это baseline; State по первому значению не пишется.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note warn">
+  <b>Следствие:</b> переход <code>0025: 0x04 -&gt; 0x01</code> сам по себе даёт
+  только <b>State</b>. Если при этом ещё и снялась защита в <code>0027</code>,
+  появятся две строки: <b>Alarm</b> (снятие <code>0027</code>) и <b>State</b>
+  (смена режима).
+</div>
+
+<h3>Функция is_alarm</h3>
+
+<pre><code>def _is_alarm(sig):
+    status, warning, protection, error, temp_high, temp_low = sig
+    return bool(warning or protection or error or temp_high or temp_low)</code></pre>
+
+<p><b>Важно:</b> <code>status</code> в этой функции больше не участвует. Поэтому
+неизвестное значение <code>0025</code>, например <code>0x05</code>, не может
+попасть в <code>Alarm</code>; оно всегда <code>State</code>.</p>
+
+<h2 id="s6">6. Один цикл опроса</h2>
+
+<p>Для каждого успешного опроса АКБ выполняется следующая логика:</p>
+
+<ol>
+  <li>Построить <code>sig</code> из текущей телеметрии.</li>
+  <li>Взять <code>prev = alarm_sig</code>.</li>
+  <li>Определить два независимых изменения:
+    <ul>
+      <li><code>alarm_changed</code> — изменилась любая часть
+          <code>(warning, protection, error, temp_high, temp_low)</code>;</li>
+      <li><code>state_changed</code> — изменился <code>status</code> (0025).</li>
+    </ul>
+  </li>
+  <li>Если <code>prev is None</code>:
+    <ul>
+      <li>при активной аварии — одна строка <code>Alarm</code> с <code>init-&gt;...</code>;</li>
+      <li>иначе событийных строк нет.</li>
+    </ul>
+  </li>
+  <li>Если <code>prev is not None</code>:
+    <ul>
+      <li><code>alarm_changed</code> → строка <code>Alarm</code>;</li>
+      <li><code>state_changed</code> → строка <code>State</code>;</li>
+      <li>если оба — две строки, сначала <code>Alarm</code>, затем <code>State</code>.</li>
+    </ul>
+  </li>
+  <li>Независимо вычислить <code>work_due</code>:
+    <code>work_next_t is None or now &gt;= work_next_t</code>.</li>
+  <li>Если событийных строк нет и Work не due — выйти, ничего не писать.</li>
+  <li>Записать строки в порядке: <b>Alarm</b>, <b>State</b>, <b>Work</b>.</li>
+  <li>Обновить <code>alarm_sig = sig</code> только после успешной записи событийных строк.</li>
+  <li><code>work_next_t</code> обновить только после успешной записи Work.</li>
+</ol>
+
+<h3>Схема решения</h3>
+
+<div class="flow">
+  <span class="step">опрос АКБ</span><span class="arr">→</span>
+  <span class="step">sig = (S,W,P,E,T)</span><span class="arr">→</span>
+  <span class="step">сравнить с prev</span><span class="arr">→</span>
+  <span class="step">alarm_changed?</span><span class="arr">→</span>
+  <span class="step">State changed?</span><span class="arr">→</span>
+  <span class="step">Work due?</span><span class="arr">→</span>
+  <span class="step">запись строк</span>
+</div>
+
+<h2 id="s7">7. Формат CSV и колонка Changes</h2>
+
+<p>Колонка <code>Changes</code> добавляется <b>в конец</b> схемы, после
+<code>Serial</code>. Это сохраняет порядок старых колонок и совместимость со
+старыми логами: анализатор ищет колонки по имени и просто не найдёт новую в
+старых файлах.</p>
+
+<pre><code>... , "Status_Hex", "Warning_Hex", "Protection_Hex", "Error_Hex",
+      "Balance_Hex", "Serial", "Changes"</code></pre>
+
+<h3>Грамматика</h3>
+
+<pre><code>Changes := change ("; " change)*
+change  := source ": " old "-&gt;" new
+source  := "S" | "W" | "P" | "E" | "T"
+old,new := "0x" HEX4        для S/W/P/E
+         | "normal" | "high" | "low"   для T
+         | "init"            для первого сэмпла</code></pre>
+
+<ul>
+  <li><b>Alarm-строка</b> содержит только <code>W</code>, <code>P</code>,
+      <code>E</code>, <code>T</code>. Порядок фиксированный: W, P, E, T.</li>
+  <li><b>State-строка</b> содержит только <code>S</code>.</li>
+  <li><b>Work-строка</b> — пустая ячейка <code>Changes</code>.</li>
+  <li>Hex — 4 цифры, верхний регистр: <code>0x0002</code>, <code>0x1000</code>.</li>
+  <li>Разделитель <code>"; "</code> (точка с запятой и пробел), без запятых
+      внутри значения, чтобы CSV не квотировался без необходимости.</li>
+  <li>Перечисляются <b>только изменившиеся</b> поля. Неизменившиеся не пишутся.</li>
+</ul>
+
+<h3>Примеры значений</h3>
+
+<table>
+  <thead><tr><th>Ситуация</th><th><code>Log</code></th><th><code>Changes</code></th></tr></thead>
+  <tbody>
+    <tr><td>Статус Standby → Charging</td><td><span class="pill s">State</span></td>
+        <td><code>S: 0x0000-&gt;0x0001</code></td></tr>
+    <tr><td>Появилось предупреждение</td><td><span class="pill a">Alarm</span></td>
+        <td><code>W: 0x0000-&gt;0x0002</code></td></tr>
+    <tr><td>Снялась защита</td><td><span class="pill a">Alarm</span></td>
+        <td><code>P: 0x1000-&gt;0x0000</code></td></tr>
+    <tr><td>Одновременно Warning и Protection</td><td><span class="pill a">Alarm</span></td>
+        <td><code>W: 0x0000-&gt;0x0002; P: 0x0000-&gt;0x1000</code></td></tr>
+    <tr><td>Перегрев</td><td><span class="pill a">Alarm</span></td>
+        <td><code>T: normal-&gt;high</code></td></tr>
+    <tr><td>Возврат температуры в норму</td><td><span class="pill a">Alarm</span></td>
+        <td><code>T: high-&gt;normal</code></td></tr>
+    <tr><td>Первый сэмпл с активным Warning</td><td><span class="pill a">Alarm</span></td>
+        <td><code>W: init-&gt;0x0002</code></td></tr>
+    <tr><td>Плановая телеметрия</td><td><span class="pill w">Work</span></td>
+        <td><i>пусто</i></td></tr>
+  </tbody>
+</table>
+
+<h2 id="s8">8. Примеры</h2>
+
+<p>Во всех примерах время одинаковое для строк одного цикла; строки записаны в
+порядке <b>Alarm → State → Work</b>. Значения <code>Status_Hex</code> и других
+колонок в примерах сокращены до <code>...</code>, чтобы показать только
+существенное.</p>
+
+<h3>8.1. Только смена режима</h3>
+
+<p><b>Было:</b> <code>S=0x0000</code>, <code>W=0</code>, <code>P=0</code>,
+<code>E=0</code>, температура в норме.<br>
+<b>Стало:</b> <code>S=0x0001</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:00,State,...,0x0001,0x0000,0x0000,0x0000,25.0,"S: 0x0000-&gt;0x0001"</code></pre>
+
+<p>Одна строка State. Alarm нет, потому что <code>0026/0027/0028/T</code> не менялись.</p>
+
+<h3>8.2. Появилось предупреждение по 0026</h3>
+
+<p><b>Было:</b> <code>W=0x0000</code>.<br>
+<b>Стало:</b> <code>W=0x0002</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:01,Alarm,...,0x0001,0x0002,0x0000,0x0000,25.0,"W: 0x0000-&gt;0x0002"</code></pre>
+
+<h3>8.3. Событие по 26, затем через секунду по 27, затем снова по 27</h3>
+
+<p>Это ваш сценарий. Каждый опрос — отдельная строка Alarm со своей дельтой.</p>
+
+<table>
+  <thead>
+    <tr><th>Время</th><th>Что изменилось</th><th><code>Log</code></th><th><code>Changes</code></th></tr>
+  </thead>
+  <tbody>
+    <tr><td>10:00:00</td><td><code>0026: 0x0000 → 0x0002</code></td>
+        <td><span class="pill a">Alarm</span></td><td><code>W: 0x0000-&gt;0x0002</code></td></tr>
+    <tr><td>10:00:01</td><td><code>0027: 0x0000 → 0x1000</code></td>
+        <td><span class="pill a">Alarm</span></td><td><code>P: 0x0000-&gt;0x1000</code></td></tr>
+    <tr><td>10:00:02</td><td><code>0027: 0x1000 → 0x0000</code></td>
+        <td><span class="pill a">Alarm</span></td><td><code>P: 0x1000-&gt;0x0000</code></td></tr>
+  </tbody>
+</table>
+
+<pre><code>2026-11-11 | 10:00:00,Alarm,...,0x0001,0x0002,0x0000,0x0000,25.0,"W: 0x0000-&gt;0x0002"
+2026-11-11 | 10:00:01,Alarm,...,0x0001,0x0002,0x1000,0x0000,25.0,"P: 0x0000-&gt;0x1000"
+2026-11-11 | 10:00:02,Alarm,...,0x0001,0x0002,0x0000,0x0000,25.0,"P: 0x1000-&gt;0x0000"</code></pre>
+
+<p>В каждой строке только то, что изменилось в этом цикле. Предыдущие значения
+не повторяются.</p>
+
+<h3>8.4. Несколько регистров в одном цикле</h3>
+
+<p><b>Было:</b> <code>W=0</code>, <code>P=0</code>.<br>
+<b>Стало:</b> <code>W=0x0002</code>, <code>P=0x1000</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:00,Alarm,...,0x0001,0x0002,0x1000,0x0000,25.0,"W: 0x0000-&gt;0x0002; P: 0x0000-&gt;0x1000"</code></pre>
+
+<p>Одна строка Alarm за цикл, в <code>Changes</code> перечислены оба изменения.</p>
+
+<h3>8.5. Снятие аварии и смена режима одновременно</h3>
+
+<p><b>Было:</b> <code>S=0x0004</code> (Protect), <code>W=0x0002</code>,
+<code>P=0x1000</code>.<br>
+<b>Стало:</b> <code>S=0x0001</code> (Charging), <code>W=0</code>, <code>P=0</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:01,Alarm,...,0x0001,0x0000,0x0000,0x0000,25.0,"W: 0x0002-&gt;0x0000; P: 0x1000-&gt;0x0000"
+2026-11-11 | 10:00:01,State,...,0x0001,0x0000,0x0000,0x0000,25.0,"S: 0x0004-&gt;0x0001"</code></pre>
+
+<p>Две независимые строки: Alarm фиксирует снятие <code>0026/0027</code>,
+State — смену режима <code>0025</code>. Обе имеют одинаковое время и одинаковый
+снимок телеметрии, но разные <code>Log</code> и <code>Changes</code>.</p>
+
+<h3>8.6. Вход в Protect без изменения 0027</h3>
+
+<p><b>Было:</b> <code>S=0x0001</code>, <code>P=0</code>.<br>
+<b>Стало:</b> <code>S=0x0004</code>, <code>P=0</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:01,State,...,0x0004,0x0000,0x0000,0x0000,25.0,"S: 0x0001-&gt;0x0004"</code></pre>
+
+<p>Только State. Alarm нет: аварийные регистры не менялись. Если защита реально
+сработала, изменится <code>0027</code> и появится отдельная строка Alarm.</p>
+
+<h3>8.7. Выход из Protect, но защита ещё активна</h3>
+
+<p><b>Было:</b> <code>S=0x0004</code>, <code>P=0x1000</code>.<br>
+<b>Стало:</b> <code>S=0x0001</code>, <code>P=0x1000</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:01,State,...,0x0001,0x0000,0x1000,0x0000,25.0,"S: 0x0004-&gt;0x0001"</code></pre>
+
+<p>Только State. Защита в <code>0027</code> не изменилась, поэтому нового Alarm
+нет; авария остаётся активной.</p>
+
+<h3>8.8. Нагрев и неизвестное значение 0025</h3>
+
+<pre><code>2026-11-11 | 10:00:01,State,...,0x8000,0x0000,0x0000,0x0000,25.0,"S: 0x0000-&gt;0x8000"
+2026-11-11 | 10:00:02,State,...,0x0005,0x0000,0x0000,0x0000,25.0,"S: 0x0000-&gt;0x0005"</code></pre>
+
+<p>Бит нагрева <code>0x8000</code> и неизвестное <code>0x0005</code> — это State.
+Функция <code>_is_alarm()</code> не смотрит на <code>status</code>, поэтому
+<code>0x05</code> не может стать Alarm.</p>
+
+<h3>8.9. Событие и Work в одном цикле</h3>
+
+<p>Work due, одновременно изменились <code>0025</code> и <code>0026</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:01,Alarm,...,0x0001,0x0002,0x0000,0x0000,25.0,"W: 0x0000-&gt;0x0002"
+2026-11-11 | 10:00:01,State,...,0x0001,0x0002,0x0000,0x0000,25.0,"S: 0x0000-&gt;0x0001"
+2026-11-11 | 10:00:01,Work,...,0x0001,0x0002,0x0000,0x0000,25.0,""</code></pre>
+
+<p>Три строки с одинаковым временем. Порядок строгий: Alarm, State, Work.
+<code>work_next_t</code> сдвигается только на запись Work; событийные строки его
+не трогают.</p>
+
+<h3>8.10. Старт лога при активной аварии</h3>
+
+<p>Первый опрос: <code>W=0x0002</code>, <code>P=0</code>, <code>S=0x0001</code>.</p>
+
+<pre><code>2026-11-11 | 10:00:00,Alarm,...,0x0001,0x0002,0x0000,0x0000,25.0,"W: init-&gt;0x0002"</code></pre>
+
+<p>Если в этот же момент due Work — после Alarm будет ещё строка Work.
+State по первому значению не пишется: это baseline.</p>
+
+<h3>8.11. Нет изменений</h3>
+
+<p>Подпись не изменилась, Work не due — файл не трогаем. Если Work due — пишем
+только Work с пустым <code>Changes</code>.</p>
+
+<h3>8.12. Пропущенные промежуточные состояния</h3>
+
+<p>Лог строится по опросам, а не по физическим событиям BMS. Если между двумя
+опросами регистр успел измениться и вернуться:</p>
+
+<pre><code>0027: 0x0000 -&gt; 0x1000 -&gt; 0x0000   (между опросами)</code></pre>
+
+<p>итоговая дельта равна нулю, и строка Alarm не появится. Если два разных
+регистра изменились между одним и тем же опросом, они попадут в одну строку
+Alarm с двумя дельтами. Это ограничение polling-лога; для гарантированного
+захвата каждого события нужен журнал событий самого BMS или более быстрый
+опрос.</p>
+
+<h2 id="s9">9. Work: независимый период</h2>
+
+<ul>
+  <li><code>work_due = cfg["work"] and (work_next_t is None or now &gt;= work_next_t)</code>.</li>
+  <li><code>work_next_t = now + work_interval</code> обновляется <b>только</b>
+      после успешной записи строки Work.</li>
+  <li>Событие (Alarm или State) не меняет <code>work_next_t</code> и не отменяет
+      плановую строку.</li>
+  <li>Если Work due и есть событие, пишутся обе (или три) строки в одном цикле.</li>
+  <li>Первый Work после старта пишется сразу: <code>work_next_t is None</code>.</li>
+</ul>
+
+<div class="note ok">
+  <b>Проверка:</b> Work на 0, 5, 10, 15 с при событиях между ними должен дать
+  последовательность <code>Work, State, State, Work, Alarm, Work, Alarm, Work</code>.
+  Work-строки остаются на своих секундах.
+</div>
+
+<h2 id="s10">10. Счётчики и UI</h2>
+
+<table>
+  <thead><tr><th>Поле</th><th><code>bms_web3.py</code></th><th><code>bms_webX.py</code></th></tr></thead>
+  <tbody>
+    <tr><td>Всего строк</td><td><code>log_rows</code></td><td><code>log_rows</code></td></tr>
+    <tr><td>Alarm</td><td><code>log_alarm_rows</code></td><td><code>alarm_rows</code></td></tr>
+    <tr><td>State</td><td><code>log_state_rows</code></td><td><code>state_rows</code></td></tr>
+    <tr><td>Work</td><td><code>log_work_rows</code></td><td><code>work_rows</code></td></tr>
+  </tbody>
+</table>
+
+<ul>
+  <li><code>rows</code> увеличивается на фактическое число записанных строк
+      (1, 2 или 3 за цикл).</li>
+  <li><code>alarm_rows</code> / <code>state_rows</code> / <code>work_rows</code>
+      увеличиваются независимо, по одной на соответствующую строку.</li>
+  <li>UI: счётчики <b>Alarm / State / Work</b>; в таблице файлов —
+      <b>A / S / W</b>.</li>
+  <li>Подпись профиля: <b>«Лише події»</b>. Внутренние id не меняются:
+      <code>cfg_alarm</code>, JSON <code>alarm</code>.</li>
+</ul>
+
+<h2 id="s11">11. Ошибки записи</h2>
+
+<p>Если запись в файл не удалась:</p>
+
+<ul>
+  <li>в <code>last_err</code> / <code>log_err</code> попадает текст ошибки;</li>
+  <li><code>alarm_sig</code> возвращается к <code>prev</code>, чтобы событие
+      не потерялось и было повторено на следующем цикле;</li>
+  <li><code>work_next_t</code> возвращается к предыдущему значению, чтобы
+      плановая строка Work не потерялась;</li>
+  <li>счётчики не увеличиваются.</li>
+</ul>
+
+<h2 id="s12">12. Псевдокод</h2>
+
+<pre><code>def log_row(parsed, addr):
+    now = time.monotonic()
+    with lock:
+        st = get_log_state(addr)
+        if not st["on"] or not st["path"]:
+            return
+
+        cfg  = dict(log_cfg)
+        sig  = (status, warning, protection, error, temp_high, temp_low)
+        prev = st["alarm_sig"]
+
+        rows = []   # [(kind, changes), ...]
+
+        if cfg["alarm"]:
+            if prev is None:
+                if is_alarm(sig):
+                    rows.append(("Alarm", alarm_changes(None, sig)))
+            else:
+                alarm_changed = sig[1:] != prev[1:]
+                state_changed = sig[0] != prev[0]
+                if alarm_changed:
+                    rows.append(("Alarm", alarm_changes(prev, sig)))
+                if state_changed:
+                    rows.append(("State", state_changes(prev, sig)))
+
+        work_due = cfg["work"] and (
+            st["work_next_t"] is None or now &gt;= st["work_next_t"])
+        if work_due:
+            rows.append(("Work", ""))
+
+        if not rows:
+            return
+
+        old_next = st["work_next_t"]
+        if work_due:
+            st["work_next_t"] = now + cfg["work_interval"]
+
+        try:
+            with write_lock:
+                for kind, changes in rows:
+                    write_row(parsed, addr, kind, changes)
+            with lock:
+                st["rows"] += len(rows)
+                for kind, _ in rows:
+                    if kind == "Alarm": st["alarm_rows"] += 1
+                    if kind == "State": st["state_rows"] += 1
+                    if kind == "Work":  st["work_rows"] += 1
+                st["last_ts"] = now_iso()
+                st["alarm_sig"] = sig
+        except Exception as e:
+            st["last_err"] = f"log {st['path']}: {e}"
+            st["alarm_sig"] = prev
+            st["work_next_t"] = old_next</code></pre>
+
+<h3>Вспомогательные функции</h3>
+
+<pre><code>def alarm_changes(prev, sig):
+    # prev is None: первый сэмпл, перечисляем только активные регистры
+    out = []
+    for name, idx in (("W", 1), ("P", 2), ("E", 3)):
+        new = sig[idx]
+        if prev is None:
+            if new:
+                out.append(f"{name}: init-&gt;{hex4(new)}")
+            continue
+        old = prev[idx]
+        if old != new:
+            out.append(f"{name}: {hex4(old)}-&gt;{hex4(new)}")
+    # температура
+    if prev is None:
+        if sig[4]: out.append("T: init-&gt;high")
+        if sig[5]: out.append("T: init-&gt;low")
+    else:
+        if prev[4] != sig[4]:
+            out.append("T: high-&gt;normal" if prev[4] else "T: normal-&gt;high")
+        if prev[5] != sig[5]:
+            out.append("T: low-&gt;normal" if prev[5] else "T: normal-&gt;low")
+    return "; ".join(out)
+
+
+def state_changes(prev, sig):
+    return f"S: {hex4(prev[0])}-&gt;{hex4(sig[0])}"</code></pre>
+
+<h2 id="s13">13. Чек-лист selftest</h2>
+
+<ol>
+  <li>Status <code>0x00 -&gt; 0x01</code> → <code>State</code>, Alarm нет.</li>
+  <li>Status <code>0x01 -&gt; 0x04</code> (вход в Protect) → только <code>State</code>.</li>
+  <li>Status <code>0x04 -&gt; 0x01</code> без изменений 26/27 → только <code>State</code>.</li>
+  <li>Warning <code>0x0000 -&gt; 0x0002</code> → <code>Alarm</code>.</li>
+  <li>Warning <code>0x0002 -&gt; 0x0000</code> → <code>Alarm</code> (recovery).</li>
+  <li>Protection <code>0x0000 -&gt; 0x1000</code> → <code>Alarm</code>.</li>
+  <li>Protection <code>0x1000 -&gt; 0x0000</code> → <code>Alarm</code> (recovery).</li>
+  <li>Error <code>0x0000 -&gt; 0x0010</code> → <code>Alarm</code>.</li>
+  <li>Температура <code>normal -&gt; high</code> и обратно → <code>Alarm</code>.</li>
+  <li>Warning снялся + Status изменился → <code>Alarm</code> + <code>State</code>.</li>
+  <li>Warning и Protection снялись + Status изменился → <code>Alarm</code> + <code>State</code>.</li>
+  <li>Событие + Work due → <code>Alarm</code>/<code>State</code> + <code>Work</code>.</li>
+  <li>Событие не меняет <code>work_next_t</code>.</li>
+  <li>Нет изменений и Work не due → ничего не пишется.</li>
+  <li>Первый сэмпл с активным Warning → <code>Alarm</code> с <code>W: init-&gt;...</code>.</li>
+  <li>Неизвестный Status <code>0x05</code> → <code>State</code>.</li>
+  <li>Heating <code>0x8000</code> → <code>State</code>.</li>
+  <li>Оба скрипта дают одинаковые <code>Log</code> и <code>Changes</code>.</li>
+</ol>
+
+<h2 id="s14">14. Совместимость и миграция</h2>
+
+<ul>
+  <li>Новая колонка <code>Changes</code> добавляется в конец, поэтому старые
+      колонки не сдвигаются.</li>
+  <li>Старые CSV без <code>Changes</code> остаются читаемыми: анализатор ищет
+      колонки по имени.</li>
+  <li>Значения <code>Log</code>: <code>Alarm</code>, <code>State</code>,
+      <code>Work</code>. Старые файлы содержат только <code>Alarm</code> и
+      <code>Work</code>; это нормально.</li>
+  <li>Версия в шапке скриптов: <b>3.5</b>.</li>
+</ul>
+
+<footer>
+  COMBOX-main_4 · руководство по CSV-логу · Alarm / State / Work · v3.5
+</footer>
+
+</div>
+</body>
+</html>
