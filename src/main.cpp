@@ -480,6 +480,7 @@ static bool bank_sc_protect = false;
 static bool sweep_sc_protect = false;
 static bool bank_low_capacity_warn = false;
 static bool sweep_low_capacity_warn = false;
+static bool bank_all_packs_standby = false;
 
 // Per-pack hardware Cell OV latch: set on 0x0002 or >=3650 mV, released at <= CELL_OV_RELEASE_BMS_MV (3420 mV)
 static bool pack_ov_protect_latched[16] = {false};
@@ -1376,8 +1377,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
   uint16_t charge_protect_mask = 0x2593;
   if (reg_protect & charge_protect_mask)
     pack_charge_ok = false;
-  // 0x1000 is Standby / Full Latch: only treated as charge inhibit if cell is near full (>= 3550 mV)
-  if ((reg_protect & 0x1000) && pack_max_cell_mv >= 3550)
+  // 0x1000 is Standby / Full Latch: treated as charge inhibit when cell is near full
+  // (>= 3520 mV in 54V mode or >= 3440 mV in DIP1 90% mode)
+  uint16_t standby_cell_thresh_mv = (dip_applied_code & DIP_PROFILE_CODE_90) ? 3440 : 3520;
+  if ((reg_protect & 0x1000) && pack_max_cell_mv >= standby_cell_thresh_mv)
     pack_charge_ok = false;
   if (pack_ov_protect_latched[pack_idx])
     pack_charge_ok = false;
@@ -1435,6 +1438,11 @@ static bool bms_parse_response(uint8_t expected_addr) {
 }
 
 static uint16_t calculate_charge_limit(uint8_t pack_count) {
+  // All packs in Standby or disconnected: return 0 A immediately
+  if (pack_count == 0) {
+    return 0;
+  }
+
   uint32_t per_pack_x10 = profile_charge_current_per_pack_x10;
   bool is_bal = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
   // Balance/manual top-off phase: cap at 2.0 A per pack (or 1.0 A / 0.5 A during float hold)
@@ -1527,12 +1535,16 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   }
 
   // Bank charge protection asymmetry clamp:
-  // If >= 1 pack in the bank is in charge protect (Cell OV, Pack OV, Temp, etc.),
-  // remaining packs must NEVER absorb full nominal current (e.g. 50 A into 1 pack).
-  // Clamp total bank current to a safe equalization ceiling (5.0 A total).
+  // If >= 1 pack in the bank is in charge protect (Cell OV, Pack OV, Temp, etc.)
+  // OR has entered Standby, remaining packs must NEVER absorb full nominal current.
+  // Dynamically scale current: 2.5 A per remaining pack, capped at safe ceiling (5.0 A total).
   if (bank_charge_asymmetry_clamp && !is_bal) {
-    if (max_current_x10 > BANK_PROTECT_ASYMMETRY_CCL_X10) {
-      max_current_x10 = BANK_PROTECT_ASYMMETRY_CCL_X10;
+    uint32_t asym_cap_x10 = (uint32_t)25 * pack_count; // 2.5 A per active pack
+    if (asym_cap_x10 > BANK_PROTECT_ASYMMETRY_CCL_X10) {
+      asym_cap_x10 = BANK_PROTECT_ASYMMETRY_CCL_X10;
+    }
+    if (max_current_x10 > asym_cap_x10) {
+      max_current_x10 = asym_cap_x10;
     }
   }
 
@@ -2198,12 +2210,29 @@ static void bms_aggregate_data(void) {
   if (discharge_packs > effective_packs)
     discharge_packs = effective_packs;
 
-  uint16_t target_ccl = calculate_charge_limit(charge_packs);
+  // Multi-pack Standby state machine with robust anti-hunting hysteresis:
+  if (effective_packs > 0 && charge_packs == 0) {
+    bank_all_packs_standby = true;
+  } else if (bank_all_packs_standby) {
+    // Exit Standby:
+    // 1) Active discharge flow into household loads (I < -1.5 A)
+    // 2) OR confirmed natural cell relaxation below safe re-enable floor
+    uint16_t standby_reenable_mv = (dip_applied_code & DIP_PROFILE_CODE_90)
+                                      ? CELL_CHARGE_REENABLE_MV_DIP90
+                                      : CELL_CHARGE_REENABLE_MV;
+    bool discharge_exit = (bms_current < -1.5f);
+    if ((agg_max_cell_mv > 0 && agg_max_cell_mv < standby_reenable_mv) || discharge_exit) {
+      bank_all_packs_standby = false;
+    }
+  }
+
+  uint16_t target_ccl = bank_all_packs_standby ? 0 : calculate_charge_limit(charge_packs);
   discharge_current_limit = calculate_discharge_limit(discharge_packs);
 
   // Slew Rate Limiter for charge_current_limit:
   // Immediate 0 A shutoff for safety trips (Zero Latency Hardware Safety):
-  if (target_ccl == 0) {
+  // Exception: graceful ramp-down on routine Standby (smooth 5.0A/s decrease)
+  if (target_ccl == 0 && (charge_cell_ov_inhibit || charge_temp_inhibit || pack_imbalance_inhibit || can_protect_b1)) {
     charge_current_limit = 0;
   } else {
     // Slew rate limiter: smooth CCL transitions to protect inverter inductors and DC capacitors
