@@ -319,11 +319,14 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_MED_MS (72UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_OK_MS (30UL * 24UL * 3600UL * 1000UL)
+#define BAL_INTERVAL_DIP1_MS (14UL * 24UL * 3600UL * 1000UL) // DIP1 90% mode: balance sessions at most once every 14 days
 #define BAL_COOLDOWN_TRY_MS (12UL * 3600UL * 1000UL)
+#define BAL_COOLDOWN_DIP1_MS (7UL * 24UL * 3600UL * 1000UL)   // DIP1 mode: 7 days cooldown after unreached spread
 #define BAL_COOLDOWN_OUTAGE_MS (1UL * 3600UL * 1000UL)
 #define BAL_MIN_SOC_START 85
 #define BAL_TRICKLE_CELL_MV 3400   // ~90% -> 2 A per pack phase
 #define BAL_TRICKLE_A_X10 20       // 2.0 A per pack cap
+#define BAL_PRE_TAPER_CELL_MV 3420 // Soft Pre-taper: start throttling before steep LiFePO4 knee
 #define BAL_HOLD_CELL_MV 3560      // Float hold trigger: max cell reaches 3.56 V
 #define BAL_HOLD_RELEASE_MV 3530   // Float hold release: max cell relaxes below 3.53 V
 #define BAL_HOLD_A_X10 50          // 5.0 A per pack holding cap during float hold (< 3.55 V)
@@ -335,6 +338,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
+#define BAL_SESSION_DIP1_MAX_MS (90UL * 60UL * 1000UL) // DIP1 mode: strict 90 min max balance window before returning to 51.8V
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> pause/abort session
 #define BAL_OUTAGE_CONFIRM_MS 60000UL // 60 s sustained discharge before pausing session
@@ -1544,15 +1548,30 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
     return (uint16_t)max_current_x10;
   }
 
+  // Soft Pre-taper: start smooth deceleration at 3.420 V before steep LiFePO4 knee
+  // prevents violent cell voltage divergence (e.g. 188 mV spread) on rapid charge.
+  if (agg_max_cell_mv >= BAL_PRE_TAPER_CELL_MV && agg_max_cell_mv < calc_taper_start_mv) {
+    uint32_t pre_taper_cap_x10 = (uint32_t)50 * pack_count; // cap at 5.0 A per pack
+    if (max_current_x10 > pre_taper_cap_x10) {
+      max_current_x10 = pre_taper_cap_x10;
+    }
+  }
+
   if (agg_max_cell_mv <= calc_taper_start_mv)
     return (uint16_t)max_current_x10;
 
   if (agg_max_cell_mv >= calc_charge_stop_mv)
     return 0;
 
-  return (uint16_t)(max_current_x10 *
-                    (calc_charge_stop_mv - agg_max_cell_mv) /
-                    (calc_charge_stop_mv - calc_taper_start_mv));
+  // Damped linear taper with minimum maintenance floor (3.0 A total) to prevent 0A oscillation
+  uint32_t calculated_taper = (uint32_t)(max_current_x10 *
+                                         (calc_charge_stop_mv - agg_max_cell_mv) /
+                                         (calc_charge_stop_mv - calc_taper_start_mv));
+  uint32_t floor_current_x10 = (uint32_t)30; // 3.0 A floor to prevent cycling
+  if (calculated_taper < floor_current_x10) {
+    calculated_taper = floor_current_x10;
+  }
+  return (uint16_t)calculated_taper;
 }
 
 static uint16_t calculate_discharge_limit(uint8_t pack_count) {
@@ -1845,10 +1864,14 @@ static void balance_update(uint8_t packs) {
       bal_exit_streak = 0;
     }
 
-    if ((now - bal_session_start_ms) >= BAL_SESSION_MAX_MS) {
-      balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
-      return;
-    }
+  // In-session duration limit:
+  // In DIP1 90% mode: strict 90 min window prevents eternal 52.5V float if a weak pack cannot converge to 35mV.
+  uint32_t session_max_ms = manual ? BAL_SESSION_DIP1_MAX_MS : BAL_SESSION_MAX_MS;
+  uint32_t cooldown_fail_ms = manual ? (now + BAL_COOLDOWN_DIP1_MS) : (now + BAL_COOLDOWN_TRY_MS);
+  if ((now - bal_session_start_ms) >= session_max_ms) {
+    balance_session_end(false, cooldown_fail_ms);
+    return;
+  }
 
     // In-session thresholds: full-charge triple so the 54 V session is not
     // cut by the 90% profile stop; the existing 3600 mV OV inhibit stays
@@ -1887,10 +1910,12 @@ static void balance_update(uint8_t packs) {
   if ((int32_t)(now - bal_cooldown_until_ms) < 0)
     return;
 
-  // Severity: spread bucket + 12 h trend. Outliers >= 100 mV are covered by
-  // the HIGH bucket (interval: 24 h).
+  // Severity: spread bucket + 12 h trend.
+  // In DIP1 90% mode: balance sessions allowed at most once every 14 days so 51.8V is strictly respected!
   uint32_t interval;
-  if ((spread >= BAL_SPREAD_HIGH_MV) || balance_trend_high())
+  if (manual)
+    interval = BAL_INTERVAL_DIP1_MS;
+  else if ((spread >= BAL_SPREAD_HIGH_MV) || balance_trend_high())
     interval = BAL_INTERVAL_HIGH_MS;
   else if (spread >= BAL_SPREAD_MED_MV)
     interval = BAL_INTERVAL_MED_MS;
@@ -2022,7 +2047,8 @@ static void agg_reset(void) {
 }
 
 static void bms_aggregate_data(void) {
-  // Update pack presence with 3-miss debounce (Q21)
+  // Update pack presence with 6-miss debounce (Q21):
+  // Tolerate up to ~5 s of BMS processing lag during hardware cell balancing without flapping bms_pack_count
   uint8_t active_pack_count = 0;
   uint16_t expected_mask = (fast_poll_enabled && fast_poll_mask != 0) ? fast_poll_mask : pack_ever_seen_mask;
   for (uint8_t i = 0; i < 16; i++) {
@@ -2033,7 +2059,7 @@ static void bms_aggregate_data(void) {
     } else if (expected_mask & (1 << i)) {
       if (pack_miss_count[i] < 255)
         pack_miss_count[i]++;
-      if (pack_miss_count[i] <= 2) {
+      if (pack_miss_count[i] <= 6) {
         active_pack_count++;
       }
     }
