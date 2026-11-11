@@ -1482,7 +1482,9 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   if (agg_max_cell_mv >= stop_mv) {
     charge_cell_ov_inhibit = true;
   } else if (charge_cell_ov_inhibit) {
-    if (agg_max_cell_mv < reenable_mv) {
+    // Release on passive voltage drop below reenable threshold OR proactively on discharge current (I < -2.0 A) with cell < 3550 mV
+    bool discharge_release = (bms_current < -2.0f) && (agg_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV);
+    if (agg_max_cell_mv < reenable_mv || discharge_release) {
       charge_cell_ov_inhibit = false;
     }
   }
@@ -2308,8 +2310,12 @@ static void send_all_frames(void) {
     if (can_soc > 98)
       can_soc = 98;
   } else if (charge_temp_inhibit) {
-    // Failsafe: Deye off-grid ignores CCL=0. Force SOC=100 so Deye stops charging cold battery (< +2°C)!
-    can_soc = 100;
+    // Failsafe: Deye off-grid ignores CCL=0. Force SOC=100 during charge or idle (bms_current > -1.0 A)
+    // so Deye stops charging cold battery (< +2°C). During active discharge (bms_current <= -1.0 A),
+    // report real OCV-SOC so inverter can accurately predict backup runtime for the house.
+    if (bms_current > -1.0f) {
+      can_soc = 100;
+    }
   } else if (charge_cell_ov_inhibit || (bms_soc >= 99 && charge_current_limit == 0)) {
     can_soc = 100;
   } else if (bank_low_capacity_warn && can_soc > 5) {
