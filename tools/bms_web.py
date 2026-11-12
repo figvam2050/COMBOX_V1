@@ -2183,7 +2183,7 @@ canvas{width:100%;height:auto;display:block}
   <div class="card">
     <h2>📂 Офлайн-аналізатор записаних CSV-логів</h2>
     <div style="color:var(--dim);font-size:13px;margin-bottom:14px">
-      Завантажте збережений файл <code>bms_log_*.csv</code> для детального аналізу внутрішнього опору R_int, динаміки напруг та балансування.
+      Завантажте збережений файл <code>bms_log_*.csv</code>, <code>bms_alarm_log.csv</code> або <code>bms_bank_log.csv</code> для детального аналізу внутрішнього опору R_int, аварій, динаміки напруг та балансування.
     </div>
 
     <div id="drop_zone" class="drop-zone" onclick="document.getElementById('csv_file_input').click()">
@@ -3738,13 +3738,54 @@ function parseAndAnalyzeCSV(filename, text) {
     return;
   }
   const header = lines[0].split(',').map(s => s.trim());
-  const newFormat = header.indexOf('Voltage_V') !== -1;
+  const isAlarmLog = header.indexOf('Warning_Raw') !== -1 || header.indexOf('Protection_Raw') !== -1 || (header.indexOf('Pack') !== -1 && header.indexOf('Delta_mV') !== -1);
+  const isBankLog = !isAlarmLog && (header.indexOf('avgV') !== -1 || header.indexOf('Power_kW') !== -1 || header.indexOf('totKw') !== -1 || (header.indexOf('Online_Packs') !== -1 && header.indexOf('Delta_mV') !== -1));
+  const newFormat = !isAlarmLog && !isBankLog && header.indexOf('Voltage_V') !== -1;
 
-  let addrIdx, tsIdx, cellIndices = [];
+  let addrIdx = -1, tsIdx = -1, cellIndices = [];
   let voltIdx = -1, currIdx = -1, balHexIdx = -1;
   let r00Idx = -1, r01Idx = -1, r38Idx = -1;
 
-  if (newFormat) {
+  // Alarm log indices
+  let packIdx = -1, warnIdx = -1, protIdx = -1, errIdx = -1;
+  let cMinIdx = -1, cMaxIdx = -1, deltaIdx = -1, isAlarmShifted = false;
+
+  // Bank log indices
+  let bVoltIdx = -1, bCurrIdx = -1, bDeltaIdx = -1, bMinIdx = -1, bMaxIdx = -1;
+
+  if (isAlarmLog) {
+    tsIdx = header.indexOf('Timestamp_ms'); if (tsIdx === -1) tsIdx = 0;
+    packIdx = header.indexOf('Pack');
+    voltIdx = header.indexOf('Voltage_V');
+    currIdx = header.indexOf('Current_A');
+    warnIdx = header.indexOf('Warning_Raw');
+    protIdx = header.indexOf('Protection_Raw');
+    errIdx = header.indexOf('Error_Raw');
+    cMinIdx = header.indexOf('Cell_Min_mV');
+    cMaxIdx = header.indexOf('Cell_Max_mV');
+    deltaIdx = header.indexOf('Delta_mV');
+
+    // Auto-detect if columns were shifted due to %f in printf
+    for (let i = 1; i < Math.min(25, lines.length); i++) {
+      const p = lines[i].split(',').map(s => s.trim());
+      if (p.length > cMaxIdx) {
+        const rawCMax = parseInt(p[cMaxIdx], 10);
+        const rawErr = (p[errIdx] || '');
+        if (rawCMax > 0 && rawCMax < 350 && (rawErr.startsWith('0x0D') || rawErr.startsWith('0x0E') || rawErr.startsWith('0x0C'))) {
+          isAlarmShifted = true;
+          break;
+        }
+      }
+    }
+  } else if (isBankLog) {
+    tsIdx = header.indexOf('Timestamp_ms') !== -1 ? header.indexOf('Timestamp_ms') : header.indexOf('nowMs');
+    if (tsIdx === -1) tsIdx = 0;
+    bVoltIdx = header.indexOf('Voltage_V') !== -1 ? header.indexOf('Voltage_V') : header.indexOf('avgV');
+    bCurrIdx = header.indexOf('Current_A') !== -1 ? header.indexOf('Current_A') : header.indexOf('iSum');
+    bDeltaIdx = header.indexOf('Delta_mV') !== -1 ? header.indexOf('Delta_mV') : header.indexOf('delta');
+    bMinIdx = header.indexOf('Min_Cell_mV') !== -1 ? header.indexOf('Min_Cell_mV') : header.indexOf('gMin');
+    bMaxIdx = header.indexOf('Max_Cell_mV') !== -1 ? header.indexOf('Max_Cell_mV') : header.indexOf('gMax');
+  } else if (newFormat) {
     // New format (ported from bms_webX): Date,Log,addr,Voltage_V,...,Cell_1_V..Cell_16_V,...
     tsIdx = header.indexOf('Date');
     if (tsIdx === -1) tsIdx = 0;
@@ -3782,12 +3823,55 @@ function parseAndAnalyzeCSV(filename, text) {
 
   for (let i = 1; i < lines.length; i++) {
     const parts = lines[i].split(',').map(s => s.trim());
-    if (parts.length < header.length) continue;
+    if (parts.length < (isBankLog ? 5 : header.length)) continue;
 
-    const addr = parts[addrIdx] || '';
-    let ts, v, curr, cells, balMask;
+    let addr, ts, v, curr, cells, balMask = 0;
+    let alarmInfo = null;
 
-    if (newFormat) {
+    if (isAlarmLog) {
+      const pNum = parseInt(parts[packIdx], 10) || 1;
+      addr = '0x' + (pNum < 16 ? '0' : '') + pNum.toString(16).toUpperCase();
+      v = parseFloat(parts[voltIdx]) || 0;
+      curr = parseFloat(parts[currIdx]) || 0;
+      let cMin, cMax, delta;
+      if (isAlarmShifted) {
+        cMin = parseInt(parts[errIdx], 16) || 0;
+        cMax = parseInt(parts[cMinIdx], 10) || 0;
+        delta = parseInt(parts[cMaxIdx], 10) || (cMax - cMin);
+      } else {
+        cMin = parseInt(parts[cMinIdx], 10) || 0;
+        cMax = parseInt(parts[cMaxIdx], 10) || 0;
+        delta = parseInt(parts[deltaIdx], 10) || (cMax - cMin);
+      }
+      cells = [cMin, cMax];
+      const tMs = parseInt(parts[tsIdx], 10) || 0;
+      const sec = Math.floor(tMs / 1000);
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      ts = (h > 0 ? h + 'г ' : '') + m + 'хв ' + s + 'с';
+      alarmInfo = {
+        warn: parts[warnIdx] || '0x0000',
+        prot: parts[protIdx] || '0x0000',
+        delta: delta,
+        cMin: cMin,
+        cMax: cMax
+      };
+    } else if (isBankLog) {
+      addr = 'Банк АКБ';
+      v = parseFloat(parts[bVoltIdx]) || 0;
+      curr = parseFloat(parts[bCurrIdx]) || 0;
+      const cMin = parseInt(parts[bMinIdx], 10) || 0;
+      const cMax = parseInt(parts[bMaxIdx], 10) || 0;
+      cells = [cMin, cMax];
+      const tMs = parseInt(parts[tsIdx], 10) || 0;
+      const sec = Math.floor(tMs / 1000);
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      ts = (h > 0 ? h + 'г ' : '') + m + 'хв ' + s + 'с';
+    } else if (newFormat) {
+      addr = parts[addrIdx] || '';
       // "2026-10-28 | 13:35:05" -> ISO, чтобы new Date() понимал во всех браузерах
       ts = (parts[tsIdx] || '').replace(' | ', 'T');
       v = parseFloat(parts[voltIdx]);
@@ -3802,6 +3886,7 @@ function parseAndAnalyzeCSV(filename, text) {
       const bh = (parts[balHexIdx] || '').trim();
       balMask = (bh && bh.toLowerCase() !== 'none') ? (parseInt(bh, 16) || 0) : 0;
     } else {
+      addr = parts[addrIdx] || '';
       ts = parts[tsIdx] || '';
       v = parseInt(parts[r00Idx], 10) / 100.0;
       const rawI = parseInt(parts[r01Idx], 10);
@@ -3810,7 +3895,7 @@ function parseAndAnalyzeCSV(filename, text) {
       cells = cellIndices.map(idx => parseInt(parts[idx], 10));
     }
 
-    const item = { ts, addr, v, curr, cells, balMask };
+    const item = { ts, addr, v, curr, cells, balMask, alarmInfo };
     rows.push(item);
 
     if (!packMap[addr]) packMap[addr] = [];
@@ -3832,69 +3917,125 @@ function parseAndAnalyzeCSV(filename, text) {
 
   const cellStats = [];
 
-  addrs.forEach(addr => {
-    const pRows = packMap[addr];
-    const nCells = pRows[0].cells.length;
+  if (isAlarmLog) {
+    addrs.forEach(addr => {
+      const pRows = packMap[addr];
+      const mins = pRows.map(r => r.alarmInfo ? r.alarmInfo.cMin : 0).filter(m => m > 1000);
+      const maxs = pRows.map(r => r.alarmInfo ? r.alarmInfo.cMax : 0).filter(m => m > 1000);
+      const deltas = pRows.map(r => r.alarmInfo ? r.alarmInfo.delta : 0);
+      const minC = mins.length ? Math.min(...mins) : 0;
+      const maxC = maxs.length ? Math.max(...maxs) : 0;
+      const minD = deltas.length ? Math.min(...deltas) : 0;
+      const maxD = deltas.length ? Math.max(...deltas) : 0;
+      const warns = [...new Set(pRows.map(r => r.alarmInfo ? r.alarmInfo.warn : ''))].filter(Boolean).join(', ');
+      const prots = [...new Set(pRows.map(r => r.alarmInfo ? r.alarmInfo.prot : ''))].filter(Boolean).join(', ');
 
-    const cellMins = new Array(nCells).fill(99999);
-    const cellMaxs = new Array(nCells).fill(0);
-    const balCounts = new Array(nCells).fill(0);
-    const rintSamples = Array.from({ length: nCells }, () => []);
+      cellStats.push({
+        addr,
+        cellNum: `Аварійні події (${pRows.length})`,
+        min: minC,
+        max: maxC,
+        diff: maxD,
+        rint: `Δ: ${minD}..${maxD} mV`,
+        balCount: pRows.length,
+        warns,
+        prots,
+        isAlarmSummary: true
+      });
+    });
+  } else if (isBankLog) {
+    addrs.forEach(addr => {
+      const pRows = packMap[addr];
+      const mins = pRows.map(r => r.cells[0]).filter(m => m > 1000);
+      const maxs = pRows.map(r => r.cells[1]).filter(m => m > 1000);
+      const minC = mins.length ? Math.min(...mins) : 0;
+      const maxC = maxs.length ? Math.max(...maxs) : 0;
+      const maxD = maxC > minC ? (maxC - minC) : 0;
 
-    for (let i = 0; i < pRows.length; i++) {
-      const r = pRows[i];
-      for (let c = 0; c < nCells; c++) {
-        const mv = r.cells[c];
-        if (mv > 1000 && mv < 5000) {
-          if (mv < cellMins[c]) cellMins[c] = mv;
-          if (mv > cellMaxs[c]) cellMaxs[c] = mv;
+      cellStats.push({
+        addr,
+        cellNum: 'Сумарний банк',
+        min: minC,
+        max: maxC,
+        diff: maxD,
+        rint: 'Загальна телеметрія',
+        balCount: 0,
+        isBankSummary: true
+      });
+    });
+  } else {
+    addrs.forEach(addr => {
+      const pRows = packMap[addr];
+      const nCells = pRows[0].cells.length;
+
+      const cellMins = new Array(nCells).fill(99999);
+      const cellMaxs = new Array(nCells).fill(0);
+      const balCounts = new Array(nCells).fill(0);
+      const rintSamples = Array.from({ length: nCells }, () => []);
+
+      for (let i = 0; i < pRows.length; i++) {
+        const r = pRows[i];
+        for (let c = 0; c < nCells; c++) {
+          const mv = r.cells[c];
+          if (mv > 1000 && mv < 5000) {
+            if (mv < cellMins[c]) cellMins[c] = mv;
+            if (mv > cellMaxs[c]) cellMaxs[c] = mv;
+          }
+          if (r.balMask & (1 << c)) {
+            balCounts[c]++;
+          }
         }
-        if (r.balMask & (1 << c)) {
-          balCounts[c]++;
-        }
-      }
 
-      if (i > 0) {
-        const prev = pRows[i - 1];
-        const dI = Math.abs(r.curr - prev.curr);
-        if (dI >= 1.5 && dI <= 50.0) {
-          for (let c = 0; c < nCells; c++) {
-            const dV = Math.abs(r.cells[c] - prev.cells[c]);
-            const rint = (dV / dI);
-            if (rint >= 0.5 && rint <= 15.0) {
-              rintSamples[c].push(rint);
+        if (i > 0) {
+          const prev = pRows[i - 1];
+          const dI = Math.abs(r.curr - prev.curr);
+          if (dI >= 1.5 && dI <= 50.0) {
+            for (let c = 0; c < nCells; c++) {
+              const dV = Math.abs(r.cells[c] - prev.cells[c]);
+              const rint = (dV / dI);
+              if (rint >= 0.5 && rint <= 15.0) {
+                rintSamples[c].push(rint);
+              }
             }
           }
         }
       }
-    }
 
-    for (let c = 0; c < nCells; c++) {
-      const samples = rintSamples[c];
-      const avgR = samples.length ? (samples.reduce((a, b) => a + b, 0) / samples.length).toFixed(2) : '—';
-      const diff = (cellMaxs[c] > cellMins[c] && cellMins[c] < 99999) ? (cellMaxs[c] - cellMins[c]) : 0;
-      cellStats.push({
-        addr,
-        cellNum: c + 1,
-        min: cellMins[c] < 99999 ? cellMins[c] : '—',
-        max: cellMaxs[c] > 0 ? cellMaxs[c] : '—',
-        diff,
-        rint: avgR,
-        balCount: balCounts[c]
-      });
-    }
-  });
+      for (let c = 0; c < nCells; c++) {
+        const samples = rintSamples[c];
+        const avgR = samples.length ? (samples.reduce((a, b) => a + b, 0) / samples.length).toFixed(2) : '—';
+        const diff = (cellMaxs[c] > cellMins[c] && cellMins[c] < 99999) ? (cellMaxs[c] - cellMins[c]) : 0;
+        cellStats.push({
+          addr,
+          cellNum: c + 1,
+          min: cellMins[c] < 99999 ? cellMins[c] : '—',
+          max: cellMaxs[c] > 0 ? cellMaxs[c] : '—',
+          diff,
+          rint: avgR,
+          balCount: balCounts[c]
+        });
+      }
+    });
+  }
 
   let maxBankDelta = 0;
-  rows.forEach(r => {
-    if (r.cells && r.cells.length) {
-      const valid = r.cells.filter(c => c > 1000);
-      if (valid.length) {
-        const d = Math.max(...valid) - Math.min(...valid);
-        if (d > maxBankDelta) maxBankDelta = d;
+  if (isAlarmLog) {
+    const dList = rows.map(r => r.alarmInfo ? r.alarmInfo.delta : 0);
+    maxBankDelta = dList.length ? Math.max(...dList) : 0;
+  } else if (isBankLog) {
+    const dList = rows.map(r => (r.cells[1] > r.cells[0] ? r.cells[1] - r.cells[0] : 0));
+    maxBankDelta = dList.length ? Math.max(...dList) : 0;
+  } else {
+    rows.forEach(r => {
+      if (r.cells && r.cells.length) {
+        const valid = r.cells.filter(c => c > 1000);
+        if (valid.length) {
+          const d = Math.max(...valid) - Math.min(...valid);
+          if (d > maxBankDelta) maxBankDelta = d;
+        }
       }
-    }
-  });
+    });
+  }
 
   logAnalysisData = {
     filename,
@@ -3908,7 +4049,9 @@ function parseAndAnalyzeCSV(filename, text) {
     maxCharge,
     maxDischarge,
     maxBankDelta,
-    cellStats
+    cellStats,
+    isAlarmLog,
+    isBankLog
   };
 
   renderLogAnalysisResults();
@@ -3924,12 +4067,12 @@ function renderLogAnalysisResults() {
   const durationSec = Math.round((new Date(d.endTime) - new Date(d.startTime)) / 1000) || 0;
   const durMin = Math.floor(durationSec / 60);
   const durSec = durationSec % 60;
-  const durStr = durMin > 0 ? `${durMin} хв ${durSec} сек` : `${durSec} сек`;
+  const durStr = durMin > 0 ? `${durMin} хв ${durSec} сек` : (durationSec > 0 ? `${durSec} сек` : '—');
 
   document.getElementById('log_stats_grid').innerHTML = `
     <div class="bank-card">
       <div class="l">Тривалість сесії</div>
-      <div class="v" style="font-size:20px">${durStr}</div>
+      <div class="v" style="font-size:20px">${durStr !== '—' ? durStr : (d.rows[d.rows.length-1].ts || '—')}</div>
       <div class="subtext">Знайдено АКБ: <b>${d.addrs.join(', ')}</b></div>
     </div>
     <div class="bank-card">
@@ -3951,6 +4094,26 @@ function renderLogAnalysisResults() {
 
   const tbody = document.getElementById('log_cells_tbody');
   tbody.innerHTML = d.cellStats.map(s => {
+    if (s.isAlarmSummary) {
+      const isBadProt = (s.prots && s.prots !== '0x0000');
+      const isHighDiff = (s.diff > 50);
+      const statusPill = isBadProt ? `<span class="pill bad">Захист ${s.prots}</span>` :
+                         (isHighDiff ? `<span class="pill warn">Розбаланс (Warn: ${s.warns})</span>` : '<span class="pill ok">Збалансований</span>');
+      const minV = (s.min === 0) ? '—' : (s.min / 1000).toFixed(3);
+      const maxV = (s.max === 0) ? '—' : (s.max / 1000).toFixed(3);
+      return `
+        <tr>
+          <td><b>${s.addr}</b></td>
+          <td>${s.cellNum}</td>
+          <td>${minV}</td>
+          <td>${maxV}</td>
+          <td><b>${s.diff} mV</b></td>
+          <td><b style="color:var(--acc)">${s.rint}</b></td>
+          <td><span class="pill warn">${s.balCount} зап.</span></td>
+          <td>${statusPill}</td>
+        </tr>
+      `;
+    }
     const isBadR = (s.rint !== '—' && parseFloat(s.rint) > 2.8);
     const isHighDiff = (s.diff > 250);
     const statusPill = isBadR ? '<span class="pill bad">Підвищений опір</span>' :
