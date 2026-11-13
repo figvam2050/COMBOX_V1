@@ -114,9 +114,10 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
-#define CHARGE_VOLTAGE_LIMIT_STATIC 540
-#define CHARGE_VOLTAGE_LIMIT_DIP90 518
-#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 525 // 52.5 V (3.50 V/cell * 15): hold voltage during balancing (provides current for BMS balancers)
+#define CHARGE_VOLTAGE_LIMIT_STATIC 532     // 53.2 V (3.546 V/cell * 15): full charge profile (DIP1 OFF, Victron/Pylontech 15S)
+#define CHARGE_VOLTAGE_LIMIT_DIP90 518      // 51.8 V (3.453 V/cell * 15): 90% longevity profile (DIP1 ON)
+#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 522 // 52.2 V (3.480 V/cell * 15): hold voltage during balancing (below BMS Enter Float 52.50 V)
+#define CHARGE_VOLTAGE_LIMIT_FLOAT 510      // 51.0 V (3.400 V/cell * 15): resting float after full charge / Standby (below BMS Quit Float 51.75 V)
 
 // Per-pack charge current limit, selected by DIP4 (SW4, PB15):
 // OFF (default) = 50 A (battery manufacturer maximum), ON = 15 A (0.15C gentle current limit mode).
@@ -138,9 +139,9 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // When a pack trips hardware OV (0x0002 or >=3650mV), BMS hardware charge FET stays
 // locked until the highest cell in that pack drops <= 3420 mV.
 #define CELL_OV_RELEASE_BMS_MV 3420
-// DIP1 OFF (default) = standard 54.0 V mode (100% profile, full thresholds);
-// DIP1 ON = 51.8 V option (90% profile, economy thresholds, auto balance
-// sessions disabled, trickle cap from 3400 mV, LED1 solid indicator).
+// DIP1 OFF (default) = standard 53.2 V mode (100% profile, full thresholds);
+// DIP1 ON = 51.8 V option (90% profile, economy thresholds, adaptive night auto-balance
+// Float Hold 52.2 V max once/14 days, trickle cap from 3400 mV, LED1 solid indicator).
 // Bit moved from SW4 on 17.10.2026 (convenient end switch, silkscreen "SW1"
 // near the PCS-485/CAN jacks); stock SW1 protocol meaning (PYLON) unused.
 #define DIP_PROFILE_CODE_90 1
@@ -152,7 +153,7 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 // ON = Forced full 16-address scan (6.4 s legacy/diagnostic mode).
 #define DIP_FORCE_FULL_SCAN_MASK 0x04
 // DIP5 (SW5, weight 16, PC6): forced balancing mode
-// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 52.5V,
+// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 52.2V,
 // 2.0-5.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
 #define DIP_FORCED_BALANCE_MASK 0x10
 #define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
@@ -1728,7 +1729,7 @@ static void balance_update(uint8_t packs) {
   // DIP5 Forced Balancing (PC6 / SW5):
   // When DIP5 is ON, immediately engage forced balance session bypassing
   // all auto timers, intervals, and cooldowns.
-  // Immediately hold Float voltage at 52.5 V (3.50 V/cell), clamp current to 2.0..5.0 A/pack,
+  // Immediately hold Float voltage at 52.2 V (3.48 V/cell), clamp current to 2.0..5.0 A/pack,
   // request full charge via CAN 0x35C bit 3.
   if (forced) {
     if (!bal_forced_prev) {
@@ -1751,7 +1752,7 @@ static void balance_update(uint8_t packs) {
   }
 
   // DIP1 transitions: switching the 51.8 V option ON aborts an active
-  // auto session (unless forced by DIP5); leaving the option returns to standard 54 V behind a cooldown
+  // auto session (unless forced by DIP5); leaving the option returns to standard 53.2 V behind a cooldown
   // so an auto session cannot re-trigger instantly.
   if (!forced) {
     if (manual && !bal_manual_prev) {
@@ -1839,7 +1840,7 @@ static void balance_update(uint8_t packs) {
       calc_taper_start_mv = CELL_TAPER_START_MV;
       calc_charge_stop_mv = CELL_CHARGE_STOP_MV;
       calc_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
-      // In forced manual mode (DIP5 ON), maintain Float Hold 52.5 V continuously
+      // In forced manual mode (DIP5 ON), maintain Float Hold 52.2 V continuously
       if (spread <= BAL_SPREAD_EXIT_MV) {
         if (bal_exit_streak < 255)
           bal_exit_streak++;
@@ -1855,8 +1856,8 @@ static void balance_update(uint8_t packs) {
                   (agg_min_cell_mv >= BAL_TRICKLE_CELL_MV);
 
     // Dynamic Float Hold: when max cell reaches 3.56 V, clamp requested voltage
-    // to 52.5 V to prevent emergency cell OV while maintaining gentle balance current.
-    // In DIP1 manual 90% mode: maintain Float Hold 52.5 V throughout the entire balance session.
+    // to 52.2 V to prevent emergency cell OV while maintaining gentle balance current.
+    // In DIP1 manual 90% mode: maintain Float Hold 52.2 V throughout the entire balance session.
     if (manual) {
       bal_float_hold = true;
       bal_trickle = true;
@@ -1892,7 +1893,7 @@ static void balance_update(uint8_t packs) {
     }
 
   // In-session duration limit:
-  // In DIP1 90% mode: strict 90 min window prevents eternal 52.5V float if a weak pack cannot converge to 40mV.
+  // In DIP1 90% mode: strict 90 min window prevents eternal 52.2V float if a weak pack cannot converge to 40mV.
   uint32_t session_max_ms = manual ? BAL_SESSION_DIP1_MAX_MS : BAL_SESSION_MAX_MS;
   uint32_t cooldown_fail_ms = manual ? (now + BAL_COOLDOWN_DIP1_MS) : (now + BAL_COOLDOWN_TRY_MS);
   if ((now - bal_session_start_ms) >= session_max_ms) {
@@ -2205,9 +2206,11 @@ static void bms_aggregate_data(void) {
   sweep_balance_mask = 0;
 
   balance_update(effective_packs);
-  if (bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) {
+  bool balancing_override =
+      bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
+  if (balancing_override) {
     charge_voltage_limit = bal_float_hold ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
-                                          : CHARGE_VOLTAGE_LIMIT_STATIC;
+                                          : profile_charge_voltage_limit;
   } else {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
@@ -2243,6 +2246,12 @@ static void bms_aggregate_data(void) {
   }
 
   uint16_t target_ccl = bank_all_packs_standby ? 0 : calculate_charge_limit(charge_packs);
+  // Resting Float CVL (51.0 V) after full charge / Standby or full-cell OV cutoff
+  // when no balancing session is active: lowers bus below BMS Quit Float (51.75 V)
+  // and prevents inverter float creep.
+  if (!balancing_override && (bank_all_packs_standby || charge_cell_ov_inhibit)) {
+    charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_FLOAT;
+  }
   discharge_current_limit = calculate_discharge_limit(discharge_packs);
 
   // Slew Rate Limiter for charge_current_limit:
