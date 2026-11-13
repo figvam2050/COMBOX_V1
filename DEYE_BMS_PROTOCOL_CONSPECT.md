@@ -1,11 +1,12 @@
 # Конспект протоколів обміну Deye (CAN-шина, RS485 BMS та Modbus RTU/TCP інвертора)
 
-> Документ узагальнює вимоги та специфікації інверторів **Deye** на основі 5 джерел:
+> Документ узагальнює вимоги та специфікації інверторів **Deye** на основі 6 джерел:
 > 1. **SolarMark Modbus Reference:** `https://solarmark.us/modbus/deye/`
-> 2. **RichardAntalik Deye Modbus Reference:** `https://github.com/RichardAntalik/deye-modbus-reference` (`04`, `06`, `07`, `08`, `09`, `10`)
-> 3. **Psynosaur ESPHome Deye BMS + PCS CAN V3.3:** `https://github.com/Psynosaur/esphome-deye-bms` (`deye-can-bus.yaml` та `PCS CAN-Bus-protocol-DY-low-voltage V3.3.zh-CN.en.pdf`)
-> 4. **BMS RS485-Modbus REV1.30:** `/Users/vlad/Downloads/document.pdf` (*BMS Protocol for Lithium Battery Pack RS485-Modbus REV1.30*)
-> 5. **Deye Modbus Protocol V118:** `https://github.com/Hypfer/deye-microinverter-cloud-free-assets/blob/master/Deye_Modbus.-.-.V118.pdf`
+> 2. **RichardAntalik Deye Modbus Reference:** `https://github.com/RichardAntalik/deye-modbus-reference` (`01`–`13`, включно з `06-hybrid-inverter-registers.md`, `07-battery-pack-registers.md`, `08-deye-battery-registers.md`, `09/10` коди алармів/аварій, `13-tou-peak-shaving.md`)
+> 3. **RichardAntalik Deye Monitor (практична реалізація Solarman V5):** `https://github.com/RichardAntalik/deye-monitor` (`deye/inverter.py`, `deye/config.json`)
+> 4. **Psynosaur ESPHome Deye BMS + PCS CAN V3.3:** `https://github.com/Psynosaur/esphome-deye-bms` (`deye-can-bus.yaml` та `PCS CAN-Bus-protocol-DY-low-voltage V3.3.zh-CN.en.pdf`)
+> 5. **BMS RS485-Modbus REV1.30:** `/Users/vlad/Downloads/document.pdf` (*BMS Protocol for Lithium Battery Pack RS485-Modbus REV1.30*)
+> 6. **Deye Modbus Protocol V118:** `https://github.com/Hypfer/deye-microinverter-cloud-free-assets/blob/master/Deye_Modbus.-.-.V118.pdf`
 
 ---
 
@@ -178,26 +179,29 @@
 
 ## 4. Регістри Modbus самого інвертора Deye (Inverter = Slave)
 
-Джерела: `Deye_Modbus.-.-.V118.pdf`, `RichardAntalik/deye-modbus-reference`, `solarmark.us/modbus/deye/`.
+Джерела: `Deye_Modbus.-.-.V118.pdf`, `RichardAntalik/deye-modbus-reference` (`01`–`13`), `RichardAntalik/deye-monitor`, `solarmark.us/modbus/deye/`.
 
-- **Протокол:** Modbus RTU або Modbus TCP (через Wi-Fi/LAN-логер, зазвичай порт `502`, Unit ID `1`).
-- **Функції:**
-  - `0x03` Read Holding Registers (до `125` регістрів за запит).
-  - `0x10` Write Multiple Registers (до `123` регістрів за запит).
+- **Транспорт і параметри:**
+  - **Modbus RTU** (RS232/RS485, `9600 bps`, Slave ID `1`) або **Modbus TCP** (порт `502`).
+  - **Solarman V5 TCP** (через штатний Wi-Fi/LAN-логер, порт **`8899`**, потрібен серійний номер логера `sn` та `MB_SLAVE_ID = 1`, як у `deye-monitor/deye/inverter.py`).
+- **Функції та ліміти:**
+  - `0x03` Read Holding Registers: теоретично до `0x007D` (`125`) регістрів за запит; на практиці через Solarman-логер (`deye-monitor`) опитують чанками по **`MAX_CHUNK = 50`** регістрів для стабільності.
+  - `0x10` Write Multiple Registers: до `0x007B` (`123`) регістрів за запит (використовується для запису як 1, так і кількох регістрів).
+  - Помилкові відповіді (Exception): `0x83` (для `0x03`), `0x90` (для `0x10`).
 
 ### 4.1. Дзеркало BMS в інверторі (`312–325`)
 Ці регістри показують, **що саме інвертор реально отримав від BMS** (по CAN або RS485) і використовує у своїй логіці:
 
-| Reg | Назва | Масштаб / Примітка |
+| Reg | Назва | Тип / Масштаб / Примітка |
 | :---: | :--- | :--- |
-| `312` | **BMS Charging Voltage** | `0.01 В` (з BMS `0x351`) |
-| `313` | **BMS Discharging Voltage** | `0.01 В` (з BMS `0x351`) |
-| `314` | **BMS Charge Current Limit (CCL)** | `1 А` (поточний ліміт заряду) |
-| `315` | **BMS Discharge Current Limit (DCL)** | `1 А` (поточний ліміт розряду) |
-| `316` | **BMS Real-time SOC** | `1 %` |
-| `317` | **BMS Real-time Voltage** | `0.01 В` |
-| `318` | **BMS Real-time Current** | `1 А` |
-| `319` | **BMS Real-time Temp** | `0.1 °C` зі зміщенням `+1000` (`1250` = `25.0 °C`) |
+| `312` | **BMS Charging Voltage** | `uint16`, `0.01 В` (з BMS `0x351`) |
+| `313` | **BMS Discharging Voltage** | `uint16`, `0.01 В` (з BMS `0x351`) |
+| `314` | **BMS Charge Current Limit (CCL)** | `int16` (`sign_bit = 15`), `1 А` (поточний ліміт заряду) |
+| `315` | **BMS Discharge Current Limit (DCL)** | `int16` (`sign_bit = 15`), `1 А` (поточний ліміт розряду) |
+| `316` | **BMS Real-time SOC** | `uint16`, `1 %` |
+| `317` | **BMS Real-time Voltage** | `uint16`, `0.01 В` |
+| `318` | **BMS Real-time Current** | `int16`, `1 А` |
+| `319` | **BMS Real-time Temp** | `uint16`, `0.1 °C` зі зміщенням `+1000` (`1250` = `25.0 °C`) |
 | `320` | **BMS Max Charge Current** | `1 А` |
 | `321` | **BMS Max Discharge Current** | `1 А` |
 | `322` | **Lithium Alarm Flags** | Біти попереджень від BMS |
@@ -205,18 +209,46 @@
 | `324` | **Lithium Symbol 2** | `Bit 1`: **Force Charge Request** (запит примусового заряду від BMS) |
 | `325` | **Lithium Battery Type** | `0x0000` = **PYLON / SOLAX CAN**;<br>`0x0001..0x0009` = різні RS485-протоколи BMS;<br>`0x000A` = **Shenggao CAN** |
 
-### 4.2. Інші критичні регістри батареї на інверторі
+### 4.2. Live-телеметрія батареї, статуси та енергія (`059–191`, `425–436`)
+
+| Reg | Назва | Деталі / Формула |
+| :---: | :--- | :--- |
+| **`059`** | **Run State** | `0x0000` Standby, `0x0001` Self-check, `0x0002` Normal, `0x0003` Warning, `0x0004` Fault. |
+| **`074–079`** | **Енергія батареї** | `074` Day Charge (`0.1 kWh`), `075` Day Discharge (`0.1 kWh`), `076–077` Total Charge Low/High, `078–079` Total Discharge Low/High. |
+| **`098–099`** | **Alarms Status 1–2** | Бітові маски попереджень інвертора. |
+| **`100–103`** | **Fault Information Words 1–4** | Бітові маски аварій інвертора (`F07..F63`). |
+| **`104`** | **Corrected Battery AH** | `1 Ah` (`100` = `100 Ah`). |
+| **`106`** | **Other Test Flag Bits** | `Bit 1`: Parallel CAN (`1 = normal`); `Bit 8`: Li-ion RS485 активний; `Bit 9`: Li-ion CAN активний. |
+| **`182`** | **Battery Temperature** | `(raw - 1000) * 0.1 °C` (напр. `1200` = `20.0 °C`). |
+| **`183`** | **Battery Voltage** | `0.01 В` (`4100` = `41.00 В`). |
+| **`184`** | **Battery SOC** | `1 %` (`0..100`). |
+| **`190`** | **Battery Power** | `int16` (`sign_bit = 15`), `1 Вт`. |
+| **`191`** | **Battery Current** | `int16` (`sign_bit = 15`), `0.01 А`. |
+| **`435–436`** | **BAT_I / BAT_V** | Додаткові real-time регістри струму/напруги батареї. |
+
+### 4.3. Налаштування батареї, TOU та системні прапори (`200–286`)
+
+| Reg | Назва | Значення / Примітка |
+| :---: | :--- | :--- |
+| **`200`** | **Control Mode** | `0x0000`: Lead-acid (4-stage); `0x0001`: **Lithium battery**. |
+| **`201–205`** | **Напруги та ємність** | `201` Equalization V, `202` Absorption V, `203` Float V (`0.01 В`), `204` Battery Capacity (`1 Ah`), `205` Empty V. |
+| **`211–212`** | **Max Charge / Discharge Current** | `[0..185]` `1 А` (апаратні ліміти інвертора). |
+| **`214`** | **Battery Operation Mode** | По напрузі / по ємності / без батареї. |
+| **`215`** | **Lithium Battery Wake Up** | `0`: enabled, `1`: disabled. |
+| **`216–217`** | **Resistance / Efficiency** | `216` Battery Resistance (`mΩ`), `217` Charging Efficiency (`0.1 %`). |
+| **`218–223`** | **Пороги ShutDown / Restart / LowBatt** | `218–220` у `%` SOC; `221–223` у `0.01 В` (`[3800..6100]`). |
+| **`226–233`** | **Заряд від генератора / мережі** | Стартова V/SOC (`226–227`, `229–230`), струм заряду `1 А` (`228`, `231`), дозволи (`232`, `233`). |
+| **`237–240`** | **SmartLoad пороги батареї** | `237/238` OFF V/SOC, `239/240` ON V/SOC. |
+| **`247–278`** | **TOU / Peak Shaving** | `247` Bit0 Solar Sell + дні тижня; `248–253` 6 точок часу (`0000..2359`); `254–259` потужність (`1 Вт`); `262–267` напруга (`0.01 В`); `268–273` SOC (`1 %`); `274–279` дозволи заряду. |
+| **`286`** | **Системні прапори + Output V** | **`Bit 14`: `Lithium battery loss fault enable`** (вмикає/вимикає аварію втрати літієвої BMS); `Bit 4–7`: Gen peak-shaving; `Bit 8–11`: Grid peak-shaving; `Bit 12`: On-grid always on; `Bit 15`: DRM. |
+
+### 4.4. Багатопакові та фірмові регістри (`500–809`, `10000+`)
 
 | Діапазон | Зміст |
 | :---: | :--- |
-| **`059`** | Стан та коди аварій інвертора (зокрема `F58` BMS Comm Fault тощо). |
-| **`098–099`** | Бітові маски попереджень інвертора (Alarms). |
-| **`106`** | Test/Comm прапори (`Bit 8`: Li-ion RS485 зв'язок активний, `Bit 9`: Li-ion CAN зв'язок активний). |
-| **`182–191`** | Фактична телеметрія батареї, яку бачить інвертор: `182` Temp (`+1000`), `183` Voltage (`0.01 В`), `184` SOC (`%`), `190` Power (`Вт`), `191` Current (`0.01 А`). |
-| **`200–240`** | Налаштування батареї в інверторі: `200` Control Mode (Lead/Lithium/NoBatt), `202` Capacity (`А·год`), `203–205` Equal/Absorb/Float V (`0.01 В`), `210–214` Max Charge/Discharge A, Low/Restart/Shutdown V/SOC, `240` Lithium Wake-Up. |
 | **`500–589`** | Серійні номери (SN) підключених батарейних паків `Pack 1..15`. |
-| **`600–809`** | Попакові дані `Pack 1..15` (по 14 регістрів на пак у V118: Voltage `0.01 В`, Current `0.1 А`, Avg Temp `1250=25°C`, SOC `0.1%`, Rem/Total Cap `0.1 А·год`, ChgV, ChgI, DsgI, Max/Min CellV `0.01 В`, Cycles, Warning, Fault). |
-| **`10000+`** | Окрема Read-Only зона для фірмових батарей Deye (`Device Type`, `Protocol Version`, `Packnum`, `Force Charge Flag 10017`, `Check SOC Flag 10018`, `Battery Fault 1/2`, `Battery Alarm 1/2`, SN і покоміркові/пакові дані `10040+`). |
+| **`600–809`** | Попакові дані `Pack 1..15` (по 14 регістрів на пак: Voltage `0.01 В`, Current `0.1 А`, Avg Temp `1250=25°C`, SOC `0.1%`, Rem/Total Cap `0.1 А·год`, ChgV, ChgI, DsgI, Max/Min CellV `0.01 В`, Cycles, Warning, Fault). |
+| **`10000+`** | Окрема Read-Only зона для фірмових батарей Deye (`Device Type`, `Protocol Version`, `Packnum`, `10017` Force Charge Flag, `10018` Check SOC Flag, `10019–10022` Battery Fault 1/2 та Alarm 1/2, `10030–10044` SN пака, `10040+` покоміркові/пакові дані). |
 
 ---
 
@@ -252,3 +284,4 @@
    - **`0x35E`**: Рядок виробника (напр. `"DEYE"` або `"PYLO"`), кількість паків та номінальна ємність (`0.1 А·год`).
 3. **Бажаний кадр для діагностики:** `0x361` (Max/Min Cell V в `мВ` і Max/Min Cell T в `0.1 °C`) та `0x371` (On-Grid CCL/DCL).
 4. **Контроль зв'язку:** Відстежувати вхідний `0x305` від інвертора (раз на 1 с) для підтвердження живого каналу.
+
