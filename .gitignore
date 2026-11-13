@@ -64,3 +64,4 @@ original_firmware/tools/__pycache__/
 bms_monitor_*.csv
 bms_log_*.csv
 DEYE_SOLARMAN_MODBUS_RESEARCH.md
+DEYE_BMS_PROTOCOL_CONSPECT.md
