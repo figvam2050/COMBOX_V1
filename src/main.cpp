@@ -369,7 +369,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 
 // 1 = Deye PCS CAN V3.3 ("DEYE", 0x359 Tables 1-7, 0x361 cell V/T, 0x371 On-Grid limits)
 // 0 = Pylontech CAN v2.0.6 ("PYLON", 0x359 b0..b1 protect, b2..b3 alarm, b4 count, 'P','N')
-#define CAN_PROTOCOL_DEYE_V33 1
+#define CAN_PROTOCOL_DEYE_V33 0
 
 #define CAN_ID_LIMITS 0x351
 #define CAN_ID_SOC 0x355
