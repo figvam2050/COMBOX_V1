@@ -3,7 +3,7 @@
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
-Version 3.5
+Version 3.6
 Features (v2.6):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
@@ -182,15 +182,23 @@ BASE_BITS = [
     (0x0200, "Discharge OT"), (0x0400, "Charge UT"), (0x0800, "Discharge UT"),
 ]
 
-# В регистре 0026 (Warn)
+# В регистре 0026 (Warn): 12 базових + Low Capacity.
+# Проверено по логах: 0x1000 в 0026 з'являється тільки при SOC 1..4 %.
 WARN_BITS = BASE_BITS + [
-     (0x1000, "Low Capacity"), (0x2000, "Float stop"),
+     (0x1000, "Low Capacity"),
 ]
 
-# В регистре 0027 (Protect) 
+# В регистре 0027 (Protect): 12 базових + Short Circuit / Reverse.
+# Біт 12 (0x1000) — не захист: BMS виставляє його по завершенні заряду
+# (Standby, SOC 100 %, струм 0), коли буферний цикл зупинено. BMS_TOOLS
+# показує його в панелі "Warn Status" як "Float stop", тому лампа
+# додається до warning_bits, а не до protection_bits.
 PROT_BITS = BASE_BITS + [
     (0x2000, "Short Circuit"), (0x4000, "Reverse")
 ]
+
+# Біт 12 регістра 0027: інформаційний "Float stop" (не захист).
+FLOAT_STOP_MASK = 0x1000
 
 ERROR_BITS = [
     (0x0001, "Voltage error"), (0x0002, "Temperature error"),
@@ -478,7 +486,13 @@ def decode_regs(regs: list) -> dict:
         "status_bits": ([{"name": name, "on": low == v} for v, name in STATUS_STATES]
                         + [{"name": "Heating ON", "on": bool(status & 0x8000)}]),
         "warning": r(26, 0),
-        "warning_bits": bits_of(r(26, 0), WARN_BITS),
+        # 0027 bit 12 is "Float stop" (charge complete), an informational
+        # warning in BMS_TOOLS; it is not a protection, so it is appended
+        # to the warning lamps instead of lighting a red protection lamp.
+        "warning_bits": (bits_of(r(26, 0), WARN_BITS)
+                         + [{"name": "Float stop",
+                             "on": bool(r(27, 0) & FLOAT_STOP_MASK),
+                             "cls": "onw"}]),
         "protection": r(27, 0),
         "protection_bits": bits_of(r(27, 0), PROT_BITS),
         "error_code": r(28),
@@ -2676,7 +2690,7 @@ function leds(el, arr, cls, prefix) {
     const key = prefix ? prefix + b.name : b.name;
     const isClickable = !!ALARM_HELP_DB[key];
     const clickAttr = isClickable ? `onclick="showAlarmHelp('${key}')" title="Клікніть для детального опису та інструкції" style="cursor:pointer"` : '';
-    return `<div class="led ${b.on ? cls : ''}" ${clickAttr}><i></i>${b.name}${isClickable ? ' <span style="opacity:0.5;font-size:9px">ℹ️</span>' : ''}</div>`;
+    return `<div class="led ${b.on ? (b.cls || cls) : ''}" ${clickAttr}><i></i>${b.name}${isClickable ? ' <span style="opacity:0.5;font-size:9px">ℹ️</span>' : ''}</div>`;
   }).join('');
 }
 
@@ -2905,7 +2919,7 @@ function renderPackDetail(addr) {
     // The pack is gone: no live 0025-0028 data. Put out every status lamp
     // and clear the raw hex, so a stale Standby / warning / protection /
     // error does not stay lit.
-    const offBits = arr => (arr || []).map(b => ({name: b.name, on: false}));
+    const offBits = arr => (arr || []).map(b => ({name: b.name, cls: b.cls, on: false}));
     leds(document.getElementById('p_stbits'), offBits(d && d.status_bits), 'onok');
     leds(document.getElementById('p_warn'), offBits(d && d.warning_bits), 'on', 'W:');
     leds(document.getElementById('p_prot'), offBits(d && d.protection_bits), 'on', 'P:');
@@ -3003,7 +3017,9 @@ function renderPackDetail(addr) {
   const hx = v => '0x' + (v == null ? '????' : v.toString(16).toUpperCase().padStart(4, '0'));
   if (!offline) {
     document.getElementById('p_straw').textContent = hx(d.status);
-    document.getElementById('p_warnraw').textContent = hx(d.warning);
+    const fsOn = (d.warning_bits || []).some(b => b.name === 'Float stop' && b.on);
+    document.getElementById('p_warnraw').textContent =
+      hx(d.warning) + (fsOn ? ' · 0027:0x1000' : '');
     document.getElementById('p_protraw').textContent = hx(d.protection);
     document.getElementById('p_errraw').textContent = hx(d.error_code);
 
@@ -4468,10 +4484,23 @@ def selftest() -> int:
     regs[27] = 0x4000
     on = [b["name"] for b in decode_regs(regs)["protection_bits"] if b["on"]]
     assert on == ["Reverse"], f"prot 0x4000: {on}"
+    # 0027 bit 12 is "Float stop": an informational warning, not a
+    # protection. BMS_TOOLS shows it in Warn Status, so the lamp belongs
+    # to warning_bits.
+    regs[27] = 0x1000
+    d = decode_regs(regs)
+    on = [b["name"] for b in d["warning_bits"] if b["on"]]
+    assert on == ["Float stop"], f"float stop (0027 0x1000): {on}"
+    assert [b["name"] for b in d["protection_bits"] if b["on"]] == [], \
+        "0027 bit 12 must not light a protection lamp"
     regs[27] = 0
+    regs[26] = 0x1000
+    on = [b["name"] for b in decode_regs(regs)["warning_bits"] if b["on"]]
+    assert on == ["Low Capacity"], f"warn 0x1000: {on}"
     regs[26] = 0x2000
     on = [b["name"] for b in decode_regs(regs)["warning_bits"] if b["on"]]
-    assert on == ["Float stop"], f"warn 0x2000: {on}"
+    assert on == [], f"warn 0x2000 must not be Float stop: {on}"
+    regs[26] = 0
     assert len(decode_regs(regs)["warning_bits"]) == 14, "warn = 14 bits"
     assert len(decode_regs(regs)["protection_bits"]) == 14, "prot = 14 bits"
 
