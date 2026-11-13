@@ -440,12 +440,18 @@ static volatile uint16_t uart_rx_index = 0;
 
 static float bms_voltage = BATTERY_VOLTAGE_DEFAULT;
 static float bms_current = BATTERY_CURRENT_DEFAULT;
+static inline bool bms_is_discharging(float thresh_a) { return bms_current > thresh_a; }
+static inline bool bms_is_charging(float thresh_a) { return bms_current < -thresh_a; }
 static uint8_t bms_soc = BATTERY_SOC_DEFAULT;
 static float bms_temp = BATTERY_TEMP_DEFAULT;
 static uint8_t bms_soh = BATTERY_SOH_DEFAULT;
-// Packs seen in the last full cycle; kept (not cleared) on comm loss so
-// 0x359 byte 4 stays the fixed system size the inverter expects.
-static uint8_t bms_pack_count = 0;
+// Packs seen in the last full cycle; clamped to minimum 1 on comm loss so
+// 0x359 byte 4 never sends 0 modules to the inverter.
+static uint8_t bms_pack_count = 1;
+static uint32_t last_inverter_can_rx_ms = 0;
+static bool inverter_can_alive = false;
+#define CAN_ID_INV_HEARTBEAT 0x305U
+#define INVERTER_CAN_TIMEOUT_MS 5000UL
 
 static float agg_voltage_sum = 0.0f;
 static float agg_current_sum = 0.0f;
@@ -1494,8 +1500,8 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   if (agg_max_cell_mv >= stop_mv) {
     charge_cell_ov_inhibit = true;
   } else if (charge_cell_ov_inhibit) {
-    // Release on passive voltage drop below reenable threshold OR proactively on discharge current (I < -2.0 A) with cell < 3550 mV
-    bool discharge_release = (bms_current < -2.0f) && (agg_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV);
+    // Release on passive voltage drop below reenable threshold OR proactively on discharge current (I > +2.0 A) with cell < 3550 mV
+    bool discharge_release = bms_is_discharging(2.0f) && (agg_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV);
     if (agg_max_cell_mv < reenable_mv || discharge_release) {
       charge_cell_ov_inhibit = false;
     }
@@ -2215,12 +2221,12 @@ static void bms_aggregate_data(void) {
     bank_all_packs_standby = true;
   } else if (bank_all_packs_standby) {
     // Exit Standby:
-    // 1) Active discharge flow into household loads (I < -1.5 A)
+    // 1) Active discharge flow into household loads (I > +1.5 A)
     // 2) OR confirmed natural cell relaxation below safe re-enable floor
     uint16_t standby_reenable_mv = (dip_applied_code & DIP_PROFILE_CODE_90)
                                       ? CELL_CHARGE_REENABLE_MV_DIP90
                                       : CELL_CHARGE_REENABLE_MV;
-    bool discharge_exit = (bms_current < -1.5f);
+    bool discharge_exit = bms_is_discharging(1.5f);
     if ((agg_max_cell_mv > 0 && agg_max_cell_mv < standby_reenable_mv) || discharge_exit) {
       bank_all_packs_standby = false;
     }
@@ -2333,6 +2339,23 @@ static void send_can_std(uint32_t id, const uint8_t *data, uint8_t len) {
   }
 }
 
+// Drain CAN_FIFO0 to prevent hardware FIFO overflow and track inverter 0x305 heartbeat.
+static void can_rx_service(uint32_t now) {
+  uint8_t pending = can_receive_message_length_get(DEYE_CAN, CAN_FIFO0);
+  while (pending > 0) {
+    can_receive_message_struct rx_msg;
+    can_message_receive(DEYE_CAN, CAN_FIFO0, &rx_msg);
+    if (rx_msg.rx_ff == CAN_FF_STANDARD && rx_msg.rx_sfid == CAN_ID_INV_HEARTBEAT) {
+      last_inverter_can_rx_ms = now;
+      inverter_can_alive = true;
+    }
+    pending = can_receive_message_length_get(DEYE_CAN, CAN_FIFO0);
+  }
+  if (inverter_can_alive && (now - last_inverter_can_rx_ms > INVERTER_CAN_TIMEOUT_MS)) {
+    inverter_can_alive = false;
+  }
+}
+
 static int16_t round_to_i16(float v) {
   return (int16_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
 }
@@ -2366,10 +2389,10 @@ static void send_all_frames(void) {
     if (can_soc > 98)
       can_soc = 98;
   } else if (charge_temp_inhibit) {
-    // Failsafe: Deye off-grid ignores CCL=0. Force SOC=100 during charge or idle (bms_current > -1.0 A)
-    // so Deye stops charging cold battery (< +2°C). During active discharge (bms_current <= -1.0 A),
+    // Failsafe: Deye off-grid ignores CCL=0. Force SOC=100 during charge or idle (bms_current < +1.0 A)
+    // so Deye stops charging cold battery (< +2°C). During active discharge (bms_current >= +1.0 A),
     // report real OCV-SOC so inverter can accurately predict backup runtime for the house.
-    if (bms_current > -1.0f) {
+    if (!bms_is_discharging(1.0f)) {
       can_soc = 100;
     }
   } else if (charge_cell_ov_inhibit || (bms_soc >= 99 && charge_current_limit == 0)) {
@@ -2624,6 +2647,7 @@ int main(void) {
   while (1) {
     watchdog_feed();
     uint32_t now = millis();
+    can_rx_service(now);   // drain FIFO0 & track inverter 0x305 heartbeat
     pcs_poll_service(now); // mirror drain / bridge RX every pass
     if (now - last_dip_poll >= 250) {
       last_dip_poll = now;
@@ -2651,6 +2675,7 @@ int main(void) {
       bms_soc = BATTERY_SOC_DEFAULT;
       bms_soh = BATTERY_SOH_DEFAULT;
       bms_temp = BATTERY_TEMP_DEFAULT;
+      bms_pack_count = 1; // safe minimum (never send 0 packs in 0x359 byte 4)
       soc_ema_valid = false; // наступний sweep snap без фільтра
       charge_voltage_limit = profile_charge_voltage_limit;
       charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
