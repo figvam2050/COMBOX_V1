@@ -367,12 +367,18 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 // reg19 temperature raw divisor: 1 = reg 0x13 holds whole C (dump 08.10.2026).
 #define BMS_TEMP_RAW_DIV 1.0f
 
+// 1 = Deye PCS CAN V3.3 ("DEYE", 0x359 Tables 1-7, 0x361 cell V/T, 0x371 On-Grid limits)
+// 0 = Pylontech CAN v2.0.6 ("PYLON", 0x359 b0..b1 protect, b2..b3 alarm, b4 count, 'P','N')
+#define CAN_PROTOCOL_DEYE_V33 1
+
 #define CAN_ID_LIMITS 0x351
 #define CAN_ID_SOC 0x355
 #define CAN_ID_STATUS 0x356
 #define CAN_ID_PROTECT 0x359
 #define CAN_ID_FLAGS 0x35C
 #define CAN_ID_BRAND 0x35E
+#define CAN_ID_CELL_EXTREMES 0x361
+#define CAN_ID_GRID_LIMITS 0x371
 
 #define UART_BMS USART0
 #define UART_BMS_RCU RCU_USART0
@@ -469,6 +475,8 @@ static uint16_t agg_max_pack_v = 0;
 static uint16_t agg_min_pack_v = 0xFFFF;
 static uint16_t bank_max_cell_mv = 0;
 static uint16_t bank_min_cell_mv = 0xFFFF;
+static float bank_temp_max = BATTERY_TEMP_DEFAULT;
+static float bank_temp_min = BATTERY_TEMP_DEFAULT;
 static uint16_t bank_pack_v_delta_10mv = 0;
 static bool charge_cell_ov_inhibit = false;
 static bool charge_temp_inhibit = false;
@@ -2135,6 +2143,8 @@ static void bms_aggregate_data(void) {
   }
   bms_soh = (uint8_t)(agg_soh_sum / agg_count);
   bms_temp = agg_temp_max / BMS_TEMP_RAW_DIV;
+  bank_temp_max = agg_temp_max / BMS_TEMP_RAW_DIV;
+  bank_temp_min = agg_temp_min / BMS_TEMP_RAW_DIV;
 
   // Latch bank cell extremes and inter-pack voltage spread for multi-pack protection
   bank_max_cell_mv = agg_max_cell_mv;
@@ -2365,6 +2375,21 @@ static void put_u16le(uint8_t *data, uint16_t value) {
   data[1] = (uint8_t)((value >> 8) & 0xFF);
 }
 
+#if CAN_PROTOCOL_DEYE_V33
+// Map internal Pylontech-style bits (b0/b2, b1/b3) to Deye V3.3 Table 1 / Table 5 byte.
+static uint8_t map_to_deye_v33_t1(uint8_t b_even, uint8_t b_odd) {
+  uint8_t out = 0;
+  if (b_even & CAN_PROT_CELL_OV)      out |= 0x01; // Cell OV
+  if (b_even & CAN_PROT_CELL_UV)      out |= 0x02; // Cell UV
+  if (b_even & CAN_PROT_PACK_OV)      out |= 0x04; // Module OV
+  if (b_odd  & CAN_PROT_CHARGE_OC)    out |= 0x10; // Charge OC
+  if (b_even & CAN_PROT_DISCHARGE_OC) out |= 0x20; // Discharge OC
+  if (b_even & CAN_PROT_OT)           out |= 0x40; // Charge OT
+  if (b_even & CAN_PROT_UT)           out |= 0x80; // Charge UT
+  return out;
+}
+#endif
+
 static void send_all_frames(void) {
   gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // LED4: CAN activity
   uint8_t data[8] = {0};
@@ -2411,8 +2436,18 @@ static void send_all_frames(void) {
   put_u16le(&data[4], (uint16_t)round_to_i16(bms_temp * 10.0f));
   send_can_std(CAN_ID_STATUS, data, 6);
 
-  // 0x359: Bytes 0..1 Protection, Bytes 2..3 Alarm, Byte 4 Module count, Bytes 5..6 'P' 'N', Byte 7 0
   memset(data, 0, 8);
+#if CAN_PROTOCOL_DEYE_V33
+  // 0x359 Deye PCS CAN V3.3: Bytes 0..3 Protection Tables 1-4, Bytes 4..5 Alarm Tables 5-6, Byte 6 Error Table 7
+  data[0] = map_to_deye_v33_t1(can_protect_b0, can_protect_b1);
+  if (bank_mos_ot_protect)
+    data[1] |= 0x04; // Table 2 Bit2: MOS Over Temperature
+  data[4] = map_to_deye_v33_t1(can_alarm_b2, can_alarm_b3);
+  if (bank_mos_ot_protect)
+    data[5] |= 0x04; // Table 6 Bit2: MOS High Temperature Alarm
+  send_can_std(CAN_ID_PROTECT, data, 8);
+#else
+  // 0x359 Pylontech: Bytes 0..1 Protection, Bytes 2..3 Alarm, Byte 4 Module count, Bytes 5..6 'P' 'N', Byte 7 0
   data[0] = can_protect_b0;
   data[1] = can_protect_b1;
   data[2] = can_alarm_b2;
@@ -2422,6 +2457,7 @@ static void send_all_frames(void) {
   data[6] = 'N';
   data[7] = 0;
   send_can_std(CAN_ID_PROTECT, data, 8);
+#endif
 
   // 0x35C: Request / Enable flags
   // Bit 7 (0x80) = Charge enable: active only if data valid, not inhibited, CCL > 0
@@ -2446,8 +2482,34 @@ static void send_all_frames(void) {
   data[0] = req_flags;
   send_can_std(CAN_ID_FLAGS, data, 2);
 
+#if CAN_PROTOCOL_DEYE_V33
+  memset(data, 0, 8);
+  data[0] = 'D';
+  data[1] = 'E';
+  data[2] = 'Y';
+  data[3] = 'E';
+  data[4] = bms_pack_count;
+  data[5] = 0;
+  put_u16le(&data[6], (uint16_t)bms_pack_count * 1000U); // 100.0 Ah per pack in 0.1 Ah
+  send_can_std(CAN_ID_BRAND, data, 8);
+
+  memset(data, 0, 8);
+  uint16_t cell_max = (bms_data_valid && bank_max_cell_mv != 0) ? bank_max_cell_mv : 0;
+  uint16_t cell_min = (bms_data_valid && bank_min_cell_mv != 0xFFFF) ? bank_min_cell_mv : 0;
+  put_u16le(&data[0], cell_max);
+  put_u16le(&data[2], cell_min);
+  put_u16le(&data[4], (uint16_t)round_to_i16(bank_temp_max * 10.0f));
+  put_u16le(&data[6], (uint16_t)round_to_i16(bank_temp_min * 10.0f));
+  send_can_std(CAN_ID_CELL_EXTREMES, data, 8);
+
+  memset(data, 0, 8);
+  put_u16le(&data[0], charge_current_limit);
+  put_u16le(&data[2], discharge_current_limit);
+  send_can_std(CAN_ID_GRID_LIMITS, data, 4);
+#else
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
   send_can_std(CAN_ID_BRAND, brand, 8);
+#endif
 
   can_led_off_ms = millis() + 100; // keep the LED on briefly after TX
 }
@@ -2703,6 +2765,8 @@ int main(void) {
       }
       bank_max_cell_mv = 0;
       bank_min_cell_mv = 0xFFFF;
+      bank_temp_max = BATTERY_TEMP_DEFAULT;
+      bank_temp_min = BATTERY_TEMP_DEFAULT;
       bank_pack_v_delta_10mv = 0;
       can_protect_b0 = 0;
       can_protect_b1 = 0;
