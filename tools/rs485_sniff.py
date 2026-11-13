@@ -19,6 +19,7 @@ The log file is written only on a clean exit (Ctrl-C, SIGTERM, or
 """
 
 import argparse
+import os
 import signal
 import sys
 import time
