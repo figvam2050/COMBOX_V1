@@ -2326,11 +2326,11 @@ let logAnalysisData = null;
 
 // User-configurable or auto-detected COM-Box DIP switch states (stored in localStorage)
 let comboxDips = {
-  dip1: (localStorage.getItem('combox_dip1') !== null) ? (localStorage.getItem('combox_dip1') === 'true') : true,  // DIP1: ON (51.8V Eco, default in recent setups)
-  dip2: (localStorage.getItem('combox_dip2') !== null) ? (localStorage.getItem('combox_dip2') === 'true') : false, // DIP2: OFF (Mirror, standard)
-  dip3: (localStorage.getItem('combox_dip3') !== null) ? (localStorage.getItem('combox_dip3') === 'true') : false, // DIP3: OFF (Smart Fast Poll 800ms)
-  dip4: (localStorage.getItem('combox_dip4') !== null) ? (localStorage.getItem('combox_dip4') === 'true') : true,  // DIP4: ON (15A/pack eco current limit)
-  dip5: (localStorage.getItem('combox_dip5') !== null) ? (localStorage.getItem('combox_dip5') === 'true') : false  // DIP5: OFF (Auto-balance mode)
+  dip1: (localStorage.getItem('combox_dip1') !== null) ? (localStorage.getItem('combox_dip1') === 'true') : false, // DIP1: OFF = 54.0V Vision (ON = 51.0V Float)
+  dip2: (localStorage.getItem('combox_dip2') !== null) ? (localStorage.getItem('combox_dip2') === 'true') : false, // DIP2: OFF (ON = 53.2V Victron, пріоритет над DIP1)
+  dip3: (localStorage.getItem('combox_dip3') !== null) ? (localStorage.getItem('combox_dip3') === 'true') : false, // DIP3: OFF = Пасивне дзеркало PCS-485 (ON = Міст)
+  dip4: (localStorage.getItem('combox_dip4') !== null) ? (localStorage.getItem('combox_dip4') === 'true') : true,  // DIP4: ON = 15A/пак (OFF = 50A/пак)
+  dip5: (localStorage.getItem('combox_dip5') !== null) ? (localStorage.getItem('combox_dip5') === 'true') : false  // DIP5: OFF = Штатний режим (ON = Гойдалка балансування)
 };
 
 function saveDip(key, val) {
@@ -2408,7 +2408,7 @@ const ALARM_HELP_DB = {
     level: "warn",
     levelName: "Попередження",
     desc: "Поріг Warn для однієї комірки — 3.600 V (3600 mV), Release — 3.400 V. Protect — 3.650 V. Найчастіше виникає наприкінці швидкого заряду через розбаланс.",
-    action: "Знизьте напругу Bulk на інверторі до 52.5 V або увімкніть балансування (DIP 4 на COM-Box). Скидається автоматично після 3.400 V."
+    action: "Знизьте напругу Bulk на інверторі до 53.2 В / 51.0 В або увімкніть імпульсне балансування (DIP 5 на COM-Box). Скидається автоматично після 3.400 V."
   },
   "W:Pack UV": {
     cat: "Warning (0026)",
@@ -2650,7 +2650,7 @@ const ALARM_HELP_DB = {
     level: "bad",
     levelName: "Критичний розбаланс",
     desc: "Різниця між найвищою та найнижчою коміркою всередині батареї перевищила аварійний поріг (> 300 mV).",
-    action: "Необхідно провести вирівнювання: увімкніть балансування в COM-Box (DIP 4) та встановіть невеликий струм буферного заряду."
+    action: "Необхідно провести вирівнювання: увімкніть імпульсне балансування в COM-Box (DIP 5) та встановіть щадний струм заряду (DIP 4 = 15 А/блок)."
   }
 };
 
@@ -3413,37 +3413,68 @@ function closeReport() {
 }
 
 /* --- DIP SWITCHES & COM-BOX CONFIGURATION MODAL --- */
-function updateDipBanner() {
+function getComboxProfileSummary() {
   const packs = (latestData && latestData.packs) ? latestData.packs : {};
   const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
   const packCount = onlineAddrs.length || 1;
 
-  const dip1 = comboxDips.dip1; // ON = 51.8V 90% Eco, OFF = 54.0V 100%
-  const dip2 = comboxDips.dip2; // ON = Bridge, OFF = Mirror
-  const dip3 = comboxDips.dip3; // ON = 16-addr full, OFF = Plug & Play 800ms
+  const dip1 = comboxDips.dip1; // ON = 51.0V Float (if DIP2 OFF), OFF = 54.0V Vision
+  const dip2 = comboxDips.dip2; // ON = 53.2V Victron (priority over DIP1)
+  const dip3 = comboxDips.dip3; // ON = PCS-485 Bridge, OFF = PCS-485 Mirror (Plug & Play always ON)
   const dip4 = comboxDips.dip4; // ON = 15A/pack, OFF = 50A/pack
-  const dip5 = comboxDips.dip5; // ON = Forced Float Hold 52.5V, OFF = Auto
+  const dip5 = comboxDips.dip5; // ON = Pulse Balance Swing, OFF = Normal
 
-  const cvl = dip5 ? '52.5 В (Float Hold)' : (dip1 ? '51.8 В (90% Eco)' : '54.0 В (100% Standart)');
+  let baseCvlShort, baseCvlLabel, swingShort, swingLabel;
+  if (dip2) {
+    baseCvlShort = '53.2 В';
+    baseCvlLabel = '53.2 В (Victron 15S, пріоритет DIP2)';
+    swingShort = '53.2↔52.2 В';
+    swingLabel = '53.2 ↔ 52.2 В (імпульс 51.5 В)';
+  } else if (dip1) {
+    baseCvlShort = '51.0 В';
+    baseCvlLabel = '51.0 В (Float / Буфер)';
+    swingShort = '52.2↔51.0 В';
+    swingLabel = '52.2 ↔ 51.0 В (гойдалка)';
+  } else {
+    baseCvlShort = '54.0 В';
+    baseCvlLabel = '54.0 В (Vision 100%)';
+    swingShort = '54.0↔52.2 В';
+    swingLabel = '54.0 ↔ 52.2 В (імпульс 51.5 В)';
+  }
+
   const cclPerPack = dip4 ? 15 : 50;
-  const cclBank = packCount * cclPerPack;
-  const finishCcl = packCount * 2.5;
-  const dclBank = packCount * 100;
+  return {
+    packCount, dip1, dip2, dip3, dip4, dip5,
+    baseCvlShort, baseCvlLabel,
+    cvl: dip5 ? swingLabel : baseCvlLabel,
+    cvlShort: dip5 ? swingShort : baseCvlShort,
+    swingShort, swingLabel,
+    cclPerPack,
+    cclBank: packCount * cclPerPack,
+    finishCcl: packCount * 2.5,
+    dclBank: packCount * 100
+  };
+}
 
+function updateDipBanner() {
+  const s = getComboxProfileSummary();
+  const { packCount, dip1, dip2, dip3, dip4, dip5, cvl, cclPerPack, cclBank, finishCcl, dclBank } = s;
+
+  const dip1Text = dip2 ? (dip1 ? 'ON (перекрито DIP2)' : 'OFF (перекрито DIP2)') : (dip1 ? '51.0V (Float)' : '54.0V (Vision)');
   const bEl = document.getElementById('dip_banner_badges');
   if (bEl) {
     bEl.innerHTML = `
-      <span class="pill ${dip1 ? 'ok' : 'acc'}" style="font-size:11px">DIP1: ${dip1 ? '51.8V (90% Eco)' : '54.0V (100%)'}</span>
-      <span class="pill ${dip2 ? 'bad' : 'ok'}" style="font-size:11px">DIP2: ${dip2 ? 'Міст (Lab)' : 'Дзеркало'}</span>
-      <span class="pill ${dip3 ? 'warn' : 'ok'}" style="font-size:11px">DIP3: ${dip3 ? '16 адрес' : 'Fast Poll 800ms'}</span>
+      <span class="pill ${dip2 ? 'dim' : (dip1 ? 'ok' : 'acc')}" style="font-size:11px">DIP1: ${dip1Text}</span>
+      <span class="pill ${dip2 ? 'acc' : 'ok'}" style="font-size:11px">DIP2: ${dip2 ? '53.2V (Victron, пріоритет)' : 'За DIP1'}</span>
+      <span class="pill ${dip3 ? 'bad' : 'ok'}" style="font-size:11px">DIP3: ${dip3 ? 'Міст PCS-485 (Лаб)' : 'Дзеркало PCS-485'}</span>
       <span class="pill ${dip4 ? 'ok' : 'acc'}" style="font-size:11px">DIP4: ${cclPerPack}A/АКБ (Банк: ${cclBank}A)</span>
-      <span class="pill ${dip5 ? 'warn' : 'ok'}" style="font-size:11px">DIP5: ${dip5 ? 'Примусове 52.5V' : 'Авто-баланс'}</span>
+      <span class="pill ${dip5 ? 'warn' : 'ok'}" style="font-size:11px">DIP5: ${dip5 ? ('Гойдалка ' + s.swingShort) : 'Штатно (без гойдалки)'}</span>
     `;
   }
 
   const dEl = document.getElementById('dip_banner_desc');
   if (dEl) {
-    dEl.innerHTML = `Розрахункові уставки CAN (для ${packCount} підключених АКБ): ` +
+    dEl.innerHTML = `Розрахункові уставки CAN (для ${packCount} підключених АКБ · Plug & Play опитування активне завжди): ` +
       `<b>Напруга (CVL): ${cvl}</b> · ` +
       `<b>Струм заряду (CCL): ${cclBank} А</b> (дозаряд: <b>${finishCcl.toFixed(1)} А</b> → Standby: <b>0 А</b>) · ` +
       `<b>Струм розряду (DCL): ${dclBank} А</b>`;
@@ -3460,21 +3491,12 @@ function closeDipModal() {
 }
 
 function renderDipModalContent() {
-  const packs = (latestData && latestData.packs) ? latestData.packs : {};
-  const onlineAddrs = Object.keys(packs).filter(a => packs[a].online);
-  const packCount = onlineAddrs.length || 1;
+  const s = getComboxProfileSummary();
+  const { packCount, dip1, dip2, dip3, dip4, dip5, cvlShort, swingLabel, cclPerPack, cclBank, finishCcl, dclBank } = s;
 
-  const dip1 = comboxDips.dip1;
-  const dip2 = comboxDips.dip2;
-  const dip3 = comboxDips.dip3;
-  const dip4 = comboxDips.dip4;
-  const dip5 = comboxDips.dip5;
-
-  const cvl = dip5 ? '52.5 В' : (dip1 ? '51.8 В' : '54.0 В');
-  const cclPerPack = dip4 ? 15 : 50;
-  const cclBank = packCount * cclPerPack;
-  const finishCcl = packCount * 2.5;
-  const dclBank = packCount * 100;
+  const dip1Effect = dip2
+    ? `<span class="pill warn">Перекрито DIP 2 → 53.2 В</span>`
+    : `<span class="pill ${dip1 ? 'ok' : 'acc'}">${dip1 ? '51.0 В (Float / Буфер)' : '54.0 В (Vision 100%)'}</span>`;
 
   let html = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
@@ -3488,7 +3510,7 @@ function renderDipModalContent() {
     </div>
 
     <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:12px;line-height:1.5">
-      ℹ️ Перемикачі DIP розташовані на торці пристрою COM-Box. Важіль <b>ВГОРУ = ON</b>, <b>ВНИЗ = OFF</b>. Виберіть положення нижче, щоб система показала активні алгоритми, цільову напругу та струми для інвертора Deye.
+      ℹ️ Перемикачі DIP розташовані на торці пристрою COM-Box. Важіль <b>ВГОРУ = ON</b>, <b>ВНИЗ = OFF</b>. <b>DIP 2 має пріоритет над DIP 1</b>. Швидкий автопошук <b>Smart Plug &amp; Play</b> активний завжди.
     </div>
 
     <table class="tbl" style="margin-bottom:16px">
@@ -3507,9 +3529,9 @@ function renderDipModalContent() {
             <option value="true" ${dip1?'selected':''}>ON (Вгору)</option>
           </select>
         </td>
-        <td>100% заряд (CVL 54.0 В, 3.60 В/ком)</td>
-        <td><b>90% ощадливий (CVL 51.8 В)</b> + авто-баланс 52.5 В раз на 14 днів</td>
-        <td><span class="pill ${dip1?'ok':'acc'}">${dip1 ? '51.8 В (90% Eco)' : '54.0 В (100% Standart)'}</span></td>
+        <td>54.0 В (Vision 100%, паспорт АКБ)</td>
+        <td><b>51.0 В (Float / Буфер)</b> — якщо DIP 2 = OFF</td>
+        <td>${dip1Effect}</td>
       </tr>
       <tr>
         <td><b>DIP 2 (SW2)</b><br><span style="font-size:11px;color:var(--dim)">PB13 (вага 2)</span></td>
@@ -3519,9 +3541,9 @@ function renderDipModalContent() {
             <option value="true" ${dip2?'selected':''}>ON (Вгору)</option>
           </select>
         </td>
-        <td><b>Пасивне дзеркало (Норма)</b> для моніторингу</td>
-        <td>Прозорий міст інвертор ↔ АКБ (⚠️ Лабораторний)</td>
-        <td><span class="pill ${dip2?'bad':'ok'}">${dip2 ? '⚠️ Міст (Заборонено для роботи)' : 'Пасивне дзеркало'}</span></td>
+        <td>За вибором <b>DIP 1</b> (54.0 В або 51.0 В)</td>
+        <td><b>53.2 В (Victron 15S, пріоритет над DIP 1)</b></td>
+        <td><span class="pill ${dip2?'acc':'ok'}">${dip2 ? '53.2 В (Victron, пріоритет DIP 2)' : 'За DIP 1'}</span></td>
       </tr>
       <tr>
         <td><b>DIP 3 (SW3)</b><br><span style="font-size:11px;color:var(--dim)">PB14 (вага 4)</span></td>
@@ -3531,9 +3553,9 @@ function renderDipModalContent() {
             <option value="true" ${dip3?'selected':''}>ON (Вгору)</option>
           </select>
         </td>
-        <td><b>Smart Plug & Play</b> (800 мс на 2 АКБ, швидкий старт)</td>
-        <td>Повне сканування 16 адрес (6.4 с, сервісний скан)</td>
-        <td><span class="pill ${dip3?'warn':'ok'}">${dip3 ? 'Повне сканування 16 адрес' : 'Plug & Play (800 мс)'}</span></td>
+        <td><b>Пасивне дзеркало PCS-485 (Норма)</b> · Plug &amp; Play активний завжди</td>
+        <td>Прозорий міст інвертор ↔ АКБ (⚠️ Лабораторний)</td>
+        <td><span class="pill ${dip3?'bad':'ok'}">${dip3 ? '⚠️ Міст PCS-485 (Лаб)' : 'Пасивне дзеркало PCS-485'}</span></td>
       </tr>
       <tr>
         <td><b>DIP 4 (SW4)</b><br><span style="font-size:11px;color:var(--dim)">PB15 (вага 8)</span></td>
@@ -3555,9 +3577,9 @@ function renderDipModalContent() {
             <option value="true" ${dip5?'selected':''}>ON (Вгору)</option>
           </select>
         </td>
-        <td><b>Штатний авто-режим</b> (нічний баланс за потреби)</td>
-        <td><b>Примусове вирівнювання (Float Hold 52.5 В)</b></td>
-        <td><span class="pill ${dip5?'warn':'ok'}">${dip5 ? '⚡ ПРИМУСОВЕ БАЛАНСУВАННЯ 52.5V' : 'Штатне авто-керування'}</span></td>
+        <td><b>Штатна робота (без гойдалки)</b></td>
+        <td><b>Імпульсне балансування-гойдалка</b> (${swingLabel})</td>
+        <td><span class="pill ${dip5?'warn':'ok'}">${dip5 ? ('⚡ Гойдалка ' + swingLabel) : 'Штатна робота (без гойдалки)'}</span></td>
       </tr>
     </table>
 
@@ -3566,7 +3588,7 @@ function renderDipModalContent() {
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:10px;font-size:12px">
         <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
           <span style="color:var(--dim)">Напруга заряду (CVL):</span><br>
-          <b style="font-size:16px;color:var(--ok)">${cvl}</b>
+          <b style="font-size:16px;color:var(--ok)">${cvlShort}</b>
         </div>
         <div style="background:#0d1117;padding:8px 12px;border-radius:6px;border:1px solid #30363d">
           <span style="color:var(--dim)">Макс. струм заряду (CCL):</span><br>

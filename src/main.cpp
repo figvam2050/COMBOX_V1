@@ -114,10 +114,13 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define CHARGE_CURRENT_LIMIT_DEFAULT 0
 #define DISCHARGE_CURRENT_LIMIT_DEFAULT 0
 
-#define CHARGE_VOLTAGE_LIMIT_STATIC 532     // 53.2 V (3.546 V/cell * 15): full charge profile (DIP1 OFF, Victron/Pylontech 15S)
-#define CHARGE_VOLTAGE_LIMIT_DIP90 518      // 51.8 V (3.453 V/cell * 15): 90% longevity profile (DIP1 ON)
-#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 522 // 52.2 V (3.480 V/cell * 15): hold voltage during balancing (below BMS Enter Float 52.50 V)
-#define CHARGE_VOLTAGE_LIMIT_FLOAT 510      // 51.0 V (3.400 V/cell * 15): resting float after full charge / Standby (below BMS Quit Float 51.75 V)
+#define CHARGE_VOLTAGE_LIMIT_VISION 540       // 54.0 V (3.600 V/cell * 15): Vision V-LFP48100 datasheet profile (DIP1 OFF, DIP2 OFF)
+#define CHARGE_VOLTAGE_LIMIT_VICTRON 532      // 53.2 V (3.546 V/cell * 15): Victron/Pylontech 15S profile (DIP2 ON, overrides DIP1)
+#define CHARGE_VOLTAGE_LIMIT_FLOAT 510        // 51.0 V (3.400 V/cell * 15): float/buffer profile (DIP1 ON, DIP2 OFF)
+#define CHARGE_VOLTAGE_LIMIT_STATIC CHARGE_VOLTAGE_LIMIT_VISION
+#define CHARGE_VOLTAGE_LIMIT_DIP90 CHARGE_VOLTAGE_LIMIT_FLOAT
+#define CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD 522   // 52.2 V (3.480 V/cell * 15): pulse balance anchor point for DIP5
+#define CHARGE_VOLTAGE_LIMIT_WAKEUP_NUDGE 515 // 51.5 V (below BMS Quit Float 51.75 V): nudge to wake BMS from Standby
 
 // Per-pack charge current limit, selected by DIP4 (SW4, PB15):
 // OFF (default) = 50 A (battery manufacturer maximum), ON = 15 A (0.15C gentle current limit mode).
@@ -126,36 +129,43 @@ static uint16_t modbus_crc16(const volatile uint8_t *data, uint16_t len) {
 #define DISCHARGE_CURRENT_LIMIT_PER_PACK_X10 1000
 #define DISCHARGE_VOLTAGE_LIMIT_X10 450
 
-// Max-cell charge taper: nominal per-pack limit (50 A default / 15 A DIP4) to 0 A between 3.450 V and 3.600 V.
-// Re-enabling below 3.550 V prevents charge-limit oscillation at the cutoff.
+// Max-cell charge taper thresholds per profile:
+// 54.0 V Vision (DIP1=OFF, DIP2=OFF): taper 3.450..3.600 V, re-enable < 3.550 V
+// 53.2 V Victron (DIP2=ON): taper 3.440..3.560 V, re-enable < 3.500 V
+// 51.0 V Float (DIP1=ON, DIP2=OFF): taper 3.380..3.420 V, re-enable < 3.380 V
 #define CELL_TAPER_START_MV 3450
 #define CELL_CHARGE_STOP_MV 3600
 #define CELL_CHARGE_REENABLE_MV 3550
-#define CELL_TAPER_START_MV_DIP90 3400
-#define CELL_CHARGE_STOP_MV_DIP90 3455
-#define CELL_CHARGE_REENABLE_MV_DIP90 3405
+#define CELL_TAPER_START_MV_VICTRON 3440
+#define CELL_CHARGE_STOP_MV_VICTRON 3560
+#define CELL_CHARGE_REENABLE_MV_VICTRON 3500
+#define CELL_TAPER_START_MV_DIP90 3380
+#define CELL_CHARGE_STOP_MV_DIP90 3420
+#define CELL_CHARGE_REENABLE_MV_DIP90 3380
 
 // BMS hardware Cell OV Release hysteresis (matches BMS_TOOLS 3.400V + 20mV margin):
 // When a pack trips hardware OV (0x0002 or >=3650mV), BMS hardware charge FET stays
 // locked until the highest cell in that pack drops <= 3420 mV.
 #define CELL_OV_RELEASE_BMS_MV 3420
-// DIP1 OFF (default) = standard 53.2 V mode (100% profile, full thresholds);
-// DIP1 ON = 51.8 V option (90% profile, economy thresholds, adaptive night auto-balance
-// Float Hold 52.2 V max once/14 days, trickle cap from 3400 mV, LED1 solid indicator).
-// Bit moved from SW4 on 17.10.2026 (convenient end switch, silkscreen "SW1"
-// near the PCS-485/CAN jacks); stock SW1 protocol meaning (PYLON) unused.
-#define DIP_PROFILE_CODE_90 1
-// DIP4 (SW4, weight 8, PB15) selects the per-pack charge current limit:
-// OFF (default) = 50 A, ON = 15 A (0.15C current limit mode). Orthogonal to SW1 voltage profile.
+// DIP1 (SW1, weight 1, PB12): 51.0 V float/buffer profile when DIP2 is OFF (LED1 solid).
+#define DIP_PROFILE_CODE_90 0x01
+// DIP2 (SW2, weight 2, PB13): 53.2 V Victron/Pylontech 15S profile (takes priority over DIP1).
+#define DIP2_PROFILE_VICTRON_MASK 0x02
+// DIP3 (SW3, weight 4, PB14): PCS-485 port mode (OFF = Mirror, ON = Pure Bridge).
+// Smart Plug & Play fast polling is always active regardless of DIP3.
+#define DIP3_BRIDGE_MODE 0x04
+// DIP4 (SW4, weight 8, PB15): per-pack charge current limit (OFF = 50 A, ON = 15 A).
 #define DIP_CHARGE_CURRENT_LIMIT_30A 0x08
-// DIP3 (SW3, weight 4, PB14):
-// OFF = Smart Plug & Play autosearch (default, fast polling active packs, 800 ms cycle for 2 packs);
-// ON = Forced full 16-address scan (6.4 s legacy/diagnostic mode).
-#define DIP_FORCE_FULL_SCAN_MASK 0x04
-// DIP5 (SW5, weight 16, PC6): forced balancing mode
-// OFF = normal auto-balance intervals; ON = forced balance session (Float Hold 52.2V,
-// 2.0-5.0A cap, CAN 0x35C Bit 3 Request Full Charge, LED1 1Hz blink).
+// DIP5 (SW5, weight 16, PC6): pulse balancing swing mode ("гойдалка", LED1 1 Hz blink).
 #define DIP_FORCED_BALANCE_MASK 0x10
+
+static inline bool dip_is_victron_profile(uint8_t code) {
+  return (code & DIP2_PROFILE_VICTRON_MASK) != 0;
+}
+
+static inline bool dip_is_float_profile(uint8_t code) {
+  return ((code & DIP_PROFILE_CODE_90) != 0) && !dip_is_victron_profile(code);
+}
 #define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
@@ -306,12 +316,11 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define TEMP_DISCHARGE_MAX_C 60.0f
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
 
-// ===== Balance session engine (17.10.2026, updated 11.11.2026) =====
-// DIP1 OFF (standard): CVL 54.0 V; auto balance windows (BAL_AUTO_ENABLED)
-// open on cell-spread analysis: full thresholds + 2 A per pack cap.
-// DIP1 ON (51.8 V option): 90% profile (51.8 V) with gentle 2 A trickle from 3400 mV;
-// adaptive balance Float Hold (52.5 V) runs at most once per 14 days (90 min cap)
-// only when spread >= 40 mV.
+// ===== Balance session engine (17.10.2026, updated 14.11.2026) =====
+// DIP1 OFF, DIP2 OFF (Vision): CVL 54.0 V; DIP2 ON (Victron priority): CVL 53.2 V.
+// DIP1 ON, DIP2 OFF (Float): CVL 51.0 V with gentle 2 A trickle from 3400 mV;
+// adaptive balance Float Hold (52.2 V) runs at most once per 14 days (90 min cap).
+// DIP5 ON: pulse balancing swing ("гойдалка") around 52.2 V (54.0↔52.2/51.5, 53.2↔52.2/51.5, or 52.2↔51.0).
 #define BAL_AUTO_ENABLED 1 // verdict (A) 18.10.2026: weak cell #7 confirmed
 #define BAL_SPREAD_HIGH_MV 100     // anomaly bucket (>= 100 mV): retry in 24 h
 #define BAL_SPREAD_MED_MV 40       // regular spread bucket (40..100 mV): retry in 72 h
@@ -320,9 +329,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define BAL_INTERVAL_HIGH_MS (24UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_MED_MS (72UL * 3600UL * 1000UL)
 #define BAL_INTERVAL_OK_MS (30UL * 24UL * 3600UL * 1000UL)
-#define BAL_INTERVAL_DIP1_MS (14UL * 24UL * 3600UL * 1000UL) // DIP1 90% mode: balance sessions at most once every 14 days
+#define BAL_INTERVAL_DIP1_MS (14UL * 24UL * 3600UL * 1000UL) // DIP1 51.0V Float mode: balance sessions at most once every 14 days
 #define BAL_COOLDOWN_TRY_MS (12UL * 3600UL * 1000UL)
-#define BAL_COOLDOWN_DIP1_MS (7UL * 24UL * 3600UL * 1000UL)   // DIP1 mode: 7 days cooldown after unreached spread
+#define BAL_COOLDOWN_DIP1_MS (7UL * 24UL * 3600UL * 1000UL)   // DIP1 Float mode: 7 days cooldown after unreached spread
 #define BAL_COOLDOWN_OUTAGE_MS (1UL * 3600UL * 1000UL)
 #define BAL_MIN_SOC_START 85
 #define BAL_TRICKLE_CELL_MV 3400   // ~90% -> 2 A per pack phase
@@ -339,7 +348,7 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define CELL_EMERGENCY_OV_MV 3620  // Hard emergency cutoff during balance session
 #define BAL_NO_PROGRESS_MS (90UL * 60UL * 1000UL)
 #define BAL_SESSION_MAX_MS (8UL * 3600UL * 1000UL)
-#define BAL_SESSION_DIP1_MAX_MS (90UL * 60UL * 1000UL) // DIP1 mode: strict 90 min max balance window before returning to 51.8V
+#define BAL_SESSION_DIP1_MAX_MS (90UL * 60UL * 1000UL) // DIP1 Float mode: strict 90 min max balance window before returning to 51.0V
 #define BAL_START_I_MAX_A 1.0f     // start only when not discharging
 #define BAL_OUTAGE_I_MIN_A 1.5f    // sustained discharge -> pause/abort session
 #define BAL_OUTAGE_CONFIRM_MS 60000UL // 60 s sustained discharge before pausing session
@@ -410,9 +419,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 //   LED6 (PB1)  = BMS RS485 exchange — blinks on TX/RX with battery;
 //   LED4 (PC5)  = CAN to inverter — blinks on TX bursts;
 //   LED3 (PC4)  = PCS-485 port (UART4, Q23): blinks on TX/RX — mirror mode
-//                 (DIP2 OFF) or inverter bridge traffic (DIP2 ON);
+//                 (DIP3 OFF) or inverter bridge traffic (DIP3 ON);
 //   LED1 (PC13) = internal status/diagnostic LED: fault blink codes (2..5),
-//                 1 Hz blink on balance session, solid on DIP1 90% mode;
+//                 1 Hz blink on balance session / DIP5 swing, solid on DIP1 Float 51.0 V mode;
 //   LED2 (VDDA) = power — wired to rail, not MCU-controlled.
 // PC5 is NOT an RS485 direction pin (PC5=DE disproven, RS485 has
 // auto-direction transceivers — ORIGINAL_FIRMWARE.md §14.3).
@@ -544,6 +553,8 @@ static bool bal_session_active = false;
 static bool bal_session_forced = false;
 static bool bal_trickle = false;
 static bool bal_float_hold = false;
+static bool bal_swing_discharge_phase = false;
+static uint32_t bal_swing_phase_start_ms = 0;
 static uint16_t sweep_balance_mask = 0;
 static bool bal_manual_prev = false;
 static bool bal_forced_prev = false;
@@ -561,8 +572,8 @@ static uint16_t bal_hist_mv[BAL_HIST_HOURS];
 static uint8_t bal_hist_n = 0;
 static uint32_t bal_last_hist_ms = 0;
 
-// Fast polling state (DIP3 / SW3)
-static bool fast_poll_enabled = true; // default: Smart Plug & Play active (DIP3 OFF)
+// Fast polling state (Smart Plug & Play always active)
+static bool fast_poll_enabled = true;
 static uint16_t fast_poll_mask = 0;
 static uint32_t last_bg_probe_ms = 0;
 static uint8_t bg_probe_candidate = 0;
@@ -672,22 +683,21 @@ static void rs485_flush_rx(void) {
   rs485_clear_errors();
 }
 
-// ===== PCS-485 port (UART4, Q23) — two modes selected by DIP2 (18.10.2026) =====
-// DIP2 OFF (default): MIRROR — the box works as always (own polls, CAN) and a
+// ===== PCS-485 port (UART4, Q23) — two modes selected by DIP3 (SW3, PB14) =====
+// DIP3 OFF (default): MIRROR — the box works as always (own polls, CAN) and a
 //   byte-level copy of its BMS exchange (both directions) shifts out of UART4,
 //   so a USB-UART adapter on the PCS-485 jack hears everything the box says to
 //   the battery and everything the battery answers, without tapping the cable.
-// DIP2 ON: PURE BRIDGE — the box sends NO commands of its own to the battery;
+// DIP3 ON: PURE BRIDGE — the box sends NO commands of its own to the battery;
 //   inverter requests arriving on UART4 are forwarded to the BMS line and the
 //   answer is relayed straight back. The same traffic is pushed through
 //   bms_parse_response() so CAN keeps broadcasting (listen/observe) and the
 //   balance engine keeps its aggregates. Safeguards: only fixed 8-byte
 //   FC03/FC04 read requests with a good CRC are forwarded (writes and noise
 //   are dropped, the inverter just times out).
-//   PRODUCTION KEEPS DIP2 OFF — 13.10 analysis: the inverter would read raw
+//   PRODUCTION KEEPS DIP3 OFF — 13.10 analysis: the inverter would read raw
 //   packs over RS485, bypassing our CCL stop-tap aggregation; this mode is
 //   research/diagnostics (DEYE_CAN_RS485_BASE.md §Q23, TODO §5.1).
-#define DIP2_BRIDGE_MODE 0x02
 #define PCS_GAP_MS 5           // ~3.5 idle chars at 9600 (3.65 ms): Modbus frame gap
 #define PCS_RESP_FIRST_MS 300  // BMS must start answering within this
 #define PCS_RESP_MAX_MS 1000   // whole bridged response hard cap
@@ -734,7 +744,7 @@ static void pcs_led_activity(void) {
   pcs_led_off_ms = millis() + 100;
 }
 
-// --- mirror ring buffer (DIP2 OFF); single-threaded polling, no volatile ---
+// --- mirror ring buffer (DIP3 OFF); single-threaded polling, no volatile ---
 static uint8_t pcs_mirror_q[256];
 static uint16_t pcs_mirror_head = 0;
 static uint16_t pcs_mirror_tail = 0;
@@ -760,7 +770,7 @@ static void pcs_mirror_pump(void) {
   }
 }
 
-// --- bridge state (DIP2 ON) ---
+// --- bridge state (DIP3 ON) ---
 enum { BR_IDLE = 0, BR_WAIT_RESP, BR_FWD_RESP };
 static uint8_t br_state = BR_IDLE;
 static uint8_t inv_frame[256]; // one complete inverter request
@@ -845,7 +855,7 @@ static bool pcs_bridge_finish(void) {
 }
 
 // Bridge step: runs once per main-loop pass. Returns true when a bridged
-// transaction just finished (ignored by the caller — while DIP2 is ON the
+// transaction just finished (ignored by the caller — while DIP3 is ON the
 // box sends no polls of its own).
 static bool pcs_bridge_step(uint32_t now) {
   switch (br_state) {
@@ -914,10 +924,10 @@ static bool pcs_bridge_step(uint32_t now) {
   }
 }
 
-// DIP2 mode switch; deferred while a bridge transaction is in flight
+// DIP3 mode switch; deferred while a bridge transaction is in flight
 // (retried from the 250 ms DIP poll until the bridge goes idle).
 static void pcs_mode_apply(uint8_t code) {
-  bool bridge = (code & DIP2_BRIDGE_MODE) != 0;
+  bool bridge = (code & DIP3_BRIDGE_MODE) != 0;
   if (bridge == pcs_bridge_mode)
     return;
   if (br_state != BR_IDLE || inv_frame_n != 0)
@@ -964,7 +974,7 @@ static void bms_send_wakeup_query(uint8_t addr_index) {
   }
 }
 
-// Non-blocking RS-485 BMS polling FSM step (mirror mode only; DIP2 bridge mode handles own)
+// Non-blocking RS-485 BMS polling FSM step (mirror mode only; DIP3 bridge mode handles own)
 static void bms_poll_step(uint32_t now) {
   if (pcs_bridge_mode) {
     if (bms_fsm_state != BMS_FSM_IDLE) {
@@ -976,7 +986,7 @@ static void bms_poll_step(uint32_t now) {
 
   switch (bms_fsm_state) {
   case BMS_FSM_BOOT_SEARCH_SEND: {
-    // If DIP3 is ON (force full scan), skip fast boot discovery
+    // Fast Plug & Play boot discovery (enabled unless fast_poll_enabled is explicitly false)
     if (!fast_poll_enabled) {
       bms_fsm_state = BMS_FSM_IDLE;
       break;
@@ -1393,8 +1403,11 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_protect & charge_protect_mask)
     pack_charge_ok = false;
   // 0x1000 is Standby / Full Latch: treated as charge inhibit when cell is near full
-  // (>= 3520 mV in 54V mode or >= 3440 mV in DIP1 90% mode)
-  uint16_t standby_cell_thresh_mv = (dip_applied_code & DIP_PROFILE_CODE_90) ? 3440 : 3520;
+  // (>= 3520 mV in 54.0V mode, >= 3480 mV in 53.2V Victron mode, or >= 3380 mV in 51.0V Float mode)
+  uint16_t standby_cell_thresh_mv =
+      dip_is_float_profile(dip_applied_code)
+          ? 3380
+          : (dip_is_victron_profile(dip_applied_code) ? 3480 : 3520);
   if ((reg_protect & 0x1000) && pack_max_cell_mv >= standby_cell_thresh_mv)
     pack_charge_ok = false;
   if (pack_ov_protect_latched[pack_idx])
@@ -1509,8 +1522,10 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   if (agg_max_cell_mv >= stop_mv) {
     charge_cell_ov_inhibit = true;
   } else if (charge_cell_ov_inhibit) {
-    // Release on passive voltage drop below reenable threshold OR proactively on discharge current (I > +2.0 A) with cell < 3550 mV
-    bool discharge_release = bms_is_discharging(2.0f) && (agg_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV);
+    // Release on passive voltage drop below reenable threshold OR on significant discharge current:
+    // DIP5=OFF uses 10.0 A so 1-3 A inverter hunting never toggles Charge <-> Discharge; DIP5=ON uses 2.0 A.
+    float ov_release_a = (dip_applied_code & DIP_FORCED_BALANCE_MASK) ? 2.0f : 10.0f;
+    bool discharge_release = bms_is_discharging(ov_release_a) && (agg_max_cell_mv < CELL_PHYSICAL_OV_WARN_CONFIRM_MV);
     if (agg_max_cell_mv < reenable_mv || discharge_release) {
       charge_cell_ov_inhibit = false;
     }
@@ -1661,11 +1676,10 @@ static uint16_t calculate_discharge_limit(uint8_t pack_count) {
 }
 
 // ===== Balance session engine (17.10.2026, updated 11.11.2026) =====
-// DIP1 OFF (standard 54.0 V): auto sessions (BAL_AUTO_ENABLED) driven by
-// cell-spread analysis open balance windows (CVL stays 54 V; thresholds stay
-// full; current capped at 2 A per pack once min cell >= 3400 mV).
-// DIP1 ON (51.8 V option): 90% profile (51.8 V) with 2 A trickle from 3400 mV;
-// adaptive Float Hold (52.5 V) runs at most once per 14 days (90 min cap).
+// DIP1 OFF, DIP2 OFF (Vision 54.0 V) / DIP2 ON (Victron 53.2 V): auto sessions
+// open on cell-spread analysis: full thresholds + 2 A per pack cap.
+// DIP1 ON, DIP2 OFF (Float 51.0 V): 2 A trickle from 3400 mV;
+// adaptive Float Hold (52.2 V) runs at most once per 14 days (90 min cap).
 // Sessions exit on spread convergence (<= 40 mV), BMS loss,
 // sustained discharge (grid outage > 60 s -> Smart Pause up to 30 min), no progress or timeout.
 
@@ -1709,7 +1723,7 @@ static bool balance_trend_high(void) {
 }
 
 static void balance_update(uint8_t packs) {
-  bool manual = (dip_applied_code & DIP_PROFILE_CODE_90) != 0;
+  bool manual = dip_is_float_profile(dip_applied_code);
   bool forced = (dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0;
   uint32_t now = millis();
   bool have_cells = (agg_max_cell_mv != 0) && (agg_min_cell_mv != 0xFFFF) &&
@@ -1726,16 +1740,15 @@ static void balance_update(uint8_t packs) {
     bal_last_success_ms = now - BAL_INTERVAL_OK_MS;
   }
 
-  // DIP5 Forced Balancing (PC6 / SW5):
-  // When DIP5 is ON, immediately engage forced balance session bypassing
-  // all auto timers, intervals, and cooldowns.
-  // Immediately hold Float voltage at 52.2 V (3.48 V/cell), clamp current to 2.0..5.0 A/pack,
-  // request full charge via CAN 0x35C bit 3.
+  // DIP5 Forced Pulse Balancing Swing (PC6 / SW5):
+  // When DIP5 is ON, engage forced pulse balancing bypassing auto timers/cooldowns.
   if (forced) {
     if (!bal_forced_prev) {
       bal_forced_prev = true;
       bal_session_forced = true;
       bal_session_start_ms = now;
+      bal_swing_discharge_phase = false;
+      bal_swing_phase_start_ms = now;
       bal_exit_streak = 0;
       bal_outage_start_ms = 0;
       bal_best_spread_mv = 0xFFFF;
@@ -1748,12 +1761,13 @@ static void balance_update(uint8_t packs) {
   } else if (!forced && bal_forced_prev) {
     bal_forced_prev = false;
     bal_session_forced = false;
+    bal_swing_discharge_phase = false;
+    bal_swing_phase_start_ms = 0;
     balance_session_end(false, now + BAL_COOLDOWN_TRY_MS);
   }
 
-  // DIP1 transitions: switching the 51.8 V option ON aborts an active
-  // auto session (unless forced by DIP5); leaving the option returns to standard 53.2 V behind a cooldown
-  // so an auto session cannot re-trigger instantly.
+  // DIP1 float profile transitions: switching 51.0 V ON aborts an active
+  // auto session (unless forced by DIP5); leaving it returns behind a cooldown.
   if (!forced) {
     if (manual && !bal_manual_prev) {
       bal_session_active = false;
@@ -1814,8 +1828,8 @@ static void balance_update(uint8_t packs) {
       return;
     }
 
-    // Sustained discharge (>= 60 s real time) = grid outage or heavy load -> Smart Pause.
-    if (bms_current > BAL_OUTAGE_I_MIN_A) {
+    // Sustained discharge (>= 60 s real time) = grid outage or heavy load -> Smart Pause (auto mode only).
+    if (!forced && bms_current > BAL_OUTAGE_I_MIN_A) {
       if (bal_outage_start_ms == 0) {
         bal_outage_start_ms = now;
       } else if ((now - bal_outage_start_ms) >= BAL_OUTAGE_CONFIRM_MS) {
@@ -1893,7 +1907,7 @@ static void balance_update(uint8_t packs) {
     }
 
   // In-session duration limit:
-  // In DIP1 90% mode: strict 90 min window prevents eternal 52.2V float if a weak pack cannot converge to 40mV.
+  // In DIP1 Float mode (51.0 V): strict 90 min window prevents eternal 52.2V float if a weak pack cannot converge to 40mV.
   uint32_t session_max_ms = manual ? BAL_SESSION_DIP1_MAX_MS : BAL_SESSION_MAX_MS;
   uint32_t cooldown_fail_ms = manual ? (now + BAL_COOLDOWN_DIP1_MS) : (now + BAL_COOLDOWN_TRY_MS);
   if ((now - bal_session_start_ms) >= session_max_ms) {
@@ -1939,7 +1953,7 @@ static void balance_update(uint8_t packs) {
     return;
 
   // Severity: spread bucket + 12 h trend.
-  // In DIP1 90% mode: balance sessions allowed at most once every 14 days so 51.8V is strictly respected!
+  // In DIP1 Float mode: balance sessions allowed at most once every 14 days so 51.0V is strictly respected!
   uint32_t interval;
   if (manual)
     interval = BAL_INTERVAL_DIP1_MS;
@@ -1985,9 +1999,9 @@ static void balance_update(uint8_t packs) {
 //     3 blinks = Temperature inhibit (cold/hot)
 //     4 blinks = Severe cell (>400 mV) or inter-pack (>3.0 V) voltage imbalance
 //     5 blinks = BMS RS-485 communication lost
-// - 1 Hz slow blink = active or paused balance session (auto or DIP5 forced)
-// - Solid ON = 51.8 V option (DIP1 ON)
-// - OFF = standard 54.0 V normal operation.
+// - 1 Hz slow blink = active or paused balance session (auto or DIP5 pulse swing)
+// - Solid ON = 51.0 V Float option (DIP1 ON when DIP2 OFF)
+// - OFF = 54.0 V (Vision) / 53.2 V (Victron DIP2) normal operation.
 static void balance_led_tick(uint32_t now) {
   static bool on = false;
   static uint32_t last_toggle = 0;
@@ -2041,7 +2055,7 @@ static void balance_led_tick(uint32_t now) {
     }
     return;
   }
-  if (dip_applied_code & DIP_PROFILE_CODE_90) {
+  if (dip_is_float_profile(dip_applied_code)) {
     gpio_bit_set(LED1_DEBUG_PORT, LED1_DEBUG_PIN);
     on = true;
     return;
@@ -2206,14 +2220,6 @@ static void bms_aggregate_data(void) {
   sweep_balance_mask = 0;
 
   balance_update(effective_packs);
-  bool balancing_override =
-      bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
-  if (balancing_override) {
-    charge_voltage_limit = bal_float_hold ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
-                                          : profile_charge_voltage_limit;
-  } else {
-    charge_voltage_limit = profile_charge_voltage_limit;
-  }
 
   // Passive Dynamic CCL & DCL: count only packs whose charge and discharge paths are capable.
   // If 1 of 2 packs has charge MOSFET off/standby, CCL scales to 1 pack (40A/50A)
@@ -2229,30 +2235,96 @@ static void bms_aggregate_data(void) {
   if (discharge_packs > effective_packs)
     discharge_packs = effective_packs;
 
+  bool forced = (dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0;
+
   // Multi-pack Standby state machine with robust anti-hunting hysteresis:
   if (effective_packs > 0 && charge_packs == 0) {
     bank_all_packs_standby = true;
   } else if (bank_all_packs_standby) {
     // Exit Standby:
-    // 1) Active discharge flow into household loads (I > +1.5 A)
+    // 1) Active discharge flow into household loads (10.0 A when DIP5=OFF to prevent 1-2 A hunting; 1.5 A in DIP5 swing)
     // 2) OR confirmed natural cell relaxation below safe re-enable floor
-    uint16_t standby_reenable_mv = (dip_applied_code & DIP_PROFILE_CODE_90)
-                                      ? CELL_CHARGE_REENABLE_MV_DIP90
-                                      : CELL_CHARGE_REENABLE_MV;
-    bool discharge_exit = bms_is_discharging(1.5f);
+    uint16_t standby_reenable_mv = profile_charge_reenable_mv;
+    float standby_release_a = forced ? 1.5f : 10.0f;
+    bool discharge_exit = bms_is_discharging(standby_release_a);
     if ((agg_max_cell_mv > 0 && agg_max_cell_mv < standby_reenable_mv) || discharge_exit) {
       bank_all_packs_standby = false;
     }
   }
 
   uint16_t target_ccl = bank_all_packs_standby ? 0 : calculate_charge_limit(charge_packs);
-  // Resting Float CVL (51.0 V) after full charge / Standby or full-cell OV cutoff
-  // when no balancing session is active: lowers bus below BMS Quit Float (51.75 V)
-  // and prevents inverter float creep.
-  if (!balancing_override && (bank_all_packs_standby || charge_cell_ov_inhibit)) {
-    charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_FLOAT;
-  }
   discharge_current_limit = calculate_discharge_limit(discharge_packs);
+
+  if (!forced) {
+    // Normal operation (DIP5 = OFF): NO oscillation/swing.
+    // Keep CVL steady at the active profile voltage (or 52.2 V only during an active auto balance float hold).
+    bal_swing_discharge_phase = false;
+    bal_swing_phase_start_ms = 0;
+    charge_voltage_limit = (bal_session_active && bal_float_hold)
+                               ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
+                               : profile_charge_voltage_limit;
+  } else {
+    // Pulse balancing swing (DIP5 = ON): micro-charge <-> micro-discharge around 52.2 V.
+    uint32_t swing_now = millis();
+    if (bal_swing_phase_start_ms == 0) {
+      bal_swing_phase_start_ms = swing_now;
+    }
+    uint16_t swing_high_cvl;
+    uint16_t swing_low_cvl;
+    uint16_t swing_stop_mv;
+    uint16_t swing_reenable_mv;
+    if (dip_is_victron_profile(dip_applied_code)) {
+      swing_high_cvl = CHARGE_VOLTAGE_LIMIT_VICTRON;    // 53.2 V
+      swing_low_cvl = CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD;  // 52.2 V
+      swing_stop_mv = 3550;
+      swing_reenable_mv = 3460;
+    } else if (dip_is_float_profile(dip_applied_code)) {
+      swing_high_cvl = CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD; // 52.2 V
+      swing_low_cvl = CHARGE_VOLTAGE_LIMIT_FLOAT;       // 51.0 V
+      swing_stop_mv = 3480;
+      swing_reenable_mv = 3420;
+    } else {
+      swing_high_cvl = CHARGE_VOLTAGE_LIMIT_VISION;     // 54.0 V
+      swing_low_cvl = CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD;  // 52.2 V
+      swing_stop_mv = 3580;
+      swing_reenable_mv = 3480;
+    }
+
+    if (!bal_swing_discharge_phase) {
+      bool reach_high = (agg_max_cell_mv >= swing_stop_mv);
+      bool idle_timeout =
+          ((swing_now - bal_swing_phase_start_ms) >= 45000UL) && !bms_is_charging(0.5f);
+      if (reach_high || bank_all_packs_standby || charge_cell_ov_inhibit || idle_timeout) {
+        bal_swing_discharge_phase = true;
+        bal_swing_phase_start_ms = swing_now;
+      }
+    } else {
+      uint32_t elapsed = swing_now - bal_swing_phase_start_ms;
+      if (elapsed >= 8000UL &&
+          (bms_is_discharging(1.5f) ||
+           (agg_max_cell_mv > 0 && agg_max_cell_mv <= swing_reenable_mv) ||
+           elapsed >= 25000UL)) {
+        bal_swing_discharge_phase = false;
+        bal_swing_phase_start_ms = swing_now;
+        charge_cell_ov_inhibit = false;
+        bank_all_packs_standby = false;
+        target_ccl = calculate_charge_limit(charge_packs);
+      }
+    }
+
+    if (bal_swing_discharge_phase) {
+      target_ccl = 0;
+      charge_current_limit = 0;
+      if (swing_low_cvl == CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD &&
+          (!bms_is_discharging(1.5f) || bank_all_packs_standby)) {
+        charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_WAKEUP_NUDGE; // 51.5 V nudge below Quit Float (51.75 V)
+      } else {
+        charge_voltage_limit = swing_low_cvl;
+      }
+    } else {
+      charge_voltage_limit = swing_high_cvl;
+    }
+  }
 
   // Slew Rate Limiter for charge_current_limit:
   // Immediate 0 A shutoff for safety trips (Zero Latency Hardware Safety):
@@ -2543,14 +2615,13 @@ static void watchdog_init(void) {
 static void watchdog_feed(void) { FWDGT_CTL = FWDGT_KEY_RELOAD; }
 
 static void fast_poll_mode_apply(uint8_t code) {
-  // Option 1: DIP3 ON (lever UP) = Forced full 16-address scan (legacy/service override)
-  // DIP3 OFF (lever DOWN, default) = Smart Plug & Play fast polling of discovered packs
-  bool force_full_scan = (code & DIP_FORCE_FULL_SCAN_MASK) != 0;
-  bool enabled = !force_full_scan;
-  if (enabled == fast_poll_enabled)
+  (void)code;
+  // Smart Plug & Play fast polling of discovered packs is ALWAYS enabled
+  // (DIP3 is now dedicated to PCS-485 Mirror/Bridge mode).
+  if (fast_poll_enabled)
     return;
-  fast_poll_enabled = enabled;
-  if (enabled) {
+  fast_poll_enabled = true;
+  if (fast_poll_enabled) {
     uint16_t mask = pack_ever_seen_mask;
     if (mask == 0)
       mask = sweep_seen_mask;
@@ -2654,13 +2725,19 @@ static uint8_t dip_read_code(void) {
 }
 
 static void dip_charge_profile_apply(uint8_t code) {
-  if (code & DIP_PROFILE_CODE_90) {
-    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_DIP90;
+  // Priority: DIP2 (53.2 V Victron) > DIP1 (51.0 V Float) > Default OFF (54.0 V Vision)
+  if (dip_is_victron_profile(code)) {
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_VICTRON;
+    profile_taper_start_mv = CELL_TAPER_START_MV_VICTRON;
+    profile_charge_stop_mv = CELL_CHARGE_STOP_MV_VICTRON;
+    profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV_VICTRON;
+  } else if (dip_is_float_profile(code)) {
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_FLOAT;
     profile_taper_start_mv = CELL_TAPER_START_MV_DIP90;
     profile_charge_stop_mv = CELL_CHARGE_STOP_MV_DIP90;
     profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV_DIP90;
   } else {
-    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
+    profile_charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_VISION;
     profile_taper_start_mv = CELL_TAPER_START_MV;
     profile_charge_stop_mv = CELL_CHARGE_STOP_MV;
     profile_charge_reenable_mv = CELL_CHARGE_REENABLE_MV;
@@ -2669,13 +2746,14 @@ static void dip_charge_profile_apply(uint8_t code) {
       (code & DIP_CHARGE_CURRENT_LIMIT_30A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10
                                             : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
   if (code & DIP_FORCED_BALANCE_MASK) {
-    charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD;
+    charge_voltage_limit = dip_is_float_profile(code) ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
+                                                      : profile_charge_voltage_limit;
   } else if (!(bal_session_active && bal_float_hold)) {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
   dip_applied_code = code;
-  pcs_mode_apply(code);       // DIP2: mirror (OFF) vs inverter bridge (ON)
-  fast_poll_mode_apply(code); // DIP3: Plug & Play fast poll (OFF) vs force full scan (ON)
+  pcs_mode_apply(code);       // DIP3: mirror (OFF) vs inverter bridge (ON)
+  fast_poll_mode_apply(code); // Smart Plug & Play fast poll (always ON)
 }
 
 static void dip_charge_profile_init(void) {
@@ -2709,7 +2787,7 @@ int main(void) {
   dip_charge_profile_init();
   leds_init();
   rs485_init();
-  pcs_uart_init(); // PCS-485 port (mirror/bridge, mode from DIP2)
+  pcs_uart_init(); // PCS-485 port (mirror/bridge, mode from DIP3)
   can_init_500k();
   watchdog_init();
 
@@ -2723,14 +2801,14 @@ int main(void) {
     if (now - last_dip_poll >= 250) {
       last_dip_poll = now;
       dip_charge_profile_poll();
-      pcs_mode_apply(dip_applied_code); // retry a DIP2 switch deferred by a busy bridge
+      pcs_mode_apply(dip_applied_code); // retry a DIP3 switch deferred by a busy bridge
     }
     balance_led_tick(now);
 
-    // Non-blocking RS-485 BMS polling step (mirror mode only; DIP2 bridge mode handles own)
+    // Non-blocking RS-485 BMS polling step (mirror mode only; DIP3 bridge mode handles own)
     bms_poll_step(now);
 
-    // Pure bridge (DIP2 ON): relay inverter <-> BMS and keep CAN fed from the
+    // Pure bridge (DIP3 ON): relay inverter <-> BMS and keep CAN fed from the
     // same traffic (parse happens inside the step; aggregates close per sweep).
     if (pcs_bridge_mode) {
       pcs_bridge_step(now);

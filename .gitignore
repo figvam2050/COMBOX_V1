@@ -46,6 +46,7 @@ __pycache__/
 *.pyc
 
 # --- Local release backups ---
+backups/
 release_backup/
 GD32F30x_Firmware_Library_V3.0.3/
 GD32F30x_DFP.pack
