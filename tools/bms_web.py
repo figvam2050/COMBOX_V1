@@ -768,6 +768,9 @@ def get_bank_summary(packs: dict) -> dict:
             "cell_delta_mv": 0,
             "any_balancing": False,
             "alarm_count": 0,
+            "ov_latched_packs": [],
+            "float_stop_packs": [],
+            "balance_phase": "Офлайн",
             "autonomy": {
                 "energy_kwh": 0.0,
                 "energy_full_kwh": 0.0,
@@ -795,6 +798,8 @@ def get_bank_summary(packs: dict) -> dict:
     all_cells = []
     any_bal = False
     alarm_cnt = 0
+    ov_latched_packs = []
+    float_stop_packs = []
 
     for p in online_packs:
         parsed = p["parsed"]
@@ -804,8 +809,17 @@ def get_bank_summary(packs: dict) -> dict:
                 all_cells.append((c, p_addr, idx + 1))
         if parsed.get("balance_bits") and any(b["on"] for b in parsed["balance_bits"]):
             any_bal = True
-        if parsed.get("warning", 0) != 0 or parsed.get("protection", 0) != 0 or parsed.get("error_code", 0) != 0:
+        warn_val = parsed.get("warning", 0) or 0
+        prot_val = parsed.get("protection", 0) or 0
+        err_val = parsed.get("error_code", 0) or 0
+        c_max = parsed.get("cell_max") or 0
+        c_min = parsed.get("cell_min") or 0
+        if warn_val != 0 or prot_val != 0 or err_val != 0:
             alarm_cnt += 1
+        if (prot_val & 0x0002) or ((warn_val & 0x0002) and c_max >= 3550) or c_max >= 3600:
+            ov_latched_packs.append(p_addr)
+        if (prot_val & 0x1000) and c_min > 3000:
+            float_stop_packs.append(p_addr)
 
     if all_cells:
         min_c = min(all_cells, key=lambda x: x[0])
@@ -817,6 +831,18 @@ def get_bank_summary(packs: dict) -> dict:
         min_cell_mv = min_cell_pack = min_cell_idx = None
         max_cell_mv = max_cell_pack = max_cell_idx = None
         cell_delta_mv = 0
+
+    if any_bal:
+        balance_phase = "⚖️ Активне балансування шунтами"
+    elif ov_latched_packs:
+        balance_phase = (
+            f"🔄 Защіпка Cell OV ({', '.join(ov_latched_packs)}) "
+            "— очікування <3.400 В або розряду"
+        )
+    elif float_stop_packs and abs(total_curr) < 0.5:
+        balance_phase = f"⏸️ Буфер / Standby (Float stop: {len(float_stop_packs)} АКБ)"
+    else:
+        balance_phase = "🟢 Штатна робота"
 
     autonomy = calculate_autonomy(avg_volt, total_curr, cap_rem, full_cap)
 
@@ -838,6 +864,9 @@ def get_bank_summary(packs: dict) -> dict:
         "cell_delta_mv": cell_delta_mv,
         "any_balancing": any_bal,
         "alarm_count": alarm_cnt,
+        "ov_latched_packs": ov_latched_packs,
+        "float_stop_packs": float_stop_packs,
+        "balance_phase": balance_phase,
         "autonomy": autonomy,
     }
 
@@ -2797,8 +2826,9 @@ function renderSummary() {
   }
 
   const balEl = document.getElementById('b_status');
-  balEl.textContent = sum.any_balancing ? 'АКТИВНЕ БАЛАНСУВАННЯ' : (sum.online_packs > 0 ? 'Працює в нормі' : 'АКБ відсутні');
-  balEl.style.color = sum.any_balancing ? 'var(--warn)' : (sum.online_packs > 0 ? 'var(--ok)' : 'var(--bad)');
+  const hasOvLatch = !!(sum.ov_latched_packs && sum.ov_latched_packs.length > 0);
+  balEl.textContent = sum.balance_phase || (sum.any_balancing ? '⚖️ Активне балансування шунтами' : (sum.online_packs > 0 ? '🟢 Штатна робота' : 'Офлайн'));
+  balEl.style.color = (sum.any_balancing || hasOvLatch) ? 'var(--warn)' : (sum.online_packs > 0 ? 'var(--ok)' : 'var(--bad)');
 
   const alEl = document.getElementById('b_alarm_status');
   alEl.textContent = sum.alarm_count > 0 ? `⚠️ Активних тривог: ${sum.alarm_count}` : 'Усі захисти та попередження в нормі';
@@ -3603,6 +3633,52 @@ function renderDipModalContent() {
           <b style="font-size:16px;color:var(--fg)">${dclBank} А</b> (${packCount} × 100 А)
         </div>
       </div>
+    </div>
+
+    <div style="background:#161b22;border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px">
+      <h3 style="margin:0 0 8px 0;font-size:14px;color:var(--fg)">🛡️ Заводські уставки BMS V10R18 vs Захисти COM-Box:</h3>
+      <table class="tbl" style="font-size:11px">
+        <tr>
+          <th>Параметр</th>
+          <th>Заводська BMS (EEPROM V10R18)</th>
+          <th>Проактивний захист COM-Box</th>
+        </tr>
+        <tr>
+          <td><b>Cell OV (Перезаряд)</b></td>
+          <td>Warn 3.600 В · Protect 3.650 В · <b>Release 3.400 В</b></td>
+          <td>Профілі 54.0 / 53.2 / 51.0 В · Float Hold <b>52.2 В</b> · гойдалка DIP 5</td>
+        </tr>
+        <tr>
+          <td><b>Float Style</b></td>
+          <td>Enter 52.50 В (3.50 В/ком.) · Quit <b>51.75 В</b></td>
+          <td>Полиця <b>52.2 В</b> (вище 3.40 В балансира) · імпульс <b>51.5 В</b></td>
+        </tr>
+        <tr>
+          <td><b>Пасивний баланс</b></td>
+          <td>Старт <b>≥ 3.400 В</b> і Δ <b>≥ 40 мВ</b> (~50–70 мА)</td>
+          <td>Тихий дозаряд <b>2–5 А</b> на 52.2 В без відключення Deye</td>
+        </tr>
+        <tr>
+          <td><b>Холод (Charge UT)</b></td>
+          <td>Warn −3 °C · Protect <b>−5 °C</b> (ризик літіювання)</td>
+          <td><b>Стоп заряду &lt; +2 °C</b> (0.2C при +2..+10 °C; розряд до −20 °C)</td>
+        </tr>
+        <tr>
+          <td><b>Спека (Cells OT)</b></td>
+          <td>Charge 70 °C · Discharge 75 °C</td>
+          <td>Derate <b>+42 °C</b> · стоп заряду <b>+55 °C</b> / розряду <b>+60 °C</b> (Temp01..04)</td>
+        </tr>
+        <tr>
+          <td><b>Ключі (PCB OT)</b></td>
+          <td>Warn 90 °C · Protect 95 °C · Release 80 °C</td>
+          <td>Окремо від комірок (r18): Warn <b>75 °C</b> · Clamp 5 А при <b>85 °C</b></td>
+        </tr>
+        <tr>
+          <td><b>Розряд (Cell UV)</b></td>
+          <td>Warn 2.800 В · Protect 2.500 В · Release 3.000 В</td>
+          <td>Warn <b>2.900 В</b> (50% DCL) · м'який стоп <b>2.750 В</b> (до зрізу BMS)</td>
+        </tr>
+      </table>
     </div>
 
     <div style="display:flex;justify-content:flex-end;gap:10px">
@@ -4612,6 +4688,21 @@ def selftest() -> int:
     assert abs(summary["total_current"] - 29.0) < 0.01, f"total current: {summary['total_current']}"
     assert summary["cell_delta_mv"] == (3495 - 3450), f"bank delta: {summary['cell_delta_mv']}"
     assert summary["any_balancing"] is True, "any balancing must be true"
+    assert "balance_phase" in summary, "balance_phase missing"
+    assert summary["ov_latched_packs"] == [], f"unexpected ov latch: {summary['ov_latched_packs']}"
+    assert "балансування" in summary["balance_phase"], f"balance phase: {summary['balance_phase']}"
+
+    ov_pack_regs = list(pack2_regs)
+    ov_pack_regs[16] = 3610  # >= 3600 mV
+    ov_pack_regs[27] = 0x0002  # Cell OV protection
+    ov_pack_regs[38] = 0x0000  # balancing inactive -> phase shows Cell OV latch
+    ov_packs_test = {
+        1: {"addr": 1, "addr_hex": "0x01", "online": True, "parsed": decode_regs(pack1_regs)},
+        2: {"addr": 2, "addr_hex": "0x02", "online": True, "parsed": decode_regs(ov_pack_regs)},
+    }
+    ov_summary = get_bank_summary(ov_packs_test)
+    assert ov_summary["ov_latched_packs"] == ["0x02"], f"ov_latched_packs: {ov_summary['ov_latched_packs']}"
+    assert "Cell OV" in ov_summary["balance_phase"], f"ov balance phase: {ov_summary['balance_phase']}"
 
     # --- Autonomy calculation test ---
     aut_chg = calculate_autonomy(52.5, 25.0, 100.0, 200.0)

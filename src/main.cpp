@@ -315,6 +315,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define TEMP_DISCHARGE_MIN_REENABLE_C -18.0f
 #define TEMP_DISCHARGE_MAX_C 60.0f
 #define TEMP_DISCHARGE_MAX_REENABLE_C 58.0f
+#define TEMP_PCB_WARN_C 75.0f
+#define TEMP_PCB_PROTECT_C 85.0f
+#define CELL_LOW_CAP_WARN_CONFIRM_MV 3120
 
 // ===== Balance session engine (17.10.2026, updated 14.11.2026) =====
 // DIP1 OFF, DIP2 OFF (Vision): CVL 54.0 V; DIP2 ON (Victron priority): CVL 53.2 V.
@@ -707,6 +710,7 @@ static void rs485_flush_rx(void) {
 
 static void watchdog_feed(void);
 static bool bms_parse_response(uint8_t expected_addr);
+static bool bms_is_valid_exception(uint8_t expected_addr);
 static void bms_advance_poll_address(uint32_t now);
 static void bms_aggregate_data(void);
 static void agg_reset(void);
@@ -1170,7 +1174,8 @@ static void bms_poll_step(uint32_t now) {
       break;
     }
 
-    // Partial response followed by inter-byte gap (e.g. 61 B Deye inverter window)
+    // Partial response followed by inter-byte gap (e.g. 61 B Deye inverter window
+    // or 5 B Modbus exception 0x83 Slave Device Busy during active balancing)
     if (uart_rx_index >= 5 && (now - bms_fsm_last_byte_ms) >= PCS_GAP_MS) {
       rs485_clear_errors();
       gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
@@ -1180,6 +1185,10 @@ static void bms_poll_step(uint32_t now) {
           fast_poll_mask |= (1 << current_addr_index);
           pack_ever_seen_mask |= (1 << current_addr_index);
         }
+      } else if (bms_is_valid_exception(current_addr_index + 1)) {
+        // Pack answered with valid CRC Modbus exception (e.g. 0x06 Busy): keep alive in sweep
+        last_bms_response_ms = now;
+        sweep_seen_mask |= (1U << current_addr_index);
       }
       bms_advance_poll_address(now);
       last_bms_finish = now;
@@ -1213,6 +1222,18 @@ static void bms_poll_step(uint32_t now) {
     bms_fsm_state = BMS_FSM_IDLE;
     break;
   }
+}
+
+static bool bms_is_valid_exception(uint8_t expected_addr) {
+  if (expected_addr < 1 || expected_addr > 16)
+    return false;
+  if (uart_rx_index != 5)
+    return false;
+  if (uart_rx_buffer[0] != expected_addr || (uart_rx_buffer[1] & 0x80) == 0)
+    return false;
+  uint16_t received_crc = ((uint16_t)uart_rx_buffer[4] << 8) | uart_rx_buffer[3];
+  uint16_t calculated_crc = modbus_crc16((uint8_t *)uart_rx_buffer, 3);
+  return (received_crc == calculated_crc);
 }
 
 static bool bms_parse_response(uint8_t expected_addr) {
@@ -1269,25 +1290,34 @@ static bool bms_parse_response(uint8_t expected_addr) {
       agg_min_cell_mv = cell_mv;
   }
 
-  // Multi-sensor temperature tracking: regs 18, 19, 20 (bytes 39..44)
-  // Sanity check all sensor channels (-40..120 °C) to reject disconnected (0x7FFF) or corrupted probes:
-  int16_t t_a = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
-  int16_t t_main = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
-  int16_t t_b = (int16_t)((uart_rx_buffer[43] << 8) | uart_rx_buffer[44]);
+  // Multi-sensor temperature tracking:
+  // Reg 18 (bytes 39..40) = Temp PCB (MOSFET heatsink, normal up to 90 °C);
+  // Reg 19 (bytes 41..42) = Temp Ambient/Avg; Reg 20 (bytes 43..44) = Temp MAX;
+  // Regs 33..34 (bytes 69..72 in 39-reg frame) = 4 signed cell NTC probes Temp01..Temp04.
+  // Keep MOSFET PCB heat strictly separated from LiFePO4 cell temps to avoid false 42/55 °C cell OT cuts.
+  int16_t t_pcb = (int16_t)((uart_rx_buffer[39] << 8) | uart_rx_buffer[40]);
+  int16_t t_amb = (int16_t)((uart_rx_buffer[41] << 8) | uart_rx_buffer[42]);
+  int16_t t_cell_max = (int16_t)((uart_rx_buffer[43] << 8) | uart_rx_buffer[44]);
 
   float pack_t_max = -1000.0f;
   float pack_t_min = 1000.0f;
-  if (t_main >= -40 && t_main <= 120) {
-    pack_t_max = (float)t_main;
-    pack_t_min = (float)t_main;
+  if (t_cell_max >= -40 && t_cell_max <= 120) {
+    pack_t_max = (float)t_cell_max;
+    pack_t_min = (float)t_cell_max;
   }
-  if (t_a >= -40 && t_a <= 120) {
-    if (pack_t_max < -500.0f || (float)t_a > pack_t_max) pack_t_max = (float)t_a;
-    if (pack_t_min > 500.0f || (float)t_a < pack_t_min) pack_t_min = (float)t_a;
+  if (t_amb >= -40 && t_amb <= 120) {
+    if (pack_t_max < -500.0f || (float)t_amb > pack_t_max) pack_t_max = (float)t_amb;
+    if (pack_t_min > 500.0f || (float)t_amb < pack_t_min) pack_t_min = (float)t_amb;
   }
-  if (t_b >= -40 && t_b <= 120) {
-    if (pack_t_max < -500.0f || (float)t_b > pack_t_max) pack_t_max = (float)t_b;
-    if (pack_t_min > 500.0f || (float)t_b < pack_t_min) pack_t_min = (float)t_b;
+  if (data_bytes >= 70) {
+    for (uint8_t k = 0; k < 4; k++) {
+      int8_t ts = (int8_t)uart_rx_buffer[69 + k];
+      if (ts >= -40 && ts <= 120 &&
+          (ts != 0 || uart_rx_buffer[69] != 0 || uart_rx_buffer[70] != 0)) {
+        if (pack_t_max < -500.0f || (float)ts > pack_t_max) pack_t_max = (float)ts;
+        if (pack_t_min > 500.0f || (float)ts < pack_t_min) pack_t_min = (float)ts;
+      }
+    }
   }
   if (pack_t_max < -500.0f) {
     pack_t_max = BATTERY_TEMP_DEFAULT;
@@ -1297,6 +1327,7 @@ static bool bms_parse_response(uint8_t expected_addr) {
     agg_temp_max = pack_t_max;
   if (pack_t_min < agg_temp_min)
     agg_temp_min = pack_t_min;
+  bool pcb_temp_valid = (t_pcb >= -40 && t_pcb <= 125);
 
   // Status, Warning, Protection (regs 25..27, bytes 53..58): present in both
   // accepted windows (data_bytes >= 56). Error (reg 28, bytes 59..60) exists
@@ -1362,17 +1393,19 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_protect & 0x0010)
     sweep_protect_b1 |= CAN_PROT_CHARGE_OC;
 
-  // MOS Over-Temperature Protect (reg 27 bit 0x0080): MOSFET heatsink > 90°C
-  if (reg_protect & 0x0080) {
+  // MOS Over-Temperature Protect (reg 27 bit 0x0080 or Temp PCB >= 85°C ahead of 90°C BMS warn)
+  if ((reg_protect & 0x0080) || (pcb_temp_valid && t_pcb >= (int16_t)TEMP_PCB_PROTECT_C)) {
     sweep_mos_ot_protect = true;
     sweep_protect_b0 |= CAN_PROT_OT;
     sweep_alarm_b2 |= CAN_PROT_OT;
+  } else if ((reg_warning & 0x0080) || (pcb_temp_valid && t_pcb >= (int16_t)TEMP_PCB_WARN_C)) {
+    sweep_alarm_b2 |= CAN_PROT_OT;
   }
 
-  // Hardware fatal error (reg_protect & 0x2000 is short circuit/hardware fail, reg_error is non-zero).
+  // Hardware fatal error (reg_protect & 0x6000 is Short Circuit 0x2000 | Reverse 0x4000, reg_error != 0).
   // Note: reg_status bit 2 (0x0004) is merely a summary bit that BMS is in protect mode (e.g. charge cut off).
   // We do NOT treat routine charge protect as fatal SYSTEM_ERROR so inverter EPS backup power is never dropped!
-  if (reg_protect & 0x2000) {
+  if (reg_protect & 0x6000) {
     sweep_sc_protect = true;
     sweep_protect_b1 |= CAN_PROT_SYSTEM_ERROR;
   }
@@ -1399,7 +1432,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
     sweep_alarm_b3 |= CAN_PROT_CHARGE_OC;
 
   // Reg 26 bit 0x1000: Low Capacity Warning (<= 5% remaining capacity)
-  if (reg_warning & 0x1000) {
+  // Cross-validate against physical min cell voltage to ignore stuck BMS coulomb counters.
+  if ((reg_warning & 0x1000) && pack_min_cell_mv <= CELL_LOW_CAP_WARN_CONFIRM_MV) {
     sweep_low_capacity_warn = true;
   }
 
@@ -1408,14 +1442,14 @@ static bool bms_parse_response(uint8_t expected_addr) {
 
   // Exclude pack from charge capability if active charge protection/faults latched:
   // 0x0001 (Pack OV), 0x0002 (Cell OV), 0x0010 (Charge OC), 0x0080 (MOS OT), 0x0100 (Charge OT),
-  // 0x0400 (Charge UT), 0x1000 (Low cap / Standby latch: charge MOSFET open), 0x2000 (Hardware/SC error).
+  // 0x0400 (Charge UT), 0x1000 (Low cap / Standby latch: charge MOSFET open), 0x2000 (SC), 0x4000 (Reverse).
   // During active balance session: 0x1000 (Standby latch) is ignored for capacity scaling to allow
   // trickle balance currents and wakeup commands without zeroing out CCL.
   // Also check per-pack cell max voltage >= 3600 mV or temp limits.
   bool pack_charge_ok = true;
-  // Hardware protective fault mask (0x2593): Pack OV (0x0001), Cell OV (0x0002), Charge OC (0x0010),
-  // MOS OT (0x0080), Charge OT (0x0100), Charge UT (0x0400), Short Circuit (0x2000).
-  uint16_t charge_protect_mask = 0x2593;
+  // Hardware protective fault mask (0x6593): Pack OV (0x0001), Cell OV (0x0002), Charge OC (0x0010),
+  // MOS OT (0x0080), Charge OT (0x0100), Charge UT (0x0400), Short Circuit (0x2000), Reverse (0x4000).
+  uint16_t charge_protect_mask = 0x6593;
   if (reg_protect & charge_protect_mask)
     pack_charge_ok = false;
   // 0x1000 is Standby / Full Latch: treated as charge inhibit when cell is near full
@@ -1432,27 +1466,29 @@ static bool bms_parse_response(uint8_t expected_addr) {
     pack_charge_ok = false;
   if (pack_max_cell_mv >= CELL_PHYSICAL_OV_CONFIRM_MV)
     pack_charge_ok = false;
-  if (pack_t_min < TEMP_CHARGE_MIN_C || pack_t_max > TEMP_CHARGE_MAX_C)
+  if (pack_t_min < TEMP_CHARGE_MIN_C || pack_t_max > TEMP_CHARGE_MAX_C ||
+      (pcb_temp_valid && t_pcb >= 90))
     pack_charge_ok = false;
   if (reg_error != 0)
     pack_charge_ok = false;
 
   // Exclude pack from discharge capability if active discharge protection/faults latched:
   // 0x0004 (Pack UV), 0x0008 (Cell UV), 0x0020 (Discharge OC), 0x0080 (MOS OT), 0x0200 (Discharge OT),
-  // 0x0800 (Discharge UT), 0x2000 (Hardware/SC error).
+  // 0x0800 (Discharge UT), 0x2000 (Short Circuit), 0x4000 (Reverse).
   bool pack_discharge_ok = true;
-  if (reg_protect & 0x2AAC)
+  if (reg_protect & 0x6AAC)
     pack_discharge_ok = false;
   if (pack_min_cell_mv <= CELL_DISCHARGE_STOP_MV)
     pack_discharge_ok = false;
-  if (pack_t_min < TEMP_DISCHARGE_MIN_C || pack_t_max > TEMP_DISCHARGE_MAX_C)
+  if (pack_t_min < TEMP_DISCHARGE_MIN_C || pack_t_max > TEMP_DISCHARGE_MAX_C ||
+      (pcb_temp_valid && t_pcb >= 90))
     pack_discharge_ok = false;
   if (reg_error != 0)
     pack_discharge_ok = false;
 
-  // Hardware fatal error or emergency charge protection (0x2000 SC/hardware, 0x0100 OT, 0x0400 UT, 0x0080 MOS OT, 0x0010 OC).
+  // Hardware fatal error or emergency charge protection (0x4000 Reverse, 0x2000 SC, 0x0100 OT, 0x0400 UT, 0x0080 MOS OT, 0x0010 OC).
   // Routine 0x0002 (single-pack Cell OV), 0x1000 (Standby latch), and reg_status 0x0004 are excluded so top-off balancing stays in Float Hold / asymmetry clamp!
-  if ((reg_protect & 0x2590) || (reg_error != 0)) {
+  if ((reg_protect & 0x6590) || (reg_error != 0)) {
     sweep_any_pack_protect = true;
   }
   // Detect pack charge protection/inhibition for bank asymmetry current clamping:
