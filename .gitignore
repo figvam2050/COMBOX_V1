@@ -45,15 +45,12 @@ __pycache__/
 
 # --- Local release backups ---
 backups/
-release_backup/
 GD32F30x_Firmware_Library_V3.0.3/
 GD32F30x_DFP.pack
 
 # --- Локальні папки з документацією/прошивками (не для репозиторію) ---
 deye/
 120-200177-01(GD305COMBOX_V102_20230904)/
-can_sniffer/backups/
-original_firmware/backups/
 
 # --- Згенеровані артефакти реверс-аналізу (відтворюються tools/*.py) ---
 original_firmware/dumps/*.asm
