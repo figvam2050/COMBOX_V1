@@ -3451,7 +3451,7 @@ function getComboxProfileSummary() {
     swingShort, swingLabel,
     cclPerPack,
     cclBank: packCount * cclPerPack,
-    finishCcl: packCount * 2.5,
+    finishCcl: dip5 ? 2.0 : 3.0,
     dclBank: packCount * 100
   };
 }

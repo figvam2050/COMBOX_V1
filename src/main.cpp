@@ -1086,12 +1086,27 @@ static void bms_poll_step(uint32_t now) {
   case BMS_FSM_IDLE: {
     if (now - last_bms_start >= BMS_POLL_PERIOD_MS && now - last_bms_finish >= BMS_POLL_GAP_MS) {
       last_bms_start = now;
-      // Standby prevention during active balance sessions:
-      // Periodically (every ~3 seconds) send FC06 to keep Charge MOSFET alive/awake
+      // Standby prevention during active balance sessions (charge phase only):
+      // Periodically (every ~3 seconds) send FC06 round-robin across active packs
+      // to keep Charge MOSFET alive/awake without disturbing micro-discharge phase.
       if ((bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) &&
+          !bal_session_paused && !bal_swing_discharge_phase &&
           (now - last_wakeup_send_ms >= 3000)) {
+        static uint8_t wakeup_addr_index = 0;
+        uint16_t active_mask = (fast_poll_enabled && fast_poll_mask != 0)
+                                   ? fast_poll_mask
+                                   : ((pack_ever_seen_mask != 0) ? pack_ever_seen_mask : (uint16_t)(1U << current_addr_index));
+        uint8_t target_idx = current_addr_index;
+        for (uint8_t k = 0; k < 16; k++) {
+          uint8_t cand = (uint8_t)((wakeup_addr_index + k) & 0x0F);
+          if (active_mask & (1U << cand)) {
+            target_idx = cand;
+            wakeup_addr_index = (uint8_t)((cand + 1) & 0x0F);
+            break;
+          }
+        }
         last_wakeup_send_ms = now;
-        bms_send_wakeup_query(current_addr_index);
+        bms_send_wakeup_query(target_idx);
         bms_fsm_query_ms = now;
         bms_fsm_last_byte_ms = now;
         bms_fsm_state = BMS_FSM_WAIT_WAKEUP_RESP;
@@ -1119,6 +1134,7 @@ static void bms_poll_step(uint32_t now) {
       rs485_clear_errors();
       gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
       last_bms_finish = now;
+      last_bms_start = now - BMS_POLL_PERIOD_MS;
       bms_fsm_state = BMS_FSM_IDLE;
       break;
     }
@@ -1408,7 +1424,9 @@ static bool bms_parse_response(uint8_t expected_addr) {
       dip_is_float_profile(dip_applied_code)
           ? 3380
           : (dip_is_victron_profile(dip_applied_code) ? 3480 : 3520);
-  if ((reg_protect & 0x1000) && pack_max_cell_mv >= standby_cell_thresh_mv)
+  bool is_bal = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
+  if (!is_bal && (reg_protect & 0x1000) &&
+      pack_max_cell_mv >= standby_cell_thresh_mv && raw_current > -500)
     pack_charge_ok = false;
   if (pack_ov_protect_latched[pack_idx])
     pack_charge_ok = false;
@@ -1432,9 +1450,9 @@ static bool bms_parse_response(uint8_t expected_addr) {
   if (reg_error != 0)
     pack_discharge_ok = false;
 
-  // Hardware fatal error or emergency charge protection (0x2000 SC/hardware, 0x0100 OT, 0x0400 UT, 0x0080 MOS OT, 0x0010 OC, 0x0002 Cell OV).
-  // 0x1000 (Standby latch) and reg_status 0x0004 (charge FET off in standby) are excluded so routine float does not pause balance!
-  if ((reg_protect & 0x2592) || (reg_error != 0)) {
+  // Hardware fatal error or emergency charge protection (0x2000 SC/hardware, 0x0100 OT, 0x0400 UT, 0x0080 MOS OT, 0x0010 OC).
+  // Routine 0x0002 (single-pack Cell OV), 0x1000 (Standby latch), and reg_status 0x0004 are excluded so top-off balancing stays in Float Hold / asymmetry clamp!
+  if ((reg_protect & 0x2590) || (reg_error != 0)) {
     sweep_any_pack_protect = true;
   }
   // Detect pack charge protection/inhibition for bank asymmetry current clamping:
@@ -1473,11 +1491,15 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
 
   uint32_t per_pack_x10 = profile_charge_current_per_pack_x10;
   bool is_bal = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
-  // Balance/manual top-off phase: cap at 2.0 A per pack (or 1.0 A / 0.5 A during float hold)
+  uint16_t fine_hold_mv =
+      dip_is_float_profile(dip_applied_code)
+          ? 3440
+          : (dip_is_victron_profile(dip_applied_code) ? 3500 : BAL_HOLD_FINE_CELL_MV);
+  // Balance/manual top-off phase: cap at 2.0 A per pack (or 5.0 A / 2.0 A during float hold)
   // so passive balancing gets hours of gentle CV time instead of a rushed stop at the threshold.
   if (is_bal) {
     if (bal_float_hold || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0)) {
-      uint32_t hold_cap_x10 = (agg_max_cell_mv >= BAL_HOLD_FINE_CELL_MV)
+      uint32_t hold_cap_x10 = (agg_max_cell_mv >= fine_hold_mv)
                                   ? BAL_HOLD_FINE_A_X10
                                   : BAL_HOLD_A_X10;
       if (per_pack_x10 > hold_cap_x10)
@@ -1581,7 +1603,7 @@ static uint16_t calculate_charge_limit(uint8_t pack_count) {
   if (is_bal && (bal_float_hold || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0))) {
     // Total bank current ceiling during Float Hold balancing:
     // Cap at 5.0 A total (or 2.0 A total when fine hold is active)
-    uint32_t bank_hold_ceiling_x10 = (agg_max_cell_mv >= BAL_HOLD_FINE_CELL_MV)
+    uint32_t bank_hold_ceiling_x10 = (agg_max_cell_mv >= fine_hold_mv)
                                         ? BAL_BANK_FINE_TOTAL_CCL_X10
                                         : BAL_BANK_MAX_TOTAL_CCL_X10;
     if (max_current_x10 > bank_hold_ceiling_x10) {
@@ -2016,7 +2038,7 @@ static void balance_led_tick(uint32_t now) {
     fault_blinks = 4;
   } else if (bank_any_pack_protect) {
     fault_blinks = 3;
-  } else if (charge_temp_inhibit || discharge_temp_inhibit || charge_temp_derate) {
+  } else if (charge_temp_inhibit || discharge_temp_inhibit) {
     fault_blinks = 3;
   } else if (discharge_cell_uv_inhibit ||
              (bank_min_cell_mv != 0xFFFF && bank_min_cell_mv <= CELL_UV_WARN_MV)) {
@@ -2103,6 +2125,10 @@ static void bms_aggregate_data(void) {
         pack_miss_count[i]++;
       if (pack_miss_count[i] <= 6) {
         active_pack_count++;
+      } else if (fast_poll_enabled && sweep_seen_mask != 0) {
+        // Pack switched off while others remain online: prune from fast loop so BG probe re-discovers it cleanly.
+        fast_poll_mask &= ~(1U << i);
+        pack_ever_seen_mask &= ~(1U << i);
       }
     }
   }
@@ -2238,15 +2264,18 @@ static void bms_aggregate_data(void) {
   bool forced = (dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0;
 
   // Multi-pack Standby state machine with robust anti-hunting hysteresis:
-  if (effective_packs > 0 && charge_packs == 0) {
+  uint16_t standby_reenable_mv =
+      dip_is_float_profile(dip_applied_code)
+          ? 3380
+          : (dip_is_victron_profile(dip_applied_code) ? 3480 : 3520);
+  float standby_release_a = forced ? 1.5f : 10.0f;
+  bool discharge_exit = bms_is_discharging(standby_release_a);
+  if (effective_packs > 0 && charge_packs == 0 && !discharge_exit) {
     bank_all_packs_standby = true;
   } else if (bank_all_packs_standby) {
     // Exit Standby:
     // 1) Active discharge flow into household loads (10.0 A when DIP5=OFF to prevent 1-2 A hunting; 1.5 A in DIP5 swing)
     // 2) OR confirmed natural cell relaxation below safe re-enable floor
-    uint16_t standby_reenable_mv = profile_charge_reenable_mv;
-    float standby_release_a = forced ? 1.5f : 10.0f;
-    bool discharge_exit = bms_is_discharging(standby_release_a);
     if ((agg_max_cell_mv > 0 && agg_max_cell_mv < standby_reenable_mv) || discharge_exit) {
       bank_all_packs_standby = false;
     }
@@ -2746,8 +2775,10 @@ static void dip_charge_profile_apply(uint8_t code) {
       (code & DIP_CHARGE_CURRENT_LIMIT_30A) ? CHARGE_CURRENT_LIMIT_PER_PACK_DIP4_LIMIT_X10
                                             : CHARGE_CURRENT_LIMIT_PER_PACK_X10;
   if (code & DIP_FORCED_BALANCE_MASK) {
-    charge_voltage_limit = dip_is_float_profile(code) ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
-                                                      : profile_charge_voltage_limit;
+    if (!bal_swing_discharge_phase) {
+      charge_voltage_limit = dip_is_float_profile(code) ? CHARGE_VOLTAGE_LIMIT_FLOAT_HOLD
+                                                        : profile_charge_voltage_limit;
+    }
   } else if (!(bal_session_active && bal_float_hold)) {
     charge_voltage_limit = profile_charge_voltage_limit;
   }
