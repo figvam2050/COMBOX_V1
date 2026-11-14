@@ -116,7 +116,7 @@
 | | [`UNRESOLVED_PROPOSALS.md`](UNRESOLVED_PROPOSALS.md) | Пріоритезований беклог відкритих пропозицій та 12 непорушних інженерних табу |
 | **Утиліти та дослідження** | [`original_firmware/ORIGINAL_FIRMWARE.md`](original_firmware/ORIGINAL_FIRMWARE.md) | Повний реверс-інжиніринг заводської прошивки Felicity Solar G5RC (1400+ рядків) |
 | | [`can_sniffer/README.md`](can_sniffer/README.md) | CAN-сніфер для ESP32 (режим ACK) та Arduino Nano для тестування COM-Box без інвертора |
-| | [`tools/bms_web.py`](tools/bms_web.py) | Мульти-пакова веб-станція моніторингу та діагностики (v2.4): автопошук 1..16, графіки, $R_{int}$, уставки інвертора, алярм-хелпер, офлайн-аналізатор логів, A4 PDF-звіт |
+| | [`tools/bms_web.py`](tools/bms_web.py) | Мульти-пакова веб-станція моніторингу та діагностики (v3.6): автопошук 1..16, графіки, $R_{int}$, уставки інвертора, алярм-хелпер, CSV-логування Alarm/State/Work, офлайн-аналізатор логів, A4 PDF-звіт |
 | | [`tools/can_sniff.py`](tools/can_sniff.py) | Пасивний/активний сніфер CAN-шини інвертора Deye/Pylontech (SLCAN / WeAct USB2CAN V2) з повним декодом кадрів 0x351..0x35E/0x305 |
 | | [`tools/rs485_sniff.py`](tools/rs485_sniff.py) | Пасивний сніфер батарейної шини Modbus RTU з авто-декодом полів Vision |
 | | [`detect_probe.py`](detect_probe.py) | Автоматичне апаратне визначення типу підключеного програматора (DAPLink CMSIS-DAP / ST-Link) для PlatformIO |
@@ -176,7 +176,7 @@ python3 tools/verify_dump.py - "01 03 4E ... 7A CC"   # кадр із рядка
 Пасивний (read-only) сніфер Modbus RTU на шині батарей: декодує опитування інвертора
 (`FC03 0x00 qty=28`, `FC03 0x50 qty=2`) і нашого box (`qty=0x27`), мапу Vision
 (V/I/комірки/t/SOC/SOH/r17..r26), модельний ASCII; пише у
-`deye/rs485_sniff_<timestamp>.log` (формат рядків — як у логу 09.10.2026).
+`deye/logs/rs485/rs485_sniff_<timestamp>.log` (формат рядків — як у логу 09.10.2026).
 
 ```bash
 python3 tools/rs485_sniff.py --list                       # порти
@@ -210,13 +210,13 @@ python3 tools/can_sniff.py --selftest                   # перевірка д�
 python3 tools/can_sniff.py --list                       # список доступних портів
 python3 tools/can_sniff.py                              # автовиявлення WeAct + режим стенда (з ACK)
 python3 tools/can_sniff.py --listen-only                # пасивний моніторинг шини з інвертором
-python3 tools/can_sniff.py --duration 60 --out deye/can.log
+python3 tools/can_sniff.py --duration 60 --out deye/logs/can/can.log
 ```
 *(Для користувачів мікроконтролерів ESP32 або Arduino Nano також доступний окремий скетч у каталозі [`can_sniffer/`](can_sniffer/README.md)).*
 
 ### Веб-станція моніторингу та діагностики (`tools/bms_web.py`)
 
-Потужна локальна станція моніторингу та інженерної діагностики (v2.4, 30.10.2026) для банку акумуляторів Vision V-LFP48100 (до 16 блоків). Потребує Python 3 і **pySerial** для роботи з реальним COM-портом (`pip3 install pyserial`); графіки — Vanilla JS / HTML5 Canvas, без зовнішніх JS-бібліотек. Повна документація — [`tools/BMS_WEB_README.md`](tools/BMS_WEB_README.md).
+Потужна локальна станція моніторингу та інженерної діагностики (v3.6, 14.11.2026) для банку акумуляторів Vision V-LFP48100 (до 16 блоків). Потребує Python 3 і **pySerial** для роботи з реальним COM-портом (`pip3 install pyserial`); графіки — Vanilla JS / HTML5 Canvas, без зовнішніх JS-бібліотек. Повна документація — [`tools/BMS_WEB_README.md`](tools/BMS_WEB_README.md).
 
 ```bash
 # Універсальний запуск (Windows / macOS / Linux) — розумний автопошук порту!

@@ -5,7 +5,7 @@ Captures the battery RS485 bus (read-only tap, 9600 8N1 by default),
 verifies CRC16 on every frame, decodes requests and responses of both
 masters: the Deye inverter (FC03 0x00 qty=28 + 0x0050 qty=2) and the
 COM-Box (FC03 0x00 qty=0x27). Output format matches
-deye/rs485_sniff_inverter_battery_2026-10-09.log.
+deye/logs/rs485/rs485_sniff_inverter_battery_2026-10-09.log.
 
 Usage:
   python3 tools/rs485_sniff.py --list
@@ -242,7 +242,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port, e.g. /dev/tty.usbserial-*")
     ap.add_argument("--baud", type=int, default=9600)
-    ap.add_argument("--out", help="log file (default deye/rs485_sniff_<timestamp>.log)")
+    ap.add_argument("--out", help="log file (default deye/logs/rs485/rs485_sniff_<timestamp>.log)")
     ap.add_argument("--duration", type=float,
                     help="stop cleanly after N seconds (writes the log on exit)")
     ap.add_argument("--list", action="store_true", help="list serial ports and exit")
@@ -265,7 +265,7 @@ def main() -> int:
             return 1
         return 0
 
-    out_path = args.out or f"deye/rs485_sniff_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+    out_path = args.out or f"deye/logs/rs485/rs485_sniff_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
     out_lines = []
     header = [
         f"# RS485 sniff (passive)  port={args.port} baud={args.baud} 8N1",

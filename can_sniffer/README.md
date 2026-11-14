@@ -71,12 +71,12 @@ cd can_sniffer
   D-дріт переставлено з GND на GPIO5. Перевірено наживо: шина без інвертора —
   6 fps, усі 6 ID, `missed=0`, TEC=REC=0.
 - Раніше (11.10.2026) була заводська прошивка ESP-AT (AT+WiFi/BLE, Espressif
-  v2.3.0.0, збірка 20.05.2022), знята перед стиранням і лежить у `backups/`:
-  - `backups/esp32_flash_2026-10-11_mac8c94df905998.bin` (4 MB,
+  v2.3.0.0, збірка 20.05.2022), знята перед стиранням і перенесена до архіву `deye/software_and_firmware/esp32_sniffer_backup/`:
+  - `../deye/software_and_firmware/esp32_sniffer_backup/esp32_flash_2026-10-11_mac8c94df905998.bin` (4 MB,
     sha256 `d8faf3abdc37904b76413d642559a691e64ea0b320431756ff83204c06ba1634`,
     chip ESP32-D0WD-V3, MAC `8c:94:df:90:59:98`);
   - відкат: `esptool.py write_flash 0x0 <dump>.bin` (або повне стирання + dump).
-- `backups/` у `.gitignore` — у git не потрапляє.
+- Архівний каталог `deye/` у `.gitignore` — бінарний дамп у git не потрапляє.
 
 ## Вивід (Serial 115200)
 

@@ -106,7 +106,7 @@ Recent changes:
               stdin (pipe, service, CI) is never paused; BMS_NO_PAUSE=1
               disables the pause for a no-argument terminal run.
               Same behaviour as bms_webX.py.
-Journal: tools/HystoryMod.md
+Documentation: tools/BMS_WEB_README.md
 
 Usage:
   python3 tools/bms_web.py

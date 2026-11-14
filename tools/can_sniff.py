@@ -26,7 +26,7 @@
   python3 tools/can_sniff.py
   python3 tools/can_sniff.py --port /dev/cu.usbmodemB24D205D38631
   python3 tools/can_sniff.py --listen-only
-  python3 tools/can_sniff.py --duration 30 --out deye/can_test.log
+  python3 tools/can_sniff.py --duration 30 --out deye/logs/can/can_test.log
 """
 
 import argparse
@@ -386,7 +386,7 @@ def main() -> int:
         return 1
 
     out_lines: List[str] = []
-    out_path = args.out or f"deye/can_sniff_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+    out_path = args.out or f"deye/logs/can/can_sniff_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
     header = [
         f"# CAN sniff (SLCAN)  port={target_port} speed={args.speed} mode={mode_name}",
         f"# Date: {datetime.now():%Y-%m-%d %H:%M:%S}",
