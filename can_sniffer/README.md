@@ -14,10 +14,10 @@
 Див. також:
 * [`../README.md`](../README.md) — основна прошивка COM-Box; §2 містить команди
   збірки/прошивки і паралельний RS485-сніфер батарейної шини;
-* [`../DEYE_CAN_RS485_BASE.md`](../DEYE_CAN_RS485_BASE.md) — база знань CAN/RS485
-  Deye (декод кадрів 0x351…0x35E/0x305 нижче відповідає її розділам по CAN);
-* [`../PORT_MAPPING.md`](../PORT_MAPPING.md) — незмінний еталон фізичних пінів
-  (MCU ↔ CAN/RS485: PB8/PB9 = PCS-CAN, `chmod 444`);
+* [`../DEYE_INVERTER_CAN_RS485.md`](../DEYE_INVERTER_CAN_RS485.md) — протоколи CAN/RS485
+  інвертора Deye (декод кадрів 0x351…0x35E/0x305 нижче відповідає її розділам по CAN);
+* [`../PORT_MAPPING.md`](../PORT_MAPPING.md) — еталон фізичних пінів
+  (MCU ↔ CAN/RS485: PB8/PB9 = PCS-CAN);
 * [`../tools/rs485_sniff.py`](../tools/rs485_sniff.py) — пасивний RS485-сніфер
   шини батарей (Vision/Modbus), для повного логування обох шин.
 

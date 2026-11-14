@@ -9,8 +9,6 @@ compile_commands.json
 .vscode/
 
 # --- Особисті робочі нотатки (не для публічного репозиторію) ---
-CODE_REVIEW*.md
-IDEAS_BRAINSTORM.md
 *.pdf
 !USER_MANUAL.pdf
 IMG*.*
@@ -56,7 +54,6 @@ deye/
 120-200177-01(GD305COMBOX_V102_20230904)/
 can_sniffer/backups/
 original_firmware/backups/
-аналіз.md
 
 # --- Згенеровані артефакти реверс-аналізу (відтворюються tools/*.py) ---
 original_firmware/dumps/*.asm
@@ -64,5 +61,3 @@ original_firmware/tools/db.json
 original_firmware/tools/__pycache__/
 bms_monitor_*.csv
 bms_log_*.csv
-DEYE_SOLARMAN_MODBUS_RESEARCH.md
-DEYE_BMS_PROTOCOL_CONSPECT.md

@@ -815,7 +815,7 @@ hr {
 * <strong>«Master BMS» у таблиці виробника Vision</strong> = адреса <strong><code>0x10</code> (16)</strong> — стан, коли <strong>усі 4 важелі ID опущені ВНИЗ</strong> (<code>0+0+0+0 = 0</code>, BMS додає 0x10). Це інший, виробничий, термін.
 * <strong>Усі 4 важелі ВГОРУ = ID 15 = <code>0x0F</code></strong> (живо перевірено 21.10.2026: АКБ на <code>0x0F</code> відповідає, <code>med ≈ 101 мс</code>, 0 помилок).
 * Слова <code>ON</code>/<code>OFF</code> у таблиці DIP виробника інвертовані за фізичними важелями: приклад №2 «ON ON OFF ON» фізично = <code>[ Вниз, Вниз, ВГОРУ, Вниз ]</code> = <code>0x02</code>.
-* Відповідають адреси <code>0x01</code>–<code>0x0F</code>; на <code>0x10</code> у живому ланцюзі (21–22.10) АКБ не відповідали — в АКБ не було конфігурації «усі ВНИЗ». Деталі: <code>DEYE_CAN_RS485_BASE.md</code>, розділ «Додано 22.10.2026».</p>
+* Відповідають адреси <code>0x01</code>–<code>0x0F</code>; на <code>0x10</code> у живому ланцюзі (21–22.10) АКБ не відповідали — в АКБ не було конфігурації «усі ВНИЗ». Деталі: <a href="VISION_BMS_PROTOCOL.md"><code>VISION_BMS_PROTOCOL.md</code></a>.</p>
 </blockquote>
 <hr/>
 <h2 id="4-dip-com-box" style="break-before: page; page-break-before: always;">4. Налаштування DIP-перемикачів на COM-Box</h2>

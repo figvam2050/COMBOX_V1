@@ -60,7 +60,7 @@
    - Якщо змінено логіку, алгоритми (SOC, DIP4, балансир) або функціонал інструментів — **обов'язково оновити**:
      * `USER_MANUAL.md` (та перегенерувати `USER_MANUAL.html` / `USER_MANUAL.pdf` за потреби через `python3 tools/export_manual_pdf.py`).
      * `README.md`
-     * Відповідні файли документації: `BALANCE_AUTO.md`, `SAFETY_AND_ALARMS.md`, `IMPROVEMENTS_TODO.md` або `tools/BMS_WEB_README.md`.
+     * Відповідні файли документації: `PORT_MAPPING.md`, `VISION_BMS_PROTOCOL.md`, `DEYE_INVERTER_CAN_RS485.md`, `BALANCE_AUTO.md`, `SAFETY_AND_ALARMS.md`, `PROJECT_HISTORY.md`, `UNRESOLVED_PROPOSALS.md` або `tools/BMS_WEB_README.md`.
 3. **Атомарний Git Commit:**
    - Сформувати лаконічний, чіткий коміт у форматі Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`).
    - У повідомленні обов'язково зазначити: суть кореневої причини, що саме змінено і як це верифіковано.
