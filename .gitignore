@@ -45,8 +45,6 @@ __pycache__/
 
 # --- Local release backups ---
 backups/
-GD32F30x_Firmware_Library_V3.0.3/
-GD32F30x_DFP.pack
 
 # --- Локальні папки з документацією/прошивками (не для репозиторію) ---
 deye/
@@ -58,3 +56,5 @@ original_firmware/tools/db.json
 original_firmware/tools/__pycache__/
 bms_monitor_*.csv
 bms_log_*.csv
+bms_bank_log.csv
+bms_alarm_log.csv
