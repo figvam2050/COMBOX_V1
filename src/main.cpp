@@ -1483,8 +1483,10 @@ static bool bms_parse_response(uint8_t expected_addr) {
           ? 3380
           : (dip_is_victron_profile(dip_applied_code) ? 3480 : 3520);
   bool is_bal = bal_session_active || ((dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0);
-  if (!is_bal && (reg_protect & 0x1000) &&
-      pack_max_cell_mv >= standby_cell_thresh_mv && raw_current > -500)
+  bool standby_zero_current = ((reg_status & 0x0001U) == 0U) &&
+                              (raw_current >= -50 && raw_current <= 50);
+  if (!is_bal && pack_max_cell_mv >= standby_cell_thresh_mv &&
+      (((reg_protect & 0x1000U) && raw_current > -500) || standby_zero_current))
     pack_charge_ok = false;
   if (pack_ov_protect_latched[pack_idx])
     pack_charge_ok = false;
@@ -2436,8 +2438,10 @@ static void bms_aggregate_data(void) {
 
   // Slew Rate Limiter for charge_current_limit:
   // Immediate 0 A shutoff for safety trips (Zero Latency Hardware Safety):
-  // Exception: graceful ramp-down on routine Standby (smooth 5.0A/s decrease)
-  if (target_ccl == 0 && (charge_cell_ov_inhibit || charge_temp_inhibit || pack_imbalance_inhibit || can_protect_b1)) {
+  // Immediate 0 A shutoff for safety trips & confirmed full-pack Standby:
+  if (target_ccl == 0 && (charge_cell_ov_inhibit || charge_temp_inhibit ||
+                          pack_imbalance_inhibit || can_protect_b1 ||
+                          bank_all_packs_standby)) {
     charge_current_limit = 0;
   } else {
     // Slew rate limiter: smooth CCL transitions to protect inverter inductors and DC capacitors
@@ -2747,7 +2751,7 @@ static void send_all_frames(void) {
       if (!charge_temp_inhibit && charge_current_limit > 0)
         req_flags |= (0x80 | 0x08);
     } else {
-      if (!charge_cell_ov_inhibit && !charge_temp_inhibit && charge_current_limit > 0) {
+      if (!charge_cell_ov_inhibit && !charge_temp_inhibit && !bank_all_packs_standby && charge_current_limit > 0) {
         req_flags |= 0x80;
         if (bank_low_capacity_warn)
           req_flags |= 0x08; // Low capacity: request inverter grid/generator charging
