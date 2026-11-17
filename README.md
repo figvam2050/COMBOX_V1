@@ -413,9 +413,9 @@ python3 tools/bms_web.py --mock
 | `0x351` | 8 | charge voltage limit (LE) / charge current limit / discharge current limit / discharge voltage limit = 450 (45.0 V) |
 | `0x355` | 4 | **SOC (LE) — обчислюється з напруги комірок** (див. нижче), SOH (LE) — середнє з BMS |
 | `0x356` | 6 | voltage ×100 (LE), current ×10 (LE, **розряд + / заряд −**), temp ×10 (LE) |
-| `0x359` | 8 | байти 0–1 = захист (OV, UV, OT, UT, OCC, OCD, System Error), байти 2–3 = попередження (Warning) з Boot Latch фільтром, **байт 4 = кількість пакетів (з 6-miss дебаунсом, ~5.0 с)**, байти 5–6 = `'P' 'N'`, байт 7 = 0 |
+| `0x359` | 8 | Deye V3.3 Protection (0..3) / Alarm (4..5) або в режимі `PYLON` (`0`): захист/попередження, байт 4 = кількість пакетів (з 6-miss дебаунсом), `'P' 'N'` |
 | `0x35C` | 2 | динамічні дозволи: біт 7 charge enable, біт 6 discharge enable (`0xC0` норма, `0x80`/`0x40` при відсічці, `0x00` при таймауті/аварії) |
-| `0x35E` | 8 | `'P' 'Y' 'L' 'O' 'N' 0 0 0` (ASCII `PYLON`) |
+| `0x35E` | 8 | `'D' 'Y' '0' '0' '1'` + `count` + ємність (`0.1 Ah`) у режимі `CAN_PROTOCOL_DEYE_V33 = 1` (також поблокові `0x110+i`, `0x150+i`, `0x200+i`, `0x400+i`, `0x500+i..0x650+i`, `0x361/0x363/0x364/0x371`) |
 
 > ℹ️ **Архітектура безпеки та реакції на аварії:** Повний інженерний опис розкодування регістрів 25..28, бітів `0x359`, порогових значень та захисних реакцій COM-Box викладено в [`SAFETY_AND_ALARMS.md`](SAFETY_AND_ALARMS.md).
 
@@ -452,7 +452,7 @@ python3 tools/bms_web.py --mock
 збіг ID дав би битову помилку CAN. Натомість функція `can_rx_service()`
 регулярно дренує `CAN_FIFO0` (усуває переповнення буфера) та відстежує вхідний
 `0x305` від інвертора (`inverter_can_alive` з таймаутом 5 с). За замовчуванням
-використовується профіль `CAN_PROTOCOL_DEYE_V33 = 0` (`PYLON`, `LiBms: PYLON` на Deye).
+використовується профіль `CAN_PROTOCOL_DEYE_V33 = 1` (`DY001` + поблокова телеметрія Deye).
 
 `send_can_std()`:
 1. чекає **вільну скриньку** через `can_flag_get(CAN_FLAG_TME0/TME1/TME2)` максимум 5 мс,

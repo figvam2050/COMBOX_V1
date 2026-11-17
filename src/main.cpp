@@ -380,9 +380,9 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 // reg19 temperature raw divisor: 1 = reg 0x13 holds whole C (dump 08.10.2026).
 #define BMS_TEMP_RAW_DIV 1.0f
 
-// 1 = Deye PCS CAN V3.3 ("DEYE", 0x359 Tables 1-7, 0x361 cell V/T, 0x371 On-Grid limits)
+// 1 = Deye PCS CAN V3.3 / DY001 ("DY001", 0x359 Tables 1-7, 0x361/0x363/0x364/0x371 + per-pack 0x11x..0x65x)
 // 0 = Pylontech CAN v2.0.6 ("PYLON", 0x359 b0..b1 protect, b2..b3 alarm, b4 count, 'P','N')
-#define CAN_PROTOCOL_DEYE_V33 0
+#define CAN_PROTOCOL_DEYE_V33 1
 
 #define CAN_ID_LIMITS 0x351
 #define CAN_ID_SOC 0x355
@@ -391,7 +391,16 @@ static uint8_t calc_adaptive_soc(uint16_t avg_cell_mv, uint16_t min_cell_mv,
 #define CAN_ID_FLAGS 0x35C
 #define CAN_ID_BRAND 0x35E
 #define CAN_ID_CELL_EXTREMES 0x361
+#define CAN_ID_DEYE_CFG 0x363
+#define CAN_ID_DEYE_PACK_COUNT 0x364
 #define CAN_ID_GRID_LIMITS 0x371
+#define CAN_ID_DEYE_PACK_STATUS_BASE 0x110
+#define CAN_ID_DEYE_PACK_VI_BASE 0x150
+#define CAN_ID_DEYE_PACK_CELL_BASE 0x200
+#define CAN_ID_DEYE_PACK_CYCLES_BASE 0x400
+#define CAN_ID_DEYE_PACK_FW_BASE 0x500
+#define CAN_ID_DEYE_PACK_MODEL_BASE 0x600
+#define CAN_ID_DEYE_PACK_SER_BASE 0x650
 
 #define UART_BMS USART0
 #define UART_BMS_RCU RCU_USART0
@@ -533,6 +542,21 @@ static uint8_t sweep_alarm_b3 = 0;
 static uint8_t pack_miss_count[16] = {0};
 static uint16_t pack_ever_seen_mask = 0;
 static uint16_t sweep_seen_mask = 0;
+
+typedef struct {
+  bool online;
+  bool protect_active;
+  uint16_t voltage_10mv;
+  int16_t current_10ma;
+  uint8_t soc;
+  uint8_t soh;
+  uint16_t cell_max_mv;
+  uint16_t cell_min_mv;
+  int16_t temp_max_01c;
+  int16_t temp_min_01c;
+  uint16_t cycles;
+} PackTelemetry;
+static PackTelemetry pack_telem[16];
 
 static uint16_t charge_voltage_limit = CHARGE_VOLTAGE_LIMIT_STATIC;
 static uint16_t charge_current_limit = CHARGE_CURRENT_LIMIT_DEFAULT;
@@ -1516,6 +1540,22 @@ static bool bms_parse_response(uint8_t expected_addr) {
       agg_discharge_capable_count++;
   }
 
+  PackTelemetry *pt = &pack_telem[pack_idx];
+  pt->online = true;
+  pt->protect_active = ((reg_protect & 0x6590U) != 0) || (reg_error != 0);
+  pt->voltage_10mv = raw_voltage;
+  pt->current_10ma = raw_current;
+  pt->soc = (raw_soc <= 100U) ? (uint8_t)raw_soc : bms_soc;
+  pt->soh = ((raw_soh & 0xFFU) <= 100U) ? (uint8_t)(raw_soh & 0xFFU) : BATTERY_SOH_DEFAULT;
+  pt->cell_max_mv = pack_max_cell_mv;
+  pt->cell_min_mv = (pack_min_cell_mv != 0xFFFFU) ? pack_min_cell_mv : 0U;
+  pt->temp_max_01c = round_to_i16(pack_t_max * 10.0f);
+  pt->temp_min_01c = round_to_i16(pack_t_min * 10.0f);
+  if (data_bytes >= 64U) {
+    // Reg 29..30 (bytes 61..64): 32-bit cycle count, hi-first
+    pt->cycles = (uint16_t)(((uint16_t)uart_rx_buffer[63] << 8) | uart_rx_buffer[64]);
+  }
+
   return true;
 }
 
@@ -2161,10 +2201,13 @@ static void bms_aggregate_data(void) {
         pack_miss_count[i]++;
       if (pack_miss_count[i] <= 6) {
         active_pack_count++;
-      } else if (fast_poll_enabled && sweep_seen_mask != 0) {
-        // Pack switched off while others remain online: prune from fast loop so BG probe re-discovers it cleanly.
-        fast_poll_mask &= ~(1U << i);
-        pack_ever_seen_mask &= ~(1U << i);
+      } else {
+        pack_telem[i].online = false;
+        if (fast_poll_enabled && sweep_seen_mask != 0) {
+          // Pack switched off while others remain online: prune from fast loop so BG probe re-discovers it cleanly.
+          fast_poll_mask &= ~(1U << i);
+          pack_ever_seen_mask &= ~(1U << i);
+        }
       }
     }
   }
@@ -2536,6 +2579,94 @@ static uint8_t map_to_deye_v33_t1(uint8_t b_even, uint8_t b_odd) {
 }
 #endif
 
+#if CAN_PROTOCOL_DEYE_V33
+static void send_deye_pack_identity(uint8_t idx) {
+  uint8_t data[8];
+  static const uint8_t fw[8] = {0x20, 0x08, 0xAA, 'V', '7', '.', '0', '6'};
+  static const uint8_t model[8] = {'0', '5', '4', '0', '1', '0', '0', '0'};
+  send_can_std((uint32_t)(CAN_ID_DEYE_PACK_FW_BASE + idx), fw, 8);
+  send_can_std((uint32_t)(CAN_ID_DEYE_PACK_MODEL_BASE + idx), model, 8);
+
+  uint8_t pack_num = (uint8_t)(idx + 1U);
+  data[0] = 'C';
+  data[1] = 'B';
+  data[2] = '0';
+  data[3] = '0';
+  data[4] = '0';
+  data[5] = '0';
+  data[6] = (uint8_t)('0' + (pack_num / 10U));
+  data[7] = (uint8_t)('0' + (pack_num % 10U));
+  send_can_std((uint32_t)(CAN_ID_DEYE_PACK_SER_BASE + idx), data, 8);
+}
+
+static void send_deye_per_pack_frames(void) {
+  static uint32_t tx_cycle = 0;
+  static uint8_t slow_cursor = 0;
+  tx_cycle++;
+
+  uint8_t data[8];
+  uint8_t online_count = 0;
+  for (uint8_t i = 0; i < 16U; i++) {
+    if (!pack_telem[i].online)
+      continue;
+    online_count++;
+    const PackTelemetry *pt = &pack_telem[i];
+
+    // 0x110+i: Pack relay/status flag (0x31 = normal/online, 0x00 = protection)
+    memset(data, 0, 8);
+    data[7] = pt->protect_active ? 0x00U : 0x31U;
+    send_can_std((uint32_t)(CAN_ID_DEYE_PACK_STATUS_BASE + i), data, 8);
+
+    // 0x150+i: V (0.1 V), I (0.1 A, same sign as 0x356), SOC (0.1%), SOH (0.1%)
+    uint16_t v_01v = (uint16_t)((pt->voltage_10mv + 5U) / 10U);
+    int16_t cur_01a = (int16_t)((pt->current_10ma >= 0) ? ((pt->current_10ma + 5) / 10)
+                                                        : ((pt->current_10ma - 5) / 10));
+    if (BMS_CURRENT_CHARGE_IS_POSITIVE)
+      cur_01a = (int16_t)(-cur_01a);
+    put_u16le(&data[0], v_01v);
+    put_u16le(&data[2], (uint16_t)cur_01a);
+    put_u16le(&data[4], (uint16_t)pt->soc * 10U);
+    put_u16le(&data[6], (uint16_t)pt->soh * 10U);
+    send_can_std((uint32_t)(CAN_ID_DEYE_PACK_VI_BASE + i), data, 8);
+
+    // 0x200+i: CellMax (mV), CellMin (mV), Tmax (0.1 C), Tmin (0.1 C)
+    put_u16le(&data[0], pt->cell_max_mv);
+    put_u16le(&data[2], pt->cell_min_mv);
+    put_u16le(&data[4], (uint16_t)pt->temp_max_01c);
+    put_u16le(&data[6], (uint16_t)pt->temp_min_01c);
+    send_can_std((uint32_t)(CAN_ID_DEYE_PACK_CELL_BASE + i), data, 8);
+
+    // 0x400+i: Cycle count
+    memset(data, 0, 8);
+    data[0] = 0x02U;
+    put_u16le(&data[2], pt->cycles);
+    data[6] = 0x09U;
+    send_can_std((uint32_t)(CAN_ID_DEYE_PACK_CYCLES_BASE + i), data, 8);
+  }
+
+  // Slow identity frames (0x500+i, 0x600+i, 0x650+i):
+  // Broadcast at ~0.5 Hz for <=3 packs, or round-robin max 2 packs per 1s cycle for larger banks.
+  if (online_count > 0 && online_count <= 3U) {
+    if ((tx_cycle & 1U) == 0U) {
+      for (uint8_t i = 0; i < 16U; i++) {
+        if (pack_telem[i].online)
+          send_deye_pack_identity(i);
+      }
+    }
+  } else if (online_count > 3U) {
+    uint8_t sent = 0;
+    for (uint8_t step = 0; step < 16U && sent < 2U; step++) {
+      uint8_t idx = (uint8_t)((slow_cursor + step) & 0x0FU);
+      if (pack_telem[idx].online) {
+        send_deye_pack_identity(idx);
+        sent++;
+        slow_cursor = (uint8_t)((idx + 1U) & 0x0FU);
+      }
+    }
+  }
+}
+#endif
+
 static void send_all_frames(void) {
   gpio_bit_set(LED_PCSCAN_PORT, LED_PCSCAN_PIN); // LED4: CAN activity
   uint8_t data[8] = {0};
@@ -2631,11 +2762,11 @@ static void send_all_frames(void) {
 #if CAN_PROTOCOL_DEYE_V33
   memset(data, 0, 8);
   data[0] = 'D';
-  data[1] = 'E';
-  data[2] = 'Y';
-  data[3] = 'E';
-  data[4] = bms_pack_count;
-  data[5] = 0;
+  data[1] = 'Y';
+  data[2] = '0';
+  data[3] = '0';
+  data[4] = '1';
+  data[5] = bms_pack_count;
   put_u16le(&data[6], (uint16_t)bms_pack_count * 1000U); // 100.0 Ah per pack in 0.1 Ah
   send_can_std(CAN_ID_BRAND, data, 8);
 
@@ -2648,10 +2779,20 @@ static void send_all_frames(void) {
   put_u16le(&data[6], (uint16_t)round_to_i16(bank_temp_min * 10.0f));
   send_can_std(CAN_ID_CELL_EXTREMES, data, 8);
 
+  static const uint8_t deye_cfg[8] = {0x20, 0x08, 0x21, 0x02, 0x00, 0x00, 0x00, 0x00};
+  send_can_std(CAN_ID_DEYE_CFG, deye_cfg, 8);
+
+  memset(data, 0, 8);
+  put_u16le(&data[0], bms_pack_count);
+  put_u16le(&data[4], bms_pack_count);
+  send_can_std(CAN_ID_DEYE_PACK_COUNT, data, 8);
+
   memset(data, 0, 8);
   put_u16le(&data[0], charge_current_limit);
   put_u16le(&data[2], discharge_current_limit);
   send_can_std(CAN_ID_GRID_LIMITS, data, 4);
+
+  send_deye_per_pack_frames();
 #else
   static const uint8_t brand[8] = {'P', 'Y', 'L', 'O', 'N', 0, 0, 0};
   send_can_std(CAN_ID_BRAND, brand, 8);
