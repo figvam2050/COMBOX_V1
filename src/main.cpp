@@ -166,7 +166,7 @@ static inline bool dip_is_victron_profile(uint8_t code) {
 static inline bool dip_is_float_profile(uint8_t code) {
   return ((code & DIP_PROFILE_CODE_90) != 0) && !dip_is_victron_profile(code);
 }
-#define BG_PROBE_INTERVAL_MS 45000UL // background probe every 45 s for auto-discovering new packs
+#define BG_PROBE_INTERVAL_MS 2000UL // background probe every 2 s for fast pack re-discovery
 
 // Physical cell over-voltage threshold for BMS hardware protection confirmation (Q17).
 // Independent of DIP90 taper target so that software 90% profile never generates false alarms:
@@ -602,8 +602,10 @@ static uint32_t bal_last_hist_ms = 0;
 // Fast polling state (Smart Plug & Play always active)
 static bool fast_poll_enabled = true;
 static uint16_t fast_poll_mask = 0;
+static uint16_t lost_pack_mask = 0;
 static uint32_t last_bg_probe_ms = 0;
 static uint8_t bg_probe_candidate = 0;
+static uint8_t lost_probe_cursor = 0;
 static bool bg_probe_in_flight = false;
 static uint8_t current_addr_index = 0;
 static uint32_t last_wakeup_send_ms = 0; // Throttle BMS keepalive/wakeup FC06 frames
@@ -2196,6 +2198,7 @@ static void bms_aggregate_data(void) {
   for (uint8_t i = 0; i < 16; i++) {
     if (sweep_seen_mask & (1 << i)) {
       pack_ever_seen_mask |= (1 << i);
+      lost_pack_mask &= ~(1U << i);
       pack_miss_count[i] = 0;
       active_pack_count++;
     } else if (expected_mask & (1 << i)) {
@@ -2206,9 +2209,10 @@ static void bms_aggregate_data(void) {
       } else {
         pack_telem[i].online = false;
         if (fast_poll_enabled && sweep_seen_mask != 0) {
-          // Pack switched off while others remain online: prune from fast loop so BG probe re-discovers it cleanly.
+          // Pack switched off while others remain online: prune from fast loop and prioritize in BG probe.
           fast_poll_mask &= ~(1U << i);
           pack_ever_seen_mask &= ~(1U << i);
+          lost_pack_mask |= (1U << i);
         }
       }
     }
@@ -2901,18 +2905,30 @@ static void bms_advance_poll_address(uint32_t now) {
   // Fast sweep complete for all latched packs
   bms_aggregate_data();
 
-  // Background discovery probe check
+  // Background discovery probe check: prioritize previously seen lost packs first
   if ((fast_poll_mask != 0xFFFF) && (now - last_bg_probe_ms >= BG_PROBE_INTERVAL_MS)) {
     uint8_t cand = 0xFF;
-    for (uint8_t s = 0; s < 16; s++) {
-      uint8_t c = (bg_probe_candidate + s) & 0x0F;
-      if (!(fast_poll_mask & (1 << c))) {
-        cand = c;
-        break;
+    uint16_t pending_lost = (uint16_t)(lost_pack_mask & (uint16_t)(~fast_poll_mask));
+    if (pending_lost != 0) {
+      for (uint8_t s = 0; s < 16; s++) {
+        uint8_t c = (lost_probe_cursor + s) & 0x0F;
+        if (pending_lost & (1U << c)) {
+          cand = c;
+          lost_probe_cursor = (uint8_t)((cand + 1U) & 0x0F);
+          break;
+        }
+      }
+    } else {
+      for (uint8_t s = 0; s < 16; s++) {
+        uint8_t c = (bg_probe_candidate + s) & 0x0F;
+        if (!(fast_poll_mask & (1 << c))) {
+          cand = c;
+          bg_probe_candidate = (uint8_t)((cand + 1U) & 0x0F);
+          break;
+        }
       }
     }
     if (cand != 0xFF) {
-      bg_probe_candidate = (cand + 1) & 0x0F;
       last_bg_probe_ms = now;
       bg_probe_in_flight = true;
       current_addr_index = cand;
