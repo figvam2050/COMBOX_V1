@@ -2244,11 +2244,12 @@ static void bms_aggregate_data(void) {
         avg_cell_mv, agg_min_cell_mv, agg_max_cell_mv, bms_current, bms_voltage);
 
     // Перевірка стану кулонометра BMS (рег 24):
-    // Якщо BMS рапортує 100% при напрузі < 53.0 В — кулонометр вважається завислим.
+    // Поріг залежить від активного профілю (CVL - 1.0 В: 53.0 В / 52.2 В / 50.0 В).
     uint8_t bms_raw_soc = (agg_soc_count > 0)
                               ? (uint8_t)(agg_soc_sum / agg_soc_count)
                               : 0xFF;
-    bool bms_coulomb_stuck = (bms_raw_soc >= 99 && bms_voltage < 53.0f);
+    float stuck_v_thresh = (float)profile_charge_voltage_limit * 0.1f - 1.0f;
+    bool bms_coulomb_stuck = (bms_raw_soc >= 99 && bms_voltage < stuck_v_thresh);
 
     uint8_t soc_target = adaptive_soc;
     if (bms_raw_soc <= 100 && !bms_coulomb_stuck && bms_raw_soc > 0) {
