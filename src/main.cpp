@@ -20,7 +20,7 @@
 #include <string.h>
 
 #define BMS_BAUDRATE 9600
-#define BMS_TIMEOUT_MS 400         // 400 ms: matches Deye RS485 turnaround window for slow BMS
+#define BMS_TIMEOUT_MS 600         // 600 ms: matches slow Vision BMS turnaround during cell balancing
 #define BMS_RESPONSE_LEN 83
 #define BMS_POLL_PERIOD_MS 400     // 400 ms per query: matches Deye inverter polling cadence
 #define BMS_POLL_GAP_MS 20         // 20 ms minimum bus quiet gap between RS485 transactions
@@ -546,6 +546,8 @@ static uint16_t sweep_seen_mask = 0;
 typedef struct {
   bool online;
   bool protect_active;
+  bool charge_ok;
+  bool discharge_ok;
   uint16_t voltage_10mv;
   int16_t current_10ma;
   uint8_t soc;
@@ -1222,8 +1224,9 @@ static void bms_poll_step(uint32_t now) {
       break;
     }
 
-    // BMS did not start answering within timeout (400 ms)
-    if (uart_rx_index == 0 && (now - bms_fsm_query_ms) >= BMS_TIMEOUT_MS) {
+    // Empty address in bg_probe times out fast (80 ms); known pack gets full BMS_TIMEOUT_MS (600 ms)
+    uint32_t wait_timeout_ms = bg_probe_in_flight ? BMS_SEARCH_TIMEOUT_MS : BMS_TIMEOUT_MS;
+    if (uart_rx_index == 0 && (now - bms_fsm_query_ms) >= wait_timeout_ms) {
       rs485_clear_errors();
       gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
       bms_advance_poll_address(now);
@@ -1232,8 +1235,8 @@ static void bms_poll_step(uint32_t now) {
       break;
     }
 
-    // Hard cap from query start (700 ms)
-    if ((now - bms_fsm_query_ms) >= 700) {
+    // Hard cap from query start (900 ms)
+    if ((now - bms_fsm_query_ms) >= 900) {
       rs485_clear_errors();
       gpio_bit_reset(LED_BMS485_PORT, LED_BMS485_PIN);
       bms_advance_poll_address(now);
@@ -1547,6 +1550,8 @@ static bool bms_parse_response(uint8_t expected_addr) {
   PackTelemetry *pt = &pack_telem[pack_idx];
   pt->online = true;
   pt->protect_active = ((reg_protect & 0x6590U) != 0) || (reg_error != 0);
+  pt->charge_ok = pack_charge_ok;
+  pt->discharge_ok = pack_discharge_ok;
   pt->voltage_10mv = raw_voltage;
   pt->current_10ma = raw_current;
   pt->soc = (raw_soc <= 100U) ? (uint8_t)raw_soc : bms_soc;
@@ -2208,6 +2213,8 @@ static void bms_aggregate_data(void) {
         active_pack_count++;
       } else {
         pack_telem[i].online = false;
+        pack_telem[i].charge_ok = false;
+        pack_telem[i].discharge_ok = false;
         if (fast_poll_enabled && sweep_seen_mask != 0) {
           // Pack switched off while others remain online: prune from fast loop and prioritize in BG probe.
           fast_poll_mask &= ~(1U << i);
@@ -2296,10 +2303,27 @@ static void bms_aggregate_data(void) {
   can_alarm_b3 = sweep_alarm_b3;
   bank_any_pack_protect = sweep_any_pack_protect;
 
+  // Count charge/discharge capable packs using latched per-pack telemetry so single RS485 misses
+  // within the 6-miss debounce window never cause transient DCL/CCL drops (e.g. 400A -> 300A -> 400A).
+  uint8_t debounced_charge_packs = 0;
+  uint8_t debounced_discharge_packs = 0;
+  for (uint8_t i = 0; i < 16U; i++) {
+    if (pack_telem[i].online) {
+      if (pack_telem[i].charge_ok)
+        debounced_charge_packs++;
+      if (pack_telem[i].discharge_ok)
+        debounced_discharge_packs++;
+    }
+  }
+  if (debounced_charge_packs > effective_packs)
+    debounced_charge_packs = effective_packs;
+  if (debounced_discharge_packs > effective_packs)
+    debounced_discharge_packs = effective_packs;
+
   // Asymmetry Debounce (3 consecutive sweeps):
   // Filter out transient packet jitter or brief RS485 delays without flapping CCL.
   bool sweep_asym = sweep_charge_asymmetry_clamp ||
-                    (agg_charge_capable_count < effective_packs);
+                    (debounced_charge_packs < effective_packs);
   if (sweep_asym) {
     if (asymmetry_streak_count < 10)
       asymmetry_streak_count++;
@@ -2338,13 +2362,8 @@ static void bms_aggregate_data(void) {
   // If 1 of 2 packs has discharge protect/standby, DCL scales to remaining capable packs,
   // preventing the inverter from dropping backup EPS power to the house as long as >= 1 pack is alive.
   // Fail-closed: if 0 packs capable, limit = 0.
-  uint8_t charge_packs = agg_charge_capable_count;
-  if (charge_packs > effective_packs)
-    charge_packs = effective_packs;
-
-  uint8_t discharge_packs = agg_discharge_capable_count;
-  if (discharge_packs > effective_packs)
-    discharge_packs = effective_packs;
+  uint8_t charge_packs = debounced_charge_packs;
+  uint8_t discharge_packs = debounced_discharge_packs;
 
   bool forced = (dip_applied_code & DIP_FORCED_BALANCE_MASK) != 0;
 
