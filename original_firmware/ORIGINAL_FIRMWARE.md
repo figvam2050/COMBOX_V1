@@ -1,7 +1,7 @@
 # Заводська прошивка COM-Box (Felicity Solar G5RC) — повний розбір
 
 Див. також: [`../README.md`](../README.md) (основний опис проєкту COM-Box),
-[`../DEYE_CAN_RS485_BASE.md`](../DEYE_CAN_RS485_BASE.md) (база знань CAN/RS485),
+[`../DEYE_INVERTER_CAN_RS485.md`](../DEYE_INVERTER_CAN_RS485.md) (протоколи CAN/RS485),
 [`../PORT_MAPPING.md`](../PORT_MAPPING.md) (еталон фізичних пінів; **при складанні
 цього файлу не використовувався**), [`../can_sniffer/README.md`](../can_sniffer/README.md) (пасивний CAN-сніффер).
 

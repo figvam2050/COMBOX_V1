@@ -1,6 +1,8 @@
 # Повний інженерний аудит проєкту COM-Box (`2026-11-19`)
 
-> **Обсяг перевірки:** прошивка [`src/main.cpp`](src/main.cpp) (3 133 рядки), скрипти збірки/лінкера (`platformio.ini`, `detect_probe.py`, `generate_hex.py`, `*.ld`), Python-інструменти (`tools/*.py`), офіційні специфікації (`MODbus Communication Protocol_15-16S.pdf`, `battery_manual.pdf`), живі логи (`sd_card/can_scan_02.log`, `untitled folder/can_raw_log.csv`) та вся документація `.md`.
+> **Статус виконання (19.11.2026):** ✅ **Усі пункти (§1–§7) виправлено та верифіковано** (`pio run` обох цілей + host unit-тести прошивки + усі `--selftest` та `--queries` 48/48 + регенерація `USER_MANUAL.html` / `USER_MANUAL.pdf`). Бекап до виправлень: тег `backup-2026-11-19-pre-audit-fixes` і каталог `backups/2026-11-19_pre_audit_fixes/`.
+
+> **Обсяг перевірки:** прошивка [`src/main.cpp`](src/main.cpp) (3 133 рядки на момент аудиту), скрипти збірки/лінкера (`platformio.ini`, `detect_probe.py`, `generate_hex.py`, `*.ld`), Python-інструменти (`tools/*.py`), офіційні специфікації (`MODbus Communication Protocol_15-16S.pdf`, `battery_manual.pdf`), живі логи (`sd_card/can_scan_02.log`, `untitled folder/can_raw_log.csv`) та вся документація `.md`.
 
 ---
 
