@@ -3,7 +3,7 @@ import os
 import shutil
 
 # Image offset of the 'G5RC' dword the stock bootloader checks at 0x08004150
-# (vector table is 0x150 bytes: 16 core slots + IRQ0..67). See ORIGINAL_FIRMWARE.md §13.
+# (vector table is 0x150 bytes: 16 core slots + IRQ0..67). See original_firmware/ORIGINAL_FIRMWARE.md §13.
 G5RC_OFFSET = 0x150
 G5RC_MAGIC = b"G5RC"
 

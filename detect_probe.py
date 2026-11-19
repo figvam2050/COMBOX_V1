@@ -40,7 +40,7 @@ def detect_connected_probes():
                         if v == 0x0483 and p in (0x3748, 0x374B, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754, 0x3755, 0x3757):
                             if not any(x[0] == "stlink" for x in probes):
                                 probes.append(("stlink", None, f"ST-Link V2 (USB {hex(v)}:{hex(p)} {name})"))
-                        elif (v == 0x0D28 or "dap" in name.lower()) and not any(x[0] == "cmsis-dap" for x in probes):
+                        elif (v == 0x0D28 or any(tok in name.lower() for tok in ("cmsis-dap", "daplink", "cmsis_dap"))) and not any(x[0] == "cmsis-dap" for x in probes):
                             probes.append(("cmsis-dap", None, f"DAPLink (USB {hex(v)}:{hex(p)} {name})"))
         except Exception:
             pass
@@ -83,7 +83,10 @@ board_config = env.BoardConfig()
 if probes:
     # If DAPLink is connected, use cmsis-dap
     # If only ST-Link is connected, use stlink
-    selected_proto, cdc_port, desc = probes[0]
+    selected_proto, cdc_port, desc = next(
+        (p for p in probes if p[0] == "cmsis-dap"),
+        probes[0],
+    )
     print(f"\n[PROBE AUTO-DETECT] \033[92mFound hardware probe:\033[0m {desc} -> Setting upload_protocol = \033[96m{selected_proto}\033[0m\n")
     env.Replace(UPLOAD_PROTOCOL=selected_proto)
     board_config.update("upload.protocol", selected_proto)

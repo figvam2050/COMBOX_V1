@@ -114,7 +114,7 @@ def decode_vision(regs: list) -> str:
     cur = s16(regs[1]) / 100.0
     cells = [regs[i] for i in range(2, min(0x12, n)) if regs[i] > 0]
     cell_s = f"cells={min(cells)}-{max(cells)}mV" if cells else "cells=-"
-    temps = "/".join(str(regs[i]) for i in (0x12, 0x13, 0x14) if i < n)
+    temps = "/".join(str(s16(regs[i])) for i in (0x12, 0x13, 0x14) if i < n)
     out.append(f"V={volt:.2f} I={cur:g} {cell_s} t={temps} "
                f"SOC={regs[0x18] if n > 0x18 else '-'} SOH={regs[0x17] if n > 0x17 else '-'}")
     tail = [f"r{i:02X}={fmt_r(regs[i])}" for i in range(0x19, n)]
@@ -168,6 +168,9 @@ class Sniffer:
             self.last_req[addr] = (start, qty)
             st["req"] += 1
             self.emit(t, "REQ", f"addr=0x{addr:02X} FC{fc:02X} start=0x{start:04X} qty={qty}", frame)
+        elif fc == 0x06 and len(frame) == 8 and u16(frame, 2) == 0x002A and u16(frame, 4) == 0x0001:
+            st["req"] += 1
+            self.emit(t, "WAKE", f"addr=0x{addr:02X} FC06 wakeup reg=0x002A val=0x0001", frame)
         elif fc in (0x05, 0x06) or fc in (0x0F, 0x10):
             self.writes += 1
             st["req"] += 1
@@ -234,6 +237,19 @@ def run_selftest() -> int:
     f3, _, _ = extract_frames(mk_resp(2, [10200, 10200]))
     sn3.handle(0.1, f3[0])
     assert "@0x50=[10200, 10200]" in "\n".join(out3), out3
+    # signed negative temperature and FC06 0x002A wakeup handling
+    neg_regs = list(regs)
+    neg_regs[0x12], neg_regs[0x13], neg_regs[0x14] = 0xFFFE, 0xFFFB, 0xFFFF  # -2 / -5 / -1 C
+    out4 = []
+    sn4 = Sniffer(out4)
+    w_body = bytes([0x01, 0x06, 0x00, 0x2A, 0x00, 0x01])
+    w_req = w_body + modbus_crc16(w_body).to_bytes(2, "little")
+    f_w, _, _ = extract_frames(w_req + mk_resp(1, neg_regs))
+    sn4.handle(0.0, f_w[0])
+    sn4.handle(0.1, f_w[1])
+    t4 = "\n".join(out4)
+    assert "WAKE" in t4 and "unexpected write" not in t4 and sn4.writes == 0, t4
+    assert "t=-2/-5/-1" in t4, t4
     print("selftest OK")
     return 0
 

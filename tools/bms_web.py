@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v2.6: read-only).
+"""Local multi-pack web monitor for Vision BMS (macOS analogue of BMS_TOOLS, v3.6: read-only).
 
 Monitors multiple battery packs over the RS485 tap (Modbus RTU addresses 0x01..0x10)
 and serves an interactive tabbed dashboard on http://127.0.0.1:8080.
 Version 3.6
-Features (v2.6):
+Features (v3.6):
   - Multi-pack auto-discovery (0x01..0x10) with Plug & Play hot-plug / unplug detection.
   - Active Polling (Master) vs Passive Scanning (Sniffer) switchable in 1 click.
   - Cross-platform auto-detection of USB-RS485 adapters (Windows COMx, macOS, Linux).
@@ -413,34 +413,67 @@ def merge_dev_info(parsed: dict, dev_info: dict) -> dict:
     return merged
 
 
-# 15S LiFePO4 OCV-таблиця калібрована під Vision V-LFP48100 (ізоморфно до src/main.cpp)
-LFP_OCV_TABLE = [
-    (3600, 100.0),
-    (3450, 95.0),
-    (3400, 90.0),
-    (3340, 75.0),
-    (3320, 60.0),
-    (3300, 50.0),
-    (3285, 31.0),
-    (3250, 20.0),
+# 15S LiFePO4 3-режимна OCV-модель (Заряд / Розряд / Спокій) — синхронізовано з src/main.cpp
+LFP_CHARGE_TABLE = [
+    (3540, 100.0),
+    (3435, 98.0),
+    (3410, 93.0),
+    (3395, 80.0),
+    (3380, 62.0),
+    (3365, 45.0),
+    (3350, 30.0),
+    (3310, 20.0),
     (3200, 10.0),
+    (2900, 0.0),
+]
+
+LFP_DISCHARGE_TABLE = [
+    (3360, 100.0),
+    (3300, 90.0),
+    (3280, 80.0),
+    (3250, 60.0),
+    (3220, 40.0),
+    (3180, 25.0),
+    (3100, 15.0),
     (3000, 5.0),
+    (2850, 0.0),
+]
+
+LFP_OCV_TABLE = [
+    (3450, 100.0),
+    (3380, 99.0),
+    (3350, 90.0),
+    (3330, 80.0),
+    (3300, 65.0),
+    (3280, 50.0),
+    (3250, 35.0),
+    (3220, 20.0),
+    (3150, 10.0),
     (2900, 0.0),
 ]
 
 
-def soc_from_cell_mv(mv: int) -> float:
-    if mv >= LFP_OCV_TABLE[0][0]:
-        return 100.0
-    if mv <= LFP_OCV_TABLE[-1][0]:
-        return 0.0
-    for i in range(1, len(LFP_OCV_TABLE)):
-        if mv >= LFP_OCV_TABLE[i][0]:
-            mv_hi, soc_hi = LFP_OCV_TABLE[i - 1]
-            mv_lo, soc_lo = LFP_OCV_TABLE[i]
+def _interp_soc(table: list, mv: int) -> float:
+    if mv >= table[0][0]:
+        return float(table[0][1])
+    if mv <= table[-1][0]:
+        return float(table[-1][1])
+    for i in range(1, len(table)):
+        if mv >= table[i][0]:
+            mv_hi, soc_hi = table[i - 1]
+            mv_lo, soc_lo = table[i]
             frac = (mv - mv_lo) / (mv_hi - mv_lo)
             return round(soc_lo + frac * (soc_hi - soc_lo), 1)
     return 0.0
+
+
+def soc_from_cell_mv(mv: int, current_a: float = 0.0) -> float:
+    # Vision BMS sign: + = charge (> +0.5 A), - = discharge (< -0.5 A)
+    if current_a > 0.5:
+        return min(99.0, _interp_soc(LFP_CHARGE_TABLE, mv))
+    if current_a < -0.5:
+        return _interp_soc(LFP_DISCHARGE_TABLE, mv)
+    return _interp_soc(LFP_OCV_TABLE, mv)
 
 
 def decode_regs(regs: list) -> dict:
@@ -459,10 +492,11 @@ def decode_regs(regs: list) -> dict:
                  "Standby" if low == 0 else f"Unknown({low:#04x})")
     info = decode_dev_info_block(regs[105:128]) if n >= 128 else {}
     min_c = min(alive)
-    # OCV-SOC is estimated from the AVERAGE cell voltage. The weakest cell is
-    # much more sensitive to imbalance and load sag, so min-based SOC reads low.
+    # OCV-SOC is estimated from the AVERAGE cell voltage and current direction.
+    # The weakest cell is more sensitive to imbalance and load sag.
+    cur_a = s16(regs[1]) / 100.0 if n > 1 else 0.0
     cell_avg = round(sum(alive) / len(alive))
-    soc_avg = soc_from_cell_mv(cell_avg) if cell_avg > 0 else None
+    soc_avg = soc_from_cell_mv(cell_avg, cur_a) if cell_avg > 0 else None
     return {
         "voltage": regs[0] / 100.0 if n > 0 else 0.0,
         "current": s16(regs[1]) / 100.0 if n > 1 else 0.0,
@@ -535,8 +569,8 @@ def parse_bus(buf: bytes):
             i += 1                           # garbage, resync
             continue
         if kind == "req":
-            start = (frame[3] << 8) | frame[4]
-            qty = (frame[5] << 8) | frame[6]
+            start = (frame[2] << 8) | frame[3]
+            qty = (frame[4] << 8) | frame[5]
             frames.append(("req", addr, (start, qty)))
         else:
             data = frame[3:-2]
@@ -814,7 +848,7 @@ def get_bank_summary(packs: dict) -> dict:
         err_val = parsed.get("error_code", 0) or 0
         c_max = parsed.get("cell_max") or 0
         c_min = parsed.get("cell_min") or 0
-        if warn_val != 0 or prot_val != 0 or err_val != 0:
+        if warn_val != 0 or (prot_val & ~FLOAT_STOP_MASK) != 0 or err_val != 0:
             alarm_cnt += 1
         if (prot_val & 0x0002) or ((warn_val & 0x0002) and c_max >= 3550) or c_max >= 3600:
             ov_latched_packs.append(p_addr)
@@ -900,6 +934,7 @@ class BmsBus:
 
         self._rescan_requested = True
         self._bg_probe_idx = 0
+        self._passive_last_req = {}
         self._stop = False
         self._mock_t = 0.0
 
@@ -1409,8 +1444,16 @@ class BmsBus:
         protection = parsed.get("protection") or 0
         error = parsed.get("error_code") or 0
         t_max = parsed.get("temp_max")
+        sensors = parsed.get("temp_sensors") or []
+        cell_temps = [t for t in sensors[:4] if -40 <= t <= 120]
+        if len(sensors) >= 2 and sensors[0] == 0 and sensors[1] == 0 and t_max not in (None, 0):
+            cell_temps = [t for t in cell_temps if t != 0]
+        t_avg = parsed.get("temp_avg")
+        if t_avg is not None and -40 <= t_avg <= 120:
+            cell_temps.append(t_avg)
+        t_min = min(cell_temps) if cell_temps else t_max
         temp_high = t_max is not None and t_max >= ALARM_TEMP_HIGH_C
-        temp_low = t_max is not None and t_max <= ALARM_TEMP_LOW_C
+        temp_low = t_min is not None and t_min <= ALARM_TEMP_LOW_C
         return (status, warning, protection, error, bool(temp_high), bool(temp_low))
 
     @staticmethod
@@ -1687,6 +1730,16 @@ class BmsBus:
                         self.port = ""
                     self._mark_offline(self.last_err)
 
+    def _passive_accept_resp(self, addr: int, payload: list) -> bool:
+        """Accept passive telemetry only from FC03 start=0x0000 windows (reject BMS_TOOLS EEPROM reads like 0x002D)."""
+        if not (1 <= addr <= 16):
+            return False
+        last = self._passive_last_req.get(addr)
+        if last is not None:
+            start, qty = last
+            return start == 0 and len(payload) >= 28
+        return len(payload) in (28, 39)
+
     def passive_step(self, buf: bytes) -> bytes:
         if not self.mock and (self.ser is None or not self.ser.is_open):
             if not self.open():
@@ -1716,7 +1769,9 @@ class BmsBus:
 
             now = time.time()
             for kind, addr, payload in frames:
-                if kind == "resp" and len(payload) >= 28 and (1 <= addr <= 16):
+                if kind == "req" and (1 <= addr <= 16):
+                    self._passive_last_req[addr] = payload
+                elif kind == "resp" and self._passive_accept_resp(addr, payload):
                     with self.lock:
                         self._update_pack_telemetry(addr, payload)
                         if addr not in self.active_addrs:
@@ -2521,11 +2576,11 @@ const ALARM_HELP_DB = {
   },
   "W:Low Capacity": {
     cat: "Warning (0026)",
-    title: "Низька ємність (Low Capacity, 5 %)",
-    level: "ok",
-    levelName: "Інформаційний стан",
-    desc: "Balance → Low Capacity Warn = 5 %. Біт 0x1000 також може означати Standby Latch: BMS фіксує завершення заряду, коли струм падає до нуля, а батарея виходить на верхню полицю напруги.",
-    action: "Це нормальний штатний стан після закінчення заряду. Прапорець знімається автоматично під час першого ж розряду струмом від 1-2 А."
+    title: "Низька ємність (Low Capacity, <= 5 %)",
+    level: "warn",
+    levelName: "Попередження",
+    desc: "Реєстр Warning (0026) біт 0x1000: залишок ємності впав до 5 % або нижче. (Не плутати з реєстром Protection 0027 біт 0x1000 = Float stop / Standby Latch після завершення заряду!)",
+    action: "Підключіть заряд від мережі або генератора."
   },
   "W:Float stop": {
     cat: "Warning (0026)",
@@ -3473,6 +3528,8 @@ function getComboxProfileSummary() {
   }
 
   const cclPerPack = dip4 ? 15 : 50;
+  const rawCclBank = packCount * cclPerPack;
+  const cclBank = dip5 ? Math.min(rawCclBank, 5.0) : rawCclBank;
   return {
     packCount, dip1, dip2, dip3, dip4, dip5,
     baseCvlShort, baseCvlLabel,
@@ -3480,7 +3537,7 @@ function getComboxProfileSummary() {
     cvlShort: dip5 ? swingShort : baseCvlShort,
     swingShort, swingLabel,
     cclPerPack,
-    cclBank: packCount * cclPerPack,
+    cclBank,
     finishCcl: dip5 ? 2.0 : 3.0,
     dclBank: packCount * 100
   };
@@ -4554,8 +4611,17 @@ def selftest() -> int:
     regs[2], regs[3] = 3200, 3400
     pa = decode_regs(regs)
     assert pa["cell_avg"] == 3300, f"cell avg: {pa['cell_avg']}"
-    assert pa["soc_avg"] == 50.0, f"soc avg: {pa['soc_avg']}"
+    assert pa["soc_avg"] == 65.0, f"rest soc avg: {pa['soc_avg']}"
     assert pa["real_soc"] == pa["soc_avg"], "real_soc must alias soc_avg"
+    # Verify 3-mode SOC selection (Vision sign: + = charge, - = discharge)
+    regs_chg = list(regs)
+    regs_chg[1] = 1500  # +15.00 A charge -> LFP_CHARGE_TABLE (3365 mV = 45%)
+    regs_chg[2], regs_chg[3] = 3365, 3365
+    assert abs(decode_regs(regs_chg)["soc_avg"] - 45.0) < 0.2, "charge table SOC"
+    regs_dsg = list(regs)
+    regs_dsg[1] = (-1500) & 0xFFFF  # -15.00 A discharge -> LFP_DISCHARGE_TABLE (3250 mV = 60%)
+    regs_dsg[2], regs_dsg[3] = 3250, 3250
+    assert abs(decode_regs(regs_dsg)["soc_avg"] - 60.0) < 0.2, "discharge table SOC"
     regs[2], regs[3] = 3456, 0
     regs[25] = 0x0004
     bits = {b["name"]: b["on"] for b in decode_regs(regs)["status_bits"]}
@@ -4659,6 +4725,24 @@ def selftest() -> int:
     kinds = [(k, a) for k, a, _ in frames]
     assert ("req", 1) in kinds, f"parse request: {kinds}"
     assert ("resp", 1) in kinds, f"parse response: {kinds}"
+    assert frames[0] == ("req", 1, (0, 28)), f"parse_bus req off-by-1: {frames[0]}"
+    # Passive telemetry filter rejects BMS_TOOLS 0x002D EEPROM reads
+    tb = BmsBus("MOCK", 9600, mock=True, passive=True)
+    tb._passive_last_req[1] = (0x002D, 91)
+    assert tb._passive_accept_resp(1, [0] * 91) is False, "must reject EEPROM 0x002D resp"
+    tb._passive_last_req[1] = (0x0000, 39)
+    assert tb._passive_accept_resp(1, [0] * 39) is True, "must accept telemetry 0x0000 resp"
+    # Cold alarm signature checks coldest NTC sensor, not only temp_max
+    cold_p = decode_regs(regs)
+    cold_p["temp_max"] = 20
+    cold_p["temp_avg"] = 15
+    cold_p["temp_sensors"] = [-2, 18, 20, 19, 0, 0]
+    assert tb._alarm_signature(cold_p)[-1] is True, "cold temp_low must trigger when any NTC <= 0C"
+    # FLOAT_STOP_MASK (0x1000) alone must not increment alarm_cnt in get_bank_summary
+    fs_regs = list(regs)
+    fs_regs[25], fs_regs[26], fs_regs[27], fs_regs[28] = 0, 0, 0x1000, 0
+    fs_sum = get_bank_summary({1: {"addr": 1, "addr_hex": "0x01", "online": True, "parsed": decode_regs(fs_regs)}})
+    assert fs_sum["alarm_count"] == 0, f"FLOAT_STOP must not count as alarm: {fs_sum['alarm_count']}"
 
     # --- Multi-pack bank summary & autonomy test ---
     pack1_regs = list(regs)

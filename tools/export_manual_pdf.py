@@ -329,13 +329,15 @@ def main():
         "8-dip-11",               # Розділ 8: Сценарії при графіках відключень
         "9-",                     # Розділ 9: Чек-лист запуску
         "10-troubleshooting",     # Розділ 10: Troubleshooting
-        "11-bms-web-station-v24", # Розділ 11: BMS Web Station
         "12-pdf",                 # Розділ 12: PDF експорт
         "13-sticker-memo",        # Розділ 13: Стікер-пам'ятка на корпус
     ]
     for p_id in page_break_ids:
         sec = soup.find(id=p_id)
         if sec:
+            sec["style"] = "break-before: page; page-break-before: always;"
+    for sec in soup.find_all(id=True):
+        if sec["id"].startswith("11-bms-web-station"):
             sec["style"] = "break-before: page; page-break-before: always;"
 
     # Додаткова гарантія: Додаток зі стікером завжди виноситься на окрему фінальну сторінку

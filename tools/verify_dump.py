@@ -5,10 +5,10 @@
   1. Перевіряє CRC16 Modbus кадрів відповіді BMS (FC03, 83 байти).
   2. Декодує поля ТОЧНО за розкладом прошивки src/main.cpp :: bms_parse_response
      (зсуви байтів, масштаби, & 0xFF для SOC/SOH, знаковий струм).
-  3. Перевіряє CRC усіх 16 запитів BMS_QUERY_TABLE (таблиця витягується з
-     src/main.cpp, тож синхронізація з джерелом автоматична).
+  3. Перевіряє CRC усіх 16 запитів BMS_QUERY_TABLE, BMS_SEARCH_QUERY_TABLE
+     та BMS_WAKEUP_QUERY_TABLE (витягуються із src/main.cpp автоматично).
   4. --selftest: будує синтетичний кадр зі значень, задокументованих у
-     аналіз.md (дамп 08.10.2026), і проганяє його через той самий парсер.
+     README.md / dumps (дамп 08.10.2026), і проганяє його через той самий парсер.
 
 Використання:
   python3 tools/verify_dump.py --selftest
@@ -37,9 +37,9 @@ REG_VOLTAGE = 0x0000   # байти [3,4]   /100 → V
 REG_CURRENT = 0x0001   # байти [5,6]   int16 BE, /100 → A (знаковий!)
 REG_CELLS_FIRST = 0x0002  # байти [7,8] … [36,37] — 15 комірок, мВ
 CELL_COUNT = 15
-REG_TEMP_A = 0x0012    # байти [39,40]
-REG_TEMP = 0x0013      # байти [41,42] — парсер бере саме цей (цілі °C)
-REG_TEMP_B = 0x0014    # байти [43,44]
+REG_TEMP_A = 0x0012    # байти [39,40] Temp PCB
+REG_TEMP = 0x0013      # байти [41,42] Temp Avg (int16 BE, °C)
+REG_TEMP_B = 0x0014    # байти [43,44] Temp Max
 # P1.1 (22.10.2026): офсети за PDF V01.01 — SOC = рег 0024, SOH = рег 0023.
 # Раніше REG_SOC/REG_SOH вказували на рег 21 (Cap Remaining) / 22 (MaxCharge) —
 # маскувалось 100 А·ч (у фікстурі CapRem=50 читався як «SOC 50», реальний 49).
@@ -48,7 +48,7 @@ REG_SOH = 0x0017       # байти [49,50]
 REG_CELL_COUNT = 0x0024  # байти [75,76]
 REG_PACK_100AH = 0x0025  # байти [77,78] (у дампі = 1000)
 
-# Очікувані значення з дампа 08.10.2026 (ANALYSIS.md, Q3) — для --selftest.
+# Очікувані значення з дампа 08.10.2026 (tools/dumps/2026-10-08_pack01.hex) — для --selftest.
 # SOC=49 з реєстру 0024 (не 50 — це був Cap Remaining, рег 0021).
 GOLDEN = {
     "voltage_v": 49.45,
@@ -91,6 +91,10 @@ def reg(frame: bytes, index: int) -> int:
     return (frame[off] << 8) | frame[off + 1]
 
 
+def s16(u: int) -> int:
+    return (u ^ 0x8000) - 0x8000
+
+
 def decode_response(frame: bytes) -> dict:
     """Декод відповіді за розкладом прошивки. Ключі — очікувані значення."""
     cells = [reg(frame, REG_CELLS_FIRST + i) for i in range(CELL_COUNT)]
@@ -100,13 +104,13 @@ def decode_response(frame: bytes) -> dict:
         "bytecount": frame[2],
         "voltage_raw": reg(frame, REG_VOLTAGE),
         "voltage_v": reg(frame, REG_VOLTAGE) / 100.0,
-        "current_raw": (reg(frame, REG_CURRENT) ^ 0x8000) - 0x8000,  # int16 BE
-        "current_a": ((reg(frame, REG_CURRENT) ^ 0x8000) - 0x8000) / 100.0,
+        "current_raw": s16(reg(frame, REG_CURRENT)),  # int16 BE
+        "current_a": s16(reg(frame, REG_CURRENT)) / 100.0,
         "cells_mv": cells,
         "cell16_mv": reg(frame, 0x11),            # рег 0x11: 0 → комірки 16 нема
-        "temp_a": reg(frame, REG_TEMP_A),
-        "temp_c": float(reg(frame, REG_TEMP)),
-        "temp_b": reg(frame, REG_TEMP_B),
+        "temp_a": s16(reg(frame, REG_TEMP_A)),
+        "temp_c": float(s16(reg(frame, REG_TEMP))),
+        "temp_b": s16(reg(frame, REG_TEMP_B)),
         "soc_pct": reg(frame, REG_SOC) & 0xFF,
         "soh_pct": reg(frame, REG_SOH) & 0xFF,
         "cell_count_reg": reg(frame, REG_CELL_COUNT),
@@ -162,15 +166,15 @@ def print_frame(frame: bytes) -> None:
     print(f"  струм            {d['current_a']:+.2f} A (raw {d['current_raw']}, знаковий)")
     print(f"  комірки (15)     min {min(d['cells_mv'])} / max {max(d['cells_mv'])} мВ  {d['cells_mv']}")
     print(f"  реєстр 0x11      {reg(frame, 0x11)} мВ (0 → 15 комірок, не 16)")
-    print(f"  температури      0x12={d['temp_a']}  0x13={d['temp_c']:.0f}°C (парсер)  0x14={d['temp_b']}")
+    print(f"  температури      PCB={d['temp_a']}°C  Avg={d['temp_c']:.0f}°C  Max={d['temp_b']}°C")
     print(f"  SOC / SOH        {d['soc_pct']}% / {d['soh_pct']}%  (& 0xFF)")
     print(f"  реєстр 0x24/0x25 {d['cell_count_reg']} / {d['pack_100ah_reg']}")
 
 
 def verify_queries(src: str) -> int:
-    """Витягує BMS_QUERY_TABLE та BMS_SEARCH_QUERY_TABLE із src/main.cpp і перевіряє CRC кожного запиту."""
+    """Витягує BMS_*_QUERY_TABLE із src/main.cpp і перевіряє CRC кожного запиту."""
     total_fails = 0
-    for table_name in ("BMS_QUERY_TABLE", "BMS_SEARCH_QUERY_TABLE"):
+    for table_name in ("BMS_QUERY_TABLE", "BMS_SEARCH_QUERY_TABLE", "BMS_WAKEUP_QUERY_TABLE"):
         m = re.search(rf"{table_name}\[16\]\[8\]\s*=\s*\{{(.*?)\}};", src, re.S)
         if not m:
             print(f"FAIL: {table_name} не знайдено в src/main.cpp")
@@ -194,7 +198,7 @@ def verify_queries(src: str) -> int:
 
 
 def build_synthetic_frame(current_raw: int = 0) -> bytes:
-    """Синтетичний кадр зі значень дампа 08.10.2026 (ANALYSIS.md, Q3).
+    """Синтетичний кадр зі значень дампа 08.10.2026 (tools/dumps/2026-10-08_pack01.hex).
 
     Невідомі з публікації реєстри = 0. Це ФІКСТУРА для регресії парсера,
     не literalний дамп; реальний дамп зберігається поруч у tools/dumps/.

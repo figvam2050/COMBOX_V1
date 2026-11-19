@@ -62,13 +62,10 @@ class CanFrame:
 # ---------------------------------------------------------------------------
 
 PROT_B0_MAP = [
-    (0x01, "Cell_OV"),
-    (0x02, "Pack_OV"),
-    (0x04, "Cell_UV"),
-    (0x08, "Pack_UV"),
-    (0x10, "Charge_OT"),
-    (0x20, "Charge_UT"),
-    (0x40, "Discharge_OT"),
+    (0x02, "Cell/Pack_OV"),
+    (0x04, "Cell/Pack_UV"),
+    (0x08, "Cell_OT"),
+    (0x10, "Cell_UT"),
     (0x80, "Discharge_OC"),
 ]
 
@@ -77,10 +74,88 @@ PROT_B1_MAP = [
     (0x08, "System_Error"),
 ]
 
+# Deye PCS CAN V3.3 / DY001 0x359 Tables 1..7
+DEYE_T1_MAP = [
+    (0x01, "Cell_OV"),
+    (0x02, "Cell_UV"),
+    (0x04, "Module_OV"),
+    (0x08, "Module_UV"),
+    (0x10, "Charge_OC"),
+    (0x20, "Discharge_OC"),
+    (0x40, "Charge_OT"),
+    (0x80, "Charge_UT"),
+]
+
+DEYE_T2_MAP = [
+    (0x01, "Cell_Diff"),
+    (0x02, "Temp_Diff"),
+    (0x04, "MOS_OT"),
+    (0x08, "AFE_OCD"),
+    (0x10, "Discharge_OT"),
+    (0x20, "Discharge_UT"),
+    (0x40, "Heat_OT"),
+]
+
+DEYE_T3_MAP = [
+    (0x01, "AFE_UV"),
+    (0x02, "AFE_OV"),
+    (0x04, "AFE_OCC"),
+    (0x08, "AFE_SCD"),
+    (0x10, "AFE_UT"),
+    (0x20, "AFE_OT"),
+    (0x40, "AFE_SCDL"),
+    (0x80, "AFE_OCDL"),
+]
+
+DEYE_T4_MAP = [
+    (0x01, "Volt_Fail"),
+    (0x02, "MOS_SC"),
+    (0x04, "EEPROM_Err"),
+    (0x08, "AFE/Curr_Fail"),
+    (0x10, "Temp_Fail"),
+    (0x20, "Int_Comm_Fail"),
+    (0x40, "PCS_Comm_Fail"),
+    (0x80, "Addr_Repeat"),
+]
+
+DEYE_T5_MAP = [
+    (0x01, "Cell_HV"),
+    (0x02, "Cell_LV"),
+    (0x04, "Module_HV"),
+    (0x08, "Module_LV"),
+    (0x10, "Charge_HC"),
+    (0x20, "Discharge_HC"),
+    (0x40, "Charge_HT"),
+    (0x80, "Charge_LT"),
+]
+
+DEYE_T6_MAP = [
+    (0x01, "Cell_Diff_Warn"),
+    (0x02, "Temp_Diff_Warn"),
+    (0x04, "MOS_HT"),
+    (0x08, "HeatMosAdhesion"),
+    (0x10, "HeatError"),
+    (0x20, "Discharge_HT"),
+    (0x40, "Discharge_LT"),
+    (0x80, "Heat_HT"),
+]
+
+DEYE_T7_MAP = [
+    (0x01, "OverConnectTemp"),
+    (0x02, "OverTerminalTemp"),
+    (0x04, "PreCharge_Fail"),
+    (0x08, "Reverse"),
+    (0x10, "FUSE_Blown"),
+    (0x20, "Volt_OpenWire"),
+    (0x40, "Chg_Volt_Low"),
+    (0x80, "Temp_OpenWire"),
+]
+
 FLAGS_MAP = [
     (0x80, "Charge_EN"),
     (0x40, "Discharge_EN"),
-    (0x10, "Req_Force_Charge"),
+    (0x20, "Force_Chg_I"),
+    (0x10, "Force_Chg_II"),
     (0x08, "Req_Full_Charge(BAL)"),
 ]
 
@@ -129,8 +204,23 @@ def parse_slcan_line(line: str) -> Optional[CanFrame]:
     return None
 
 
-def decode_can_frame(f: CanFrame) -> str:
-    """Декодує CAN-кадр протоколу Deye/Pylontech у зрозумілий людині текст."""
+def detect_proto_hint(f: CanFrame, current_proto: str) -> str:
+    """Автоматично визначає протокол ('deye' або 'pylon') за сигнатурами кадрів."""
+    cid, d = f.can_id, f.data
+    if cid == 0x35E and len(d) >= 4:
+        if d.startswith(b"DY001") or d.startswith(b"DEYE"):
+            return "deye"
+        if d.startswith(b"PYLON"):
+            return "pylon"
+    if cid in (0x361, 0x363, 0x364, 0x371) or (0x110 <= cid <= 0x65F and (cid & 0x0F0) in (0x110, 0x150, 0x200, 0x400, 0x500, 0x600, 0x650)):
+        return "deye"
+    if cid == 0x359 and len(d) >= 7 and d[5:7] == b"PN":
+        return "pylon"
+    return current_proto
+
+
+def decode_can_frame(f: CanFrame, proto: str = "deye") -> str:
+    """Декодує CAN-кадр протоколу Deye V3.3 (DY001) або Pylontech у зрозумілий текст."""
     cid = f.can_id
     d = f.data
 
@@ -154,31 +244,99 @@ def decode_can_frame(f: CanFrame) -> str:
         return f"BATTERY: V={v:.2f}V I={i:+.1f}A ({mode}) T={t:+.1f}°C"
 
     elif cid == 0x359 and len(d) >= 7:
-        b0, b1, b2, b3, packs = d[0], d[1], d[2], d[3], d[4]
-        marker = chr(d[5]) + chr(d[6]) if len(d) >= 7 else ""
-        p_str = []
-        if b0:
-            p_str.append(decode_flags(b0, PROT_B0_MAP))
-        if b1:
-            p_str.append(decode_flags(b1, PROT_B1_MAP))
-        prot_desc = "; ".join(p_str) if p_str else "None"
-
-        a_str = []
-        if b2:
-            a_str.append(decode_flags(b2, PROT_B0_MAP))
-        if b3:
-            a_str.append(decode_flags(b3, PROT_B1_MAP))
-        alarm_desc = "; ".join(a_str) if a_str else "None"
-
-        return f"ALARMS: Packs={packs} Mark='{marker}' Prot=[{prot_desc}] Warn=[{alarm_desc}]"
+        if proto == "pylon" or d[5:7] == b"PN":
+            b0, b1, b2, b3, packs = d[0], d[1], d[2], d[3], d[4]
+            marker = chr(d[5]) + chr(d[6])
+            p_str = [decode_flags(b0, PROT_B0_MAP)] if b0 else []
+            if b1:
+                p_str.append(decode_flags(b1, PROT_B1_MAP))
+            a_str = [decode_flags(b2, PROT_B0_MAP)] if b2 else []
+            if b3:
+                a_str.append(decode_flags(b3, PROT_B1_MAP))
+            prot_desc = "; ".join(p_str) if p_str else "None"
+            alarm_desc = "; ".join(a_str) if a_str else "None"
+            return f"ALARMS(PYLON): Packs={packs} Mark='{marker}' Prot=[{prot_desc}] Warn=[{alarm_desc}]"
+        else:
+            p_str = []
+            for idx, m in ((0, DEYE_T1_MAP), (1, DEYE_T2_MAP), (2, DEYE_T3_MAP), (3, DEYE_T4_MAP)):
+                if d[idx]:
+                    p_str.append(decode_flags(d[idx], m))
+            if d[6]:
+                p_str.append(decode_flags(d[6], DEYE_T7_MAP))
+            a_str = []
+            for idx, m in ((4, DEYE_T5_MAP), (5, DEYE_T6_MAP)):
+                if d[idx]:
+                    a_str.append(decode_flags(d[idx], m))
+            prot_desc = "; ".join(p_str) if p_str else "None"
+            alarm_desc = "; ".join(a_str) if a_str else "None"
+            return f"ALARMS(DY_V33): Prot=[{prot_desc}] Warn=[{alarm_desc}]"
 
     elif cid == 0x35C and len(d) >= 1:
         req = decode_flags(d[0], FLAGS_MAP)
         return f"REQUESTS: [0x{d[0]:02X}] {req}"
 
     elif cid == 0x35E:
+        if len(d) >= 8 and (d.startswith(b"DY001") or d.startswith(b"DEYE")):
+            tag = d[0:5].decode("ascii", errors="replace").rstrip("\x00")
+            cap_ah = u16le(d[6:8]) / 10.0
+            return f"BRAND: '{tag}' Packs={d[5]} Cap={cap_ah:.1f}Ah"
         brand = d.decode("ascii", errors="replace").rstrip("\x00").strip()
         return f"BRAND: '{brand}'"
+
+    elif cid == 0x361 and len(d) >= 8:
+        cmax, cmin = u16le(d[0:2]), u16le(d[2:4])
+        tmax, tmin = i16le(d[4:6]) / 10.0, i16le(d[6:8]) / 10.0
+        return f"CELL_EXTREMES: Cell={cmin}..{cmax}mV Temp={tmin:+.1f}..{tmax:+.1f}°C"
+
+    elif cid == 0x363 and len(d) >= 4:
+        return f"DEYE_CFG: SW=0x{u16le(d[0:2]):04X} HW=0x{u16le(d[2:4]):04X}"
+
+    elif cid == 0x364 and len(d) >= 5:
+        return f"PACK_STATUS: Norm={d[0]} NoChg={d[1]} NoDsg={d[2]} Lost={d[3]} Total={d[4]}"
+
+    elif cid == 0x371 and len(d) >= 4:
+        ccl = u16le(d[0:2]) / 10.0
+        dcl = u16le(d[2:4]) / 10.0
+        return f"GRID_LIMITS: CCL={ccl:.1f}A DCL={dcl:.1f}A"
+
+    elif 0x110 <= cid <= 0x11F and len(d) >= 8:
+        pidx = cid - 0x110
+        mos = d[7]
+        return f"PACK[{pidx}]_STAT: MOS=0x{mos:02X} ({'OK' if mos else 'PROT'})"
+
+    elif 0x150 <= cid <= 0x15F and len(d) >= 8:
+        pidx = cid - 0x150
+        v = u16le(d[0:2]) / 10.0
+        i = i16le(d[2:4]) / 10.0
+        soc = u16le(d[4:6]) / 10.0
+        soh = u16le(d[6:8]) / 10.0
+        return f"PACK[{pidx}]_VI: V={v:.1f}V I={i:+.1f}A SOC={soc:.1f}% SOH={soh:.1f}%"
+
+    elif 0x200 <= cid <= 0x20F and len(d) >= 8:
+        pidx = cid - 0x200
+        cmax, cmin = u16le(d[0:2]), u16le(d[2:4])
+        tmax, tmin = i16le(d[4:6]) / 10.0, i16le(d[6:8]) / 10.0
+        return f"PACK[{pidx}]_CELL: Cell={cmin}..{cmax}mV Temp={tmin:+.1f}..{tmax:+.1f}°C"
+
+    elif 0x400 <= cid <= 0x40F and len(d) >= 4:
+        pidx = cid - 0x400
+        cyc = u16le(d[2:4])
+        return f"PACK[{pidx}]_CYCLES: {cyc}"
+
+    elif 0x500 <= cid <= 0x50F and len(d) >= 8:
+        pidx = cid - 0x500
+        fw = d[3:8].decode("ascii", errors="replace").rstrip("\x00")
+        return f"PACK[{pidx}]_FW: '{fw}'"
+
+    elif 0x600 <= cid <= 0x60F:
+        pidx = cid - 0x600
+        model = d.decode("ascii", errors="replace").rstrip("\x00")
+        return f"PACK[{pidx}]_MODEL: '{model}'"
+
+    elif 0x650 <= cid <= 0x65F:
+        pidx = cid - 0x650
+        ser = d.decode("ascii", errors="replace").rstrip("\x00")
+        return f"PACK[{pidx}]_SN: '{ser}'"
 
     elif cid == 0x305 and len(d) >= 6:
         # PCS Heartbeat / Time broadcast: ss mm hh DD MM YY
@@ -269,22 +427,23 @@ class SlcanBus:
 
     def read_frame(self, rx_buf: bytes) -> Tuple[Optional[CanFrame], bytes]:
         """Читає та повертає наступний валідний кадр із вхідного буфера."""
-        if not self.ser or not self.ser.is_open:
-            return None, rx_buf
-
-        chunk = self.ser.read(256)
-        if chunk:
+        while True:
+            if b"\r" in rx_buf:
+                line_bytes, rx_buf = rx_buf.split(b"\r", 1)
+                line = line_bytes.decode("ascii", errors="replace").strip()
+                if line:
+                    frame = parse_slcan_line(line)
+                    if frame:
+                        frame.timestamp = time.monotonic()
+                        return frame, rx_buf
+                continue
+            if not self.ser or not self.ser.is_open:
+                return None, rx_buf
+            avail = getattr(self.ser, "in_waiting", 0) or 256
+            chunk = self.ser.read(min(avail, 1024))
+            if not chunk:
+                return None, rx_buf
             rx_buf += chunk
-
-        if b"\r" in rx_buf:
-            line_bytes, rx_buf = rx_buf.split(b"\r", 1)
-            line = line_bytes.decode("ascii", errors="replace").strip()
-            if line:
-                frame = parse_slcan_line(line)
-                if frame:
-                    frame.timestamp = time.monotonic()
-                    return frame, rx_buf
-        return None, rx_buf
 
 
 # ---------------------------------------------------------------------------
@@ -298,29 +457,40 @@ def run_selftest() -> int:
 
     test_vectors = [
         # 0x351: CVL=54.0V (0x021C), CCL=100.0A (0x03E8), DCL=100.0A (0x03E8), DVL=45.0V (0x01C2)
-        ("t35181C02E803E803C201", 0x351, 8, "CVL=54.0V CCL=100.0A DCL=100.0A DVL=45.0V"),
+        ("t35181C02E803E803C201", 0x351, 8, "deye", "CVL=54.0V CCL=100.0A DCL=100.0A DVL=45.0V"),
         # 0x355: SOC=98% (0x0062), SOH=100% (0x0064)
-        ("t355462006400", 0x355, 4, "SOC=98% SOH=100%"),
+        ("t355462006400", 0x355, 4, "deye", "SOC=98% SOH=100%"),
         # 0x356: V=51.20V (0x1400 = 5120), I=-15.0A (0xFF6A = -150), T=23.5°C (0x00EB = 235)
-        ("t356600146AFFEB00", 0x356, 6, "V=51.20V I=-15.0A (CHG) T=+23.5°C"),
-        # 0x359: Cell_OV (b0=0x01), System_Error (b1=0x08), 2 packs, 'PN'
-        ("t35980108000002504E00", 0x359, 8, "Packs=2 Mark='PN' Prot=[Cell_OV; System_Error] Warn=[None]"),
+        ("t356600146AFFEB00", 0x356, 6, "deye", "V=51.20V I=-15.0A (CHG) T=+23.5°C"),
+        # 0x359 PYLON: Cell/Pack_OV (b0=0x02), System_Error (b1=0x08), 2 packs, 'PN'
+        ("t35980208000002504E00", 0x359, 8, "pylon", "ALARMS(PYLON): Packs=2 Mark='PN' Prot=[Cell/Pack_OV; System_Error] Warn=[None]"),
+        # 0x359 Deye V3.3: b0=0x01(Cell_OV), b1=0x04(MOS_OT), b2=0x08(AFE_SCD), b3=0x01(Volt_Fail), b4=0x01(Cell_HV), b6=0x08(Reverse)
+        ("t35980104080101000800", 0x359, 8, "deye", "ALARMS(DY_V33): Prot=[Cell_OV; MOS_OT; AFE_SCD; Volt_Fail; Reverse] Warn=[Cell_HV]"),
         # 0x35C: Charge_EN (0x80) + Discharge_EN (0x40) + Req_Full_Charge (0x08) = 0xC8
-        ("t35C2C800", 0x35C, 2, "REQUESTS: [0xC8] Charge_EN, Discharge_EN, Req_Full_Charge(BAL)"),
-        # 0x35E: 'PYLON   ' (50 59 4C 4F 4E 00 00 00)
-        ("t35E850594C4F4E000000", 0x35E, 8, "BRAND: 'PYLON'"),
+        ("t35C2C800", 0x35C, 2, "deye", "REQUESTS: [0xC8] Charge_EN, Discharge_EN, Req_Full_Charge(BAL)"),
+        # 0x35E PYLON & DY001
+        ("t35E850594C4F4E000000", 0x35E, 8, "pylon", "BRAND: 'PYLON'"),
+        ("t35E8445930303104A00F", 0x35E, 8, "deye", "BRAND: 'DY001' Packs=4 Cap=400.0Ah"),
+        # 0x361 / 0x364 / 0x110 / 0x150 / 0x200 / 0x400 / 0x650 Deye V3.3 per-pack
+        ("t36184C0D2B0DD200BE00", 0x361, 8, "deye", "CELL_EXTREMES: Cell=3371..3404mV Temp=+19.0..+21.0°C"),
+        ("t36480400000004000000", 0x364, 8, "deye", "PACK_STATUS: Norm=4 NoChg=0 NoDsg=0 Lost=0 Total=4"),
+        ("t11080000000000000031", 0x110, 8, "deye", "PACK[0]_STAT: MOS=0x31 (OK)"),
+        ("t15080B0228008F02DA03", 0x150, 8, "deye", "PACK[0]_VI: V=52.3V I=+4.0A SOC=65.5% SOH=98.6%"),
+        ("t2008CC0CC90C8C008200", 0x200, 8, "deye", "PACK[0]_CELL: Cell=3273..3276mV Temp=+13.0..+14.0°C"),
+        ("t40080200830100000900", 0x400, 8, "deye", "PACK[0]_CYCLES: 387"),
+        ("t65084342303030303031", 0x650, 8, "deye", "PACK[0]_SN: 'CB000001'"),
         # 0x305: PCS Heartbeat 2026-11-03 10:25:30 (ss=30, mm=25, hh=10, DD=03, MM=11, YY=26)
-        ("t30561E190A030B1A", 0x305, 6, "PCS_TIME: 2026-11-03 10:25:30"),
+        ("t30561E190A030B1A", 0x305, 6, "deye", "PCS_TIME: 2026-11-03 10:25:30"),
     ]
 
     passed = 0
-    for raw, exp_id, exp_dlc, exp_substr in test_vectors:
+    for raw, exp_id, exp_dlc, proto, exp_substr in test_vectors:
         frame = parse_slcan_line(raw)
         assert frame is not None, f"Помилка розбору SLCAN: {raw}"
         assert frame.can_id == exp_id, f"ID розійшовся: 0x{frame.can_id:X} != 0x{exp_id:X}"
         assert frame.dlc == exp_dlc, f"DLC розійшовся: {frame.dlc} != {exp_dlc}"
 
-        desc = decode_can_frame(frame)
+        desc = decode_can_frame(frame, proto=proto)
         assert exp_substr in desc, f"Декод не містить '{exp_substr}':\n  Отримано: {desc}"
         print(f"[OK] 0x{frame.can_id:03X} -> {desc}")
         passed += 1
@@ -341,6 +511,7 @@ def main() -> int:
     parser.add_argument("-p", "--port", type=str, default=None, help="COM-порт адаптера (наприклад /dev/cu.usbmodem...)")
     parser.add_argument("-l", "--listen-only", action="store_true", help="Режим Listen-Only (без генерації ACK)")
     parser.add_argument("--speed", type=str, default="500k", choices=["125k", "250k", "500k", "1000k"], help="Швидкість CAN (за замовчуванням 500k)")
+    parser.add_argument("--proto", type=str, default="auto", choices=["auto", "deye", "pylon"], help="Протокол 0x359/0x35E (auto, deye, pylon)")
     parser.add_argument("--raw", action="store_true", help="Виводити сирі SLCAN рядки поруч із декодом")
     parser.add_argument("--duration", type=float, default=None, help="Тривалість запису в секундах")
     parser.add_argument("-o", "--out", type=str, default=None, help="Шлях до файлу логу")
@@ -410,6 +581,7 @@ def main() -> int:
     print("Слухаю CAN-шину... Натисніть Ctrl-C для зупинки.")
     print("-" * 75)
 
+    active_proto = "deye" if args.proto == "auto" else args.proto
     try:
         while True:
             now = time.monotonic()
@@ -419,8 +591,10 @@ def main() -> int:
             frame, rx_buf = bus.read_frame(rx_buf)
             if frame:
                 frames_count += 1
+                if args.proto == "auto":
+                    active_proto = detect_proto_hint(frame, active_proto)
                 elapsed = frame.timestamp - t0
-                decode = decode_can_frame(frame)
+                decode = decode_can_frame(frame, proto=active_proto)
                 raw_info = f" | {frame.raw}" if args.raw else ""
                 line_str = f"[{elapsed:8.3f}s]  0x{frame.can_id:03X} [{frame.dlc}]  {decode}{raw_info}"
                 print(line_str, flush=True)
